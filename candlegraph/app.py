@@ -4,14 +4,14 @@ import threading
 import uvicorn
 from fastapi import FastAPI
 from strawberry.fastapi import GraphQLRouter
-from foundation.schema import chart_schema
-from foundation.subgraph_client import SubgraphClient
-from foundation.dba import db_manager,  get_latest_timestamp, delete_older_data
-from foundation.tokens import supported_tokens
-from foundation.utils.logging_utils import service_logger
-from foundation.settings import LOOKBACK_DAYS, DATA_POLL_INTERVAL
+from candlegraph.schema import chart_schema
+from candlegraph.subgraph_client import SubgraphClient
+from candlegraph.dba import db_manager,  get_latest_timestamp, delete_older_data
+from candlegraph.tokens import supported_tokens
+from candlegraph.utils.logging_utils import service_logger
+from candlegraph.settings import LOOKBACK_DAYS, DATA_POLL_INTERVAL
 from datetime import datetime, timedelta
-from foundation.settings import PERSISTANCE_MODE
+from candlegraph.settings import PERSISTANCE_MODE
 from apscheduler.schedulers.background import BackgroundScheduler
 
 app = FastAPI()

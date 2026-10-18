@@ -3,35 +3,35 @@ version: "3.9"
 services:
   postgres:
     image: postgres:16.2
-    container_name: foundation_postgres
+    container_name: candlegraph_postgres
     command: postgres -c "max_connections=1024"
     environment:
       SERVICE_NAME: "postgres"
-      POSTGRES_DB: "foundation"
-      POSTGRES_USER: "foundation"
-      POSTGRES_PASSWORD: "foundation"
-      POSTGRES_SCHEMA: "foundation"
+      POSTGRES_DB: "candlegraph"
+      POSTGRES_USER: "candlegraph"
+      POSTGRES_PASSWORD: "candlegraph"
+      POSTGRES_SCHEMA: "candlegraph"
     ports:
       - 5432:5432
     networks:
-        - foundation
+        - candlegraph
     volumes:
       - ./sql/create_schema.sql:/docker-entrypoint-initdb.d/create_schema.sql
 
-  foundation:
-    image: foundation:latest
+  candlegraph:
+    image: candlegraph:latest
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: foundation
+    container_name: candlegraph
     ports:
       - 8000:8000
     networks:
-      - foundation
+      - candlegraph
     depends_on:
-      - foundation_postgres
-      - foundation_redis
+      - candlegraph_postgres
+      - candlegraph_redis
 
 networks:
-    foundation:
+    candlegraph:
         driver: bridge

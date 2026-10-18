@@ -1,4 +1,4 @@
-"""foundation_backend
+"""initial_schema
 
 Revision ID: 4a4f4da52183
 Revises: 
@@ -33,9 +33,9 @@ def upgrade() -> None:
         sa.Column("period_start_unix", sa.BigInteger, default=0),
         sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.UniqueConstraint("token_id", "price_usd", "timestamp", name="uix_token_id_timestamp"),
-        schema="foundation"
+        schema="candlegraph"
     )
-    op.create_index('ix_token_id_timestamp', 'token_hours_data', ['token_id', 'timestamp'], schema="foundation")
+    op.create_index('ix_token_id_timestamp', 'token_hours_data', ['token_id', 'timestamp'], schema="candlegraph")
 
     op.create_table(
         'token',
@@ -45,11 +45,11 @@ def upgrade() -> None:
         sa.Column("total_supply", sa.String, nullable=False),
         sa.Column("volume_usd", sa.String, nullable=False),
         sa.Column("decimals", sa.String, nullable=False),
-        schema="foundation"
+        schema="candlegraph"
     )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_token_id_timestamp", table_name="token_hours_data", schema="foundation")
-    op.drop_table("token_hours_data", schema="foundation")
+    op.drop_index("ix_token_id_timestamp", table_name="token_hours_data", schema="candlegraph")
+    op.drop_table("token_hours_data", schema="candlegraph")
     op.drop_table("token")

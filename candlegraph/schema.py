@@ -4,9 +4,9 @@ import strawberry
 from datetime import datetime
 from psycopg2 import sql
 from typing import List, Tuple
-from foundation.dba import db_manager, chart_query, get_token_metadata
-from foundation.tokens import supported_tokens
-from foundation.helpers import format_chart_data
+from candlegraph.dba import db_manager, chart_query, get_token_metadata
+from candlegraph.tokens import supported_tokens
+from candlegraph.helpers import format_chart_data
 
 
 symbol_map = {v: k for k, v in supported_tokens.items()}

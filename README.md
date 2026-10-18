@@ -23,7 +23,7 @@ docker-compose up -d postgres
 poetry shell
 poetry install
 alembic upgrade head
-python -m foundation.app
+python -m candlegraph.app
 ```
 
 ## DB Schema Management
@@ -44,13 +44,13 @@ alembic downgrade -1
 As usual this needs to be run from project root as alembic is part of `pyproject.toml`
 ## Supported Tokens
 
-At the moment tokens are added to the `foundation/tokens.py` file in a dictionary with their `token_id` and `symbol`. If the user wants to add support more tokens, simply add the `token_id` and `symbol` to the existing dictionary and rebuild the docker image. For example:
+At the moment tokens are added to the `candlegraph/tokens.py` file in a dictionary with their `token_id` and `symbol`. If the user wants to add support more tokens, simply add the `token_id` and `symbol` to the existing dictionary and rebuild the docker image. For example:
 ```sh
-docker build . -t foundation:latest
+docker build . -t candlegraph:latest
 ```
 ## Environment Variables
 
-> **Note on credentials:** the database user/password `foundation`/`foundation` in `docker-compose.yaml`, `foundation/settings.py` and `alembic.ini` are throwaway defaults for the local Docker Postgres only. They are not real secrets. For anything beyond local development, override them with environment variables; see `.env.example` for the full list.
+> **Note on credentials:** the database user/password `candlegraph`/`candlegraph` in `docker-compose.yaml`, `candlegraph/settings.py` and `alembic.ini` are throwaway defaults for the local Docker Postgres only. They are not real secrets. For anything beyond local development, override them with environment variables; see `.env.example` for the full list.
 
 All environment variables are using default values at the moment. Most of them are self explanatory (i.e. DB variables). Following contains the significance of less obvious ones:
 

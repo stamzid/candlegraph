@@ -7,10 +7,10 @@ import datetime
 
 from gql import gql, Client
 from gql.transport.aiohttp import AIOHTTPTransport
-from foundation.settings import TRANSPORT_URL
-from foundation.utils.logging_utils import service_logger
-from foundation.dba import DatabaseManager, insert_token_hour_sql, insert_token_sql
-from foundation.helpers import add_symbol
+from candlegraph.settings import TRANSPORT_URL
+from candlegraph.utils.logging_utils import service_logger
+from candlegraph.dba import DatabaseManager, insert_token_hour_sql, insert_token_sql
+from candlegraph.helpers import add_symbol
 
 
 class SubgraphClient:

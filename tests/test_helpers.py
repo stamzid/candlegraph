@@ -3,7 +3,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from foundation.helpers import add_symbol, format_chart_data
+from candlegraph.helpers import add_symbol, format_chart_data
 
 
 class TestHelpers(unittest.TestCase):

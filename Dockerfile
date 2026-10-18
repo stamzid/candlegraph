@@ -1,7 +1,7 @@
 # Base Image
 FROM python:3.11-slim as base
 ENV PYTHONUNBUFFERED=true
-WORKDIR /foundation
+WORKDIR /candlegraph
 
 # Builder Stage
 FROM base as builder
@@ -14,14 +14,14 @@ RUN poetry install --no-interaction --no-ansi -vvv
 
 # Runtime Stage
 FROM base as runtime
-COPY --from=builder /foundation/.venv /foundation/.venv
-ENV PATH="/foundation/.venv/bin:$PATH"
+COPY --from=builder /candlegraph/.venv /candlegraph/.venv
+ENV PATH="/candlegraph/.venv/bin:$PATH"
 ENV GRPC_DNS_RESOLVER=native
-COPY ./ /foundation
+COPY ./ /candlegraph
 
 # Use entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 ENTRYPOINT ["./entrypoint.sh"]
-CMD ["python", "-m", "foundation.app"]
+CMD ["python", "-m", "candlegraph.app"]
 EXPOSE 8000
 

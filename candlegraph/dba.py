@@ -6,13 +6,13 @@ from psycopg2 import pool, sql
 from psycopg2.extras import DictCursor
 import traceback
 from contextlib import contextmanager
-from foundation.utils.logging_utils import service_logger
-from foundation.settings import MIN_CONN, MAX_CONN
+from candlegraph.utils.logging_utils import service_logger
+from candlegraph.settings import MIN_CONN, MAX_CONN
 
-import foundation.settings as Settings
+import candlegraph.settings as Settings
 
 
-insert_token_hour_sql = sql.SQL("""INSERT INTO foundation.token_hours_data
+insert_token_hour_sql = sql.SQL("""INSERT INTO candlegraph.token_hours_data
 (
     token_id,
     symbol,
@@ -26,7 +26,7 @@ insert_token_hour_sql = sql.SQL("""INSERT INTO foundation.token_hours_data
 ) VALUES (%(id)s,%(symbol)s,%(open)s,%(high)s,%(low)s,%(close)s,%(priceUSD)s,%(periodStartUnix)s,%(timestamp)s) RETURNING id;""")
 
 
-insert_token_sql = sql.SQL("""INSERT INTO foundation.token
+insert_token_sql = sql.SQL("""INSERT INTO candlegraph.token
 (
     id,
     name,
@@ -41,13 +41,13 @@ DO UPDATE SET
     decimals = EXCLUDED.decimals
 RETURNING id;""")
 
-get_token_metadata = sql.SQL("""SELECT * from foundation.token WHERE id =%(token_id)s""")
+get_token_metadata = sql.SQL("""SELECT * from candlegraph.token WHERE id =%(token_id)s""")
 get_latest_timestamp = sql.SQL("""
 SELECT
     token_id,
     MAX(period_start_unix) AS latest_unix
 FROM
-    foundation.token_hours_data
+    candlegraph.token_hours_data
 GROUP BY token_id;
 """)
 
@@ -61,7 +61,7 @@ chart_query = sql.SQL("""
         MIN(low) AS min_low,
         AVG(price_usd) AS avg_price_usd
     FROM
-        foundation.token_hours_data
+        candlegraph.token_hours_data
     WHERE
         token_id = %(token_id)s
     GROUP BY
@@ -70,7 +70,7 @@ chart_query = sql.SQL("""
         interval_start
 """)
 
-delete_older_data = sql.SQL("""DELETE FROM foundation.token_hours_data WHERE period_start_unix < %(interval_start)s""")
+delete_older_data = sql.SQL("""DELETE FROM candlegraph.token_hours_data WHERE period_start_unix < %(interval_start)s""")
 
 
 # Singleton pattern implemented to ensure one instance of the class used throughout
