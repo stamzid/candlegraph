@@ -50,11 +50,13 @@ docker build . -t foundation:latest
 ```
 ## Environment Variables
 
+> **Note on credentials:** the database user/password `foundation`/`foundation` in `docker-compose.yaml`, `foundation/settings.py` and `alembic.ini` are throwaway defaults for the local Docker Postgres only. They are not real secrets. For anything beyond local development, override them with environment variables; see `.env.example` for the full list.
+
 All environment variables are using default values at the moment. Most of them are self explanatory (i.e. DB variables). Following contains the significance of less obvious ones:
 
 * MIN_CONN: Minimum number of connections in DB connection pool.
 * MAX_CONN: Maximum number of connections in DB connection pool.
-* LOOKBACK_DAYS: How many days of data to include in query, by default it's 7 days as per requirements.
+* LOOKBACK_DAYS: How many days of data to include in query, default is 7 days.
 * DATA_POLL_INTERVAL: How often data is being polled, at this moment it's every 5 minutes.
 * PERSISTANCE_MODE: Whether to keep or delete the data older than DATA_POLL_INTERVAL. Default is "DELETE", any other value will persist the data.
 
@@ -226,12 +228,10 @@ poetry run pytest tests/test_endpoint.py
 These tests will validate the integration between various components and ensure that the system behaves as expected.
 
 
-Sure, I'll condense the design decision section into a more concise format:
-
 ## Design Decisions
 ### Language and Database
 
-* Python: Foundation stack has python and it is also one of my primary languages (other being Scala)
+* Python: one of my primary languages (the other being Scala), with mature libraries for GraphQL clients and Postgres.
 * PostgreSQL: The data we're dealing with is structured and python has great ORM framework and library for Postgres. Also provides fast read access for complex queries
 
 ### Frameworks
@@ -245,16 +245,3 @@ Sure, I'll condense the design decision section into a more concise format:
 
 ### Testing
 Mainly leveraged popular python testing libraries for both unittest and integration testing.
-
-## Reflection
-
-### What Went Well
-Overall I felt the tools I chose and the way I designed the backend API and Database manager went well for the implementation. Using Strawberry with FastAPI made it very easy to handle the server and gql client is a breeze to use with subgraphs.
-
-### What Could Have Gone Better
-I think initial time I spent on experimenting with Graphene to build the server could be avoided. I went with most number of github stars without checking FastAPI doc which clearly favours Strawberry. Although both are on the recommended libraries on graphql website. In addition, I think the polling algorithm can be improved while scaling. One way would be to have two polling interval for two different kind of data we are fetching with `token` and `tokenHourDatas`.
-
-### Future Improvement
-Depending on the scope, I would probably add an endpoint to add additional token support dynamically. At the moment, it requires a rebuilding of the image which doesn't take long time because of how I designed the docker file with caching but still with an endpoint we could avoid this step. The other thing is I would spend a little more time trying to find more edge cases / data load. In addition, as it can be seen, some coins do not have OHLC data for all time interval, a function that backfills with linear interpolation could be added for the missing intervals.
-
-
