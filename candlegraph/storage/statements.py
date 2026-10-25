@@ -197,6 +197,9 @@ class Statements:
     missing_hours: sql.Composed
     ohlc_violations: sql.Composed
     field_completeness: sql.Composed
+    # agents
+    insert_agent_run: sql.Composed
+    get_recent_agent_runs: sql.Composed
 
 
 @lru_cache(maxsize=4)
@@ -289,10 +292,15 @@ def statements_for(schema: str) -> Statements:
     # The bucket label is the bucket's own start, computed from the interval,
     # not MIN(timestamp) of the rows present. A missing first hour must not
     # shift the candle's reported time.
+    #
+    # time_bucket is TimescaleDB's; on an integer column it is epoch-aligned
+    # and exactly equal to the FLOOR arithmetic this replaced. It is used
+    # because a continuous aggregate can be defined on it and cannot be
+    # defined on the arithmetic. See docs/storage/timescaledb/DESIGN.md.
     chart_query = sql.SQL(
         """
         SELECT
-            to_timestamp(FLOOR(period_start_unix::numeric / %(interval)s) * %(interval)s) AS interval_start,
+            to_timestamp(time_bucket(%(interval)s::bigint, period_start_unix)) AS interval_start,
             array_agg(open ORDER BY period_start_unix) AS opens,
             array_agg(close ORDER BY period_start_unix DESC) AS closes,
             MAX(high) AS max_high,
@@ -307,7 +315,7 @@ def statements_for(schema: str) -> Statements:
         WHERE token_id = %(token_id)s
           AND (%(start_unix)s::bigint IS NULL OR period_start_unix >= %(start_unix)s)
           AND (%(end_unix)s::bigint IS NULL OR period_start_unix < %(end_unix)s)
-        GROUP BY FLOOR(period_start_unix::numeric / %(interval)s)
+        GROUP BY time_bucket(%(interval)s::bigint, period_start_unix)
         ORDER BY interval_start
         """
     ).format(ns=ns)
@@ -508,6 +516,33 @@ def statements_for(schema: str) -> Statements:
         """
     ).format(ns=ns)
 
+    # --- agents ------------------------------------------------------------
+
+    # One row per graph run. Agents never write market data; this table and
+    # the report sinks are their whole write surface.
+    insert_agent_run = sql.SQL(
+        """
+        INSERT INTO {ns}.agent_run (
+            run_id, agent, status, started_at, finished_at, duration_seconds,
+            findings_total, summary, report, findings, detail
+        )
+        VALUES (
+            %(run_id)s, %(agent)s, %(status)s, %(started_at)s, %(finished_at)s, %(duration_seconds)s,
+            %(findings_total)s, %(summary)s, %(report)s, %(findings)s, %(detail)s
+        )
+        RETURNING id
+        """
+    ).format(ns=ns)
+
+    get_recent_agent_runs = sql.SQL(
+        """
+        SELECT * FROM {ns}.agent_run
+        WHERE (%(agent)s::text IS NULL OR agent = %(agent)s)
+        ORDER BY started_at DESC
+        LIMIT %(limit)s
+        """
+    ).format(ns=ns)
+
     return Statements(
         insert_token_hours=insert_token_hours,
         insert_token_hours_template=_TOKEN_HOUR_TEMPLATE,
@@ -537,4 +572,6 @@ def statements_for(schema: str) -> Statements:
         missing_hours=missing_hours,
         ohlc_violations=ohlc_violations,
         field_completeness=field_completeness,
+        insert_agent_run=insert_agent_run,
+        get_recent_agent_runs=get_recent_agent_runs,
     )

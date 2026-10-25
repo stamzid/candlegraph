@@ -7,8 +7,10 @@ notes; it does not restate anything here.
 ## Purpose
 
 candlegraph ingests hourly Uniswap v3 token market data from The Graph into
-PostgreSQL and serves OHLC candles over GraphQL. It is the data foundation for
-a planned analytics, backtesting, and agent layer; see "Roadmap" below.
+PostgreSQL/TimescaleDB and serves OHLC candles over GraphQL. On top of it sit
+a deterministic analytics layer and an agent layer (LangGraph graphs that
+observe the system and post reports). "Roadmap" below says what is delivered
+and what is next; `docs/` says why each piece is shaped the way it is.
 
 ## Commands
 
@@ -35,6 +37,10 @@ a target, and never let CI run something that is not one either.
 | Portfolio | `candlegraph portfolio --risk-free-rate 0.04 --objective max_sharpe` |
 | ARIMA forecast | `candlegraph forecast WETH --auto-order` |
 | Streamlit UI | `make ui` (local) or the `ui` compose service |
+| Run observer, once | `make observe` (in the stack) or `candlegraph observe [--strict]` |
+| CI janitor, once | `make janitor ARGS="--open-pr --strict"` |
+| Agent reports | `make agent-runs` / `make logs-agents` |
+| Agents on a schedule | the `agents` compose service (`candlegraph agents`); the janitor's schedule is `.github/workflows/janitor.yml` |
 | End-to-end against the stack | `make e2e` |
 | New migration | `make revision m="description"` |
 | Apply migrations | `make migrate` |
@@ -79,26 +85,46 @@ candlegraph/
   ui/
     viewmodels.py      Everything the UI computes. Plain Python, fully tested.
     app.py             The Streamlit script: widgets and charts only.
+  agents/              LangGraph graphs. Readers and reporters; never writers of market data.
+    base.py            Severity, Finding, AgentReport: the vocabulary every graph speaks.
+    shell.py           Subprocess runner behind a Protocol, plus secret redaction.
+    narrator.py        Findings -> summary paragraph. Template by default; Claude when configured.
+    reporting.py       Markdown rendering and the sinks: log, ledger, file, webhook, github.
+    ledger.py          The agent_run table.
+    scheduler.py       APScheduler wiring and the `candlegraph agents` process.
+    observer/          Stale data, gaps on liquid tokens, metric drift. assess.py is pure.
+    janitor/           Run the checks, apply mechanical fixes, re-check, draft a PR.
   utils/
     logging_utils.py   Logger setup.
 alembic/versions/    Migrations. The schema name comes from settings.
 config/tokens.yaml   The tokens this deployment tracks.
+docs/<area>/<topic>/DESIGN.md   Design documents. Why, not how; `docs/README.md` indexes them.
+  roadmap/           Delivered stages, next stages, and each exit criterion.
+  storage/           TimescaleDB adoption, and which tables are hypertables.
+  agents/            The agent framework, the observer, and the janitor.
 tests/unit/          Offline. No database, no network. Mirrors the package layout.
-tests/integration/   Throwaway PostgreSQL (testcontainers, or TEST_DATABASE_URL).
+tests/integration/   Throwaway TimescaleDB (testcontainers, or TEST_DATABASE_URL).
 tests/e2e/           Against a running stack; skipped unless CANDLEGRAPH_E2E_URL is set.
 schema.graphql       Generated. `make sdl`; a test fails if it is stale.
 ```
 
 ## Data model
 
-| Table | Grain | Natural key |
-|---|---|---|
-| `token` | one row per tracked token | `id` |
-| `token_hours_data` | one row per token per hour | `(token_id, period_start_unix)` |
-| `pool` | one row per tracked Uniswap v3 pool | `id` |
-| `pool_hours_data` | one row per pool per hour | `(pool_id, period_start_unix)` |
-| `ingest_run` | one row per ingest run | `run_id` |
-| `signal` | one row per strategy, symbol and bar | `(strategy, symbol, period_start_unix)` |
+| Table | Grain | Natural key | Storage |
+|---|---|---|---|
+| `token` | one row per tracked token | `id` | plain |
+| `token_hours_data` | one row per token per hour | `(token_id, period_start_unix)` | **hypertable** |
+| `pool` | one row per tracked Uniswap v3 pool | `id` | plain |
+| `pool_hours_data` | one row per pool per hour | `(pool_id, period_start_unix)` | **hypertable** |
+| `ingest_run` | one row per ingest run | `run_id` | plain |
+| `signal` | one row per strategy, symbol and bar | `(strategy, symbol, period_start_unix)` | **hypertable** |
+| `agent_run` | one row per agent graph run | `run_id` | plain |
+
+The database is **TimescaleDB** (`timescale/timescaledb:2.31.0-pg17`, pinned
+in compose, in CI, and in the testcontainer), not plain PostgreSQL. The three
+series tables are chunked monthly on `period_start_unix`; the state and
+ledger tables are deliberately ordinary tables. See invariant 24 and
+`docs/storage/table-placement/DESIGN.md`.
 
 Pool data is not optional detail: the subgraph carries **no transaction count
 on the token entity at all**, so `tx_count`, per-pair volume, and pool TVL are
@@ -155,6 +181,27 @@ Each of these has a test. Breaking one should break the build, not production.
     `MIN_EXPECTED_COVERAGE`, never by the presence of a gap.
 20. **No secrets in the repo.** `GRAPH_API_KEY` lives in `.env`, which is
     gitignored. `.env.example` documents it with an empty value.
+21. **Agents never write market data.** Their whole write surface is the
+    `agent_run` table and the configured report sinks. A graph that fails
+    still posts a report with status `error`; a sink that fails is logged
+    and skipped, never raised. Output that reaches a report is redacted
+    first.
+22. **Findings are computed; prose is optional.** An agent's status and exit
+    code come from its findings alone. The optional model narrator sees the
+    findings and nothing else, and cannot add, remove, or re-grade one.
+23. **The janitor fixes only what is mechanical.** `fmt-check` and `lint`
+    map to `make fmt`; everything else is reported. It never applies a fix
+    to a tree with uncommitted changes, only stages tracked files, and
+    refuses to commit a path that looks like a secret.
+24. **Series tables are hypertables; state and ledger tables are not.**
+    `token_hours_data`, `pool_hours_data` and `signal` are chunked on
+    `period_start_unix`. `token`, `pool`, `ingest_run` and `agent_run` are
+    plain — the first two have no time coordinate, and `ingest_run` is
+    updated by `run_id`, which on a time-partitioned table would search
+    every chunk. A hypertable requires every unique index to contain the
+    partitioning column, which is why those three primary keys are
+    `(id, period_start_unix)`. Both halves are tested;
+    `docs/storage/table-placement/DESIGN.md` has the rule for a new table.
 
 ## Definition of done
 
@@ -168,6 +215,8 @@ A change is not finished until all of these hold:
 - [ ] `make sdl` has been run if the GraphQL schema changed.
 - [ ] This file is updated if a command, invariant, or layout entry changed.
 - [ ] `README.md` is updated if user-facing behaviour changed.
+- [ ] The matching document in `docs/` is updated if a design decision
+      changed, and its **Status** line still tells the truth.
 
 ## Conventions
 
@@ -183,22 +232,49 @@ A change is not finished until all of these hold:
 
 ## Roadmap
 
-Phases 1 (stabilise), 2 (data model and ingestion) and 3 (deterministic
-analytics) are complete. Phase 3 shipped rolling statistics, mean-variance
-optimisation with a configurable risk-free rate, Bollinger mean reversion,
-walk-forward ARIMA signals, the `signal` table, a vectorised backtester and
-a Streamlit UI; its exit criterion is met by
-`candlegraph signals WETH --store && candlegraph backtest WETH --strategy all`.
+`docs/roadmap/DESIGN.md` is the authoritative version, with the reasoning,
+the diagram, and the design decisions each stage turns on. This is the
+summary. Every stage carries an exit criterion because "done" is otherwise
+unfalsifiable.
 
-Next phases, each with an exit criterion:
+### Delivered
 
-4. **Agent layer.** A CI janitor graph and a run-observer graph (LangGraph).
-   *Exit:* both run on a schedule and post reports.
-5. **Harness.** YAML pipeline specs, an event bus, OpenTelemetry metrics.
-   *Exit:* ingest → validate → analyse → signal as one orchestrated pipeline.
-6. **Knowledge graph and signaller.** Entities for assets, pools, authors, and
-   on-chain events in Postgres with pgvector. Paper trading only.
-   *Exit:* signals carry explanations citing graph context.
+| Stage | What it added | Exit criterion, met |
+|---|---|---|
+| Stabilisation | A clean clone that builds, lints, type-checks and comes up under compose; `Makefile` as the one source of commands. | `make check && make up` |
+| Data model and ingestion | Hourly token and pool data, idempotent upserts, the `ingest_run` ledger, the data-quality report. | `make backfill days=90 && make report` |
+| Deterministic analytics | Rolling statistics, mean-variance portfolios, Bollinger/crossover/ARIMA signals, the `signal` table, a costed and lagged backtester, the Streamlit UI. | `candlegraph signals WETH --store && candlegraph backtest WETH --strategy all` |
+| Agent layer | The run observer and the CI janitor as LangGraph graphs, the `agent_run` ledger, report sinks, the `agents` service and the janitor workflow. | `make observe && make agent-runs` |
+| Time-series storage | The three series tables as TimescaleDB hypertables; state and ledger tables deliberately plain. | `make test-integration` (`test_timescale.py`) |
 
-Phase 2 is where the schema grows. Prefer adding columns and a migration over
-reshaping `token_hours_data`; the natural key is settled.
+### Next
+
+1. **Knowledge graph and signaller.** Entities for assets, pools, sources
+   and documents in Postgres with pgvector; Tavily for web search; news and
+   text augmentation attached to the prices already stored. Paper trading
+   only.
+   *Exit:* `candlegraph signals WETH --explain` prints a rationale citing a
+   retrieved document with a URL and a timestamp, stored with the signal.
+2. **Harness.** YAML pipeline specs, an event bus, OpenTelemetry metrics,
+   and the continuous aggregates deferred from the TimescaleDB migration.
+   *Exit:* one `candlegraph run pipelines/hourly.yaml` executes ingest →
+   validate → analyse → signal as one orchestrated, traced run.
+3. **Traditional markets.** NASDAQ and NYSE equities alongside crypto: a
+   second ingestion adapter and an `instrument` supertype above `token`.
+   Note that invariant 19 inverts here — a missing hour inside a trading
+   session *is* a fault — so coverage becomes calendar-aware.
+   *Exit:* `candlegraph report` shows an NYSE instrument at full coverage
+   across a week containing a market holiday, without flagging it.
+4. **Models and strategies.** Momentum (time-series and cross-sectional),
+   GARCH and other models, and walk-forward evaluation as a command rather
+   than a habit. Invariants 15–17 do not relax.
+   *Exit:* `candlegraph backtest WETH --strategy all` includes momentum, and
+   a walk-forward report covers every registered strategy, net of costs.
+5. **Market-watch agents.** An RSS and feed observer writing into the
+   knowledge graph, and an alerting agent with deduplication and cooldowns.
+   *Exit:* a market event produces exactly one cited alert, and an identical
+   event inside the cooldown produces none.
+
+Prefer adding columns and a migration over reshaping the hourly tables; the
+natural keys are settled. A table added from here gets its placement
+decision recorded in `docs/storage/table-placement/DESIGN.md` first.

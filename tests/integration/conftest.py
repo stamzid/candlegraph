@@ -6,6 +6,9 @@ Two ways to get one, in order of preference:
   a service container).
 * Docker is available, and testcontainers starts one for the session.
 
+Either way it must be a TimescaleDB image, not plain PostgreSQL: the
+migration chain creates hypertables and fails loudly without the extension.
+
 If neither is possible the tier skips rather than fails, so ``pytest`` on a
 machine without Docker still runs the 160-odd offline tests.
 """
@@ -22,6 +25,10 @@ from candlegraph.settings import reset_settings_cache
 from candlegraph.storage import DatabaseManager, set_db
 
 SCHEMA = "candlegraph"
+
+# Must match docker-compose.yaml and the CI service container. The migrations
+# create hypertables, so plain postgres:17 would fail the chain on purpose.
+POSTGRES_IMAGE = "timescale/timescaledb:2.31.0-pg17"
 
 
 def _libpq_url(url: str) -> str:
@@ -42,7 +49,7 @@ def postgres_dsn() -> Iterator[str]:
         pytest.skip("testcontainers is not installed and TEST_DATABASE_URL is unset")
 
     try:
-        container = PostgresContainer("postgres:17", driver=None)
+        container = PostgresContainer(POSTGRES_IMAGE, driver=None)
         container.start()
     except Exception as exc:  # pragma: no cover - depends on the host
         pytest.skip(f"no Docker for a throwaway Postgres and TEST_DATABASE_URL is unset: {exc}")

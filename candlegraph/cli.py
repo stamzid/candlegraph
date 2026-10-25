@@ -1,9 +1,10 @@
 """Command-line entrypoint: ``candlegraph <command>``.
 
-One binary, several roles. The API server, the ingest worker and the UI are
-separate processes in the compose stack; the one-shot commands (``backfill``,
-``report``, ``signals``, ``backtest``, ``portfolio``) are what CI and an
-operator use without starting any of them.
+One binary, several roles. The API server, the ingest worker, the UI and the
+agent scheduler are separate processes in the compose stack; the one-shot
+commands (``backfill``, ``report``, ``signals``, ``backtest``, ``portfolio``,
+``observe``, ``janitor``) are what CI and an operator use without starting
+any of them.
 
 Every analytics command is deterministic: the same stored data and the same
 flags produce the same numbers, which is what makes a reported backtest
@@ -92,7 +93,40 @@ def _parser() -> argparse.ArgumentParser:
     forecast.add_argument("--steps", type=int, default=1, help="periods ahead")
     forecast.add_argument("--confidence", type=float, default=0.95)
 
+    # --- agents ---
+    observe = sub.add_parser("observe", help="run the run-observer agent once and post its report")
+    observe.add_argument("--strict", action="store_true", help="exit non-zero at WARNING or worse")
+    observe.add_argument("--json", action="store_true", help="print the report as JSON instead of Markdown")
+    _add_sinks(observe)
+
+    janitor = sub.add_parser("janitor", help="run the CI janitor agent once and post its report")
+    janitor.add_argument("--strict", action="store_true", help="exit non-zero at WARNING or worse")
+    janitor.add_argument("--json", action="store_true", help="print the report as JSON instead of Markdown")
+    janitor.add_argument(
+        "--open-pr",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="push a branch and draft a PR when fixes changed files (default: JANITOR_OPEN_PR)",
+    )
+    janitor.add_argument(
+        "--checks", default=None, help="comma-separated make targets (default: JANITOR_CHECKS)"
+    )
+    _add_sinks(janitor)
+
+    sub.add_parser("agents", help="run the agents on their schedule until stopped")
+
+    agent_runs = sub.add_parser("agent-runs", help="show recent agent runs from the agent ledger")
+    agent_runs.add_argument("--limit", type=int, default=10)
+    agent_runs.add_argument("--agent", default=None, help="only this agent")
+    agent_runs.add_argument("--show", action="store_true", help="print the newest matching report in full")
+
     return parser
+
+
+def _add_sinks(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--sinks", default=None, help="comma-separated report sinks (default: AGENT_REPORT_SINKS)"
+    )
 
 
 def _add_window(parser: argparse.ArgumentParser) -> None:
@@ -439,6 +473,88 @@ def _forecast(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+# --- agents ----------------------------------------------------------------
+
+
+def _print_report(report: Any, as_json: bool) -> None:
+    from candlegraph.agents.reporting import report_json
+
+    print(report_json(report) if as_json else report.markdown)
+
+
+def _agent_exit(report: Any, strict: bool) -> int:
+    from candlegraph.agents.base import Severity
+
+    if report.error:
+        return 2
+    return 1 if strict and report.at_least(Severity.WARNING) else 0
+
+
+def _sink_names(text: str | None) -> list[str] | None:
+    if text is None:
+        return None
+    return [name.strip() for name in text.split(",") if name.strip()]
+
+
+def _observe(settings: Settings, args: argparse.Namespace) -> int:
+    from candlegraph.agents.observer import run_observer
+    from candlegraph.agents.reporting import build_sinks
+    from candlegraph.storage import get_db
+
+    db = get_db()
+    sinks = build_sinks(settings, db=db, names=_sink_names(args.sinks))
+    report = run_observer(settings, db=db, sinks=sinks)
+    _print_report(report, args.json)
+    return _agent_exit(report, args.strict)
+
+
+def _janitor(settings: Settings, args: argparse.Namespace) -> int:
+    from candlegraph.agents.janitor import run_janitor
+    from candlegraph.agents.reporting import build_sinks
+    from candlegraph.agents.shell import SubprocessShell
+    from candlegraph.storage import get_db
+
+    names = _sink_names(args.sinks)
+    chosen = tuple(names) if names is not None else settings.report_sinks
+    shell = SubprocessShell()
+    db = get_db() if "ledger" in chosen else None
+    sinks = build_sinks(settings, db=db, shell=shell, names=chosen)
+    checks = tuple(_sink_names(args.checks) or ()) or None
+    report = run_janitor(settings, shell=shell, checks=checks, open_pr=args.open_pr, sinks=sinks)
+    _print_report(report, args.json)
+    return _agent_exit(report, args.strict)
+
+
+def _agents(settings: Settings) -> int:
+    from candlegraph.agents.scheduler import run_agents
+
+    run_agents(settings)
+    return 0
+
+
+def _agent_runs(args: argparse.Namespace) -> int:
+    from candlegraph.agents.ledger import recent_agent_runs
+    from candlegraph.storage import get_db
+
+    rows = recent_agent_runs(get_db(), args.limit, args.agent)
+    if not rows:
+        print("no agent runs recorded yet")
+        return 0
+    if args.show:
+        print(rows[0]["report"])
+        return 0
+    print(f"{'finished':<21}{'agent':<10}{'status':<10}{'findings':>9}{'secs':>7}  summary")
+    for row in rows:
+        duration = row["duration_seconds"]
+        elapsed = f"{float(duration):>7.1f}" if duration is not None else f"{'-':>7}"
+        summary = str(row["summary"]).splitlines()[0] if row["summary"] else ""
+        print(
+            f"{row['finished_at']:%Y-%m-%d %H:%M:%S}  {row['agent']:<10}{row['status']:<10}"
+            f"{row['findings_total']:>9}{elapsed}  {summary[:70]}"
+        )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse arguments and dispatch. Returns the process exit code."""
     args = _parser().parse_args(argv)
@@ -472,5 +588,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _portfolio(settings, args)
         case "forecast":
             return _forecast(settings, args)
+        case "observe":
+            return _observe(settings, args)
+        case "janitor":
+            return _janitor(settings, args)
+        case "agents":
+            return _agents(settings)
+        case "agent-runs":
+            return _agent_runs(args)
         case _:  # pragma: no cover - argparse rejects anything else
             raise SystemExit(f"unknown command {args.command!r}")

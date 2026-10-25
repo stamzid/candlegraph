@@ -33,7 +33,8 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17
+        # Must match docker-compose.yaml: the migrations create hypertables.
+        image: timescale/timescaledb:2.31.0-pg17
         env:
           POSTGRES_DB: candlegraph_test
           POSTGRES_USER: candlegraph
@@ -127,6 +128,14 @@ jobs:
 
       - name: The UI is healthy
         run: curl --fail --silent --show-error http://localhost:8501/_stcore/health
+
+      - name: The run observer reports against the stack
+        # Not --strict: a fresh stack has thin windows and sparse tokens, and
+        # the observer saying so is the correct report, not a failure.
+        run: docker compose exec -T agents python -m candlegraph observe
+
+      - name: Agent ledger
+        run: docker compose exec -T agents python -m candlegraph agent-runs
 
       - name: Ingest ledger and logs on failure
         if: failure()

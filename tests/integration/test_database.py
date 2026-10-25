@@ -80,7 +80,9 @@ def test_migrations_create_the_expected_tables(db: DatabaseManager) -> None:
         {"schema": db.schema},
     )
 
-    assert {"token", "token_hours_data", "alembic_version"} <= {row["table_name"] for row in rows}
+    assert {"token", "token_hours_data", "ingest_run", "signal", "agent_run", "alembic_version"} <= {
+        row["table_name"] for row in rows
+    }
 
 
 def test_the_natural_key_constraint_is_in_place(db: DatabaseManager) -> None:

@@ -11,7 +11,7 @@ E2E_URL ?= http://localhost:$${APP_HOST_PORT:-8000}
 
 .PHONY: help install lock fmt fmt-check lint typecheck test test-unit test-integration \
         cov check up down logs logs-worker ps migrate revision e2e sdl clean \
-        ingest backfill report runs ui logs-ui
+        ingest backfill report runs ui logs-ui observe janitor agent-runs logs-agents
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -65,6 +65,9 @@ logs-worker: ## Follow the ingest worker log
 logs-ui: ## Follow the UI log
 	$(COMPOSE) logs -f ui
 
+logs-agents: ## Follow the agents log (observer reports land here)
+	$(COMPOSE) logs -f agents
+
 ui: ## Run the Streamlit UI locally against the stack's database
 	$(UV) run --extra ui python -m candlegraph ui
 
@@ -92,6 +95,15 @@ report: ## Print the data-quality report from the stack
 
 runs: ## Show recent ingest runs from the ledger
 	$(COMPOSE) exec worker python -m candlegraph runs
+
+observe: ## Run the run-observer agent once inside the stack and print its report
+	$(COMPOSE) exec agents python -m candlegraph observe $(ARGS)
+
+janitor: ## Run the CI janitor locally: make janitor ARGS="--open-pr --strict"
+	$(UV) run python -m candlegraph janitor $(ARGS)
+
+agent-runs: ## Show recent agent runs from the agent ledger
+	$(COMPOSE) exec agents python -m candlegraph agent-runs $(ARGS)
 
 sdl: ## Regenerate the committed GraphQL schema (tests fail if it is stale)
 	$(UV) run python -c "from candlegraph.api.schema import chart_schema; print(chart_schema)" > schema.graphql

@@ -13,13 +13,18 @@ On top of that sits a deterministic analytics layer: rolling mean and volatility
 portfolio optimisation, Bollinger mean reversion, walk-forward ARIMA signals, and a vectorised
 backtester — all usable from the CLI or a Streamlit UI.
 
-**Stack:** Python 3.12, FastAPI, Strawberry GraphQL, PostgreSQL 17, SQLAlchemy/Alembic,
-APScheduler, uv, Docker.
+Watching over it is an agent layer built on LangGraph: a **run observer** that reads the ingest
+ledger on a schedule and reports stale data, gaps that matter, and metric drift, and a **CI
+janitor** that runs the repository's checks, applies the mechanical fixes, and drafts a pull
+request. Both post reports; neither writes market data.
+
+**Stack:** Python 3.12, FastAPI, Strawberry GraphQL, PostgreSQL 17 + TimescaleDB,
+SQLAlchemy/Alembic, APScheduler, LangGraph, uv, Docker.
 
 ## How it works
 
-The stack is four processes: PostgreSQL, the **API**, a separate **ingest worker**, and the
-**Streamlit UI**.
+The stack is five processes: PostgreSQL, the **API**, a separate **ingest worker**, the
+**Streamlit UI**, and the **agents**.
 
 1. On startup the API applies migrations, then serves immediately.
 2. The worker discovers the deepest pools for each tracked token, then polls token and pool
@@ -27,8 +32,12 @@ The stack is four processes: PostgreSQL, the **API**, a separate **ingest worker
    already stored, so restarts re-fetch nothing and writes are idempotent.
    **Stored data is never deleted** — it is the input to the planned analytics phases.
 3. Every run is written to the `ingest_run` ledger, so freshness and failures are queryable.
-4. The API groups the stored hourly rows into candles of any width at query time.
+4. The API groups the stored hourly rows into candles of any width at query time,
+   with `time_bucket` over hypertables chunked by month.
 5. The analytics layer reads that history and produces statistics, allocations and signals.
+6. The agents service runs the run observer every `OBSERVER_INTERVAL` seconds. It reads the
+   ledger, the quality report, and a trailing window of rows, and posts a report to the
+   `agent_run` table and the log (or a webhook, a file, or a GitHub issue).
 
 Ingestion runs in its own process so a long backfill cannot compete with query traffic, and
 so an unreachable subgraph degrades the data rather than the service — the API comes up and
@@ -63,6 +72,14 @@ make runs                                # the ingest ledger
 ```
 
 The UI is at <http://localhost:8501>.
+
+See what the observer makes of it:
+
+```sh
+make observe                             # one observer run, report printed
+make agent-runs                          # every report so far, newest first
+make logs-agents                         # the scheduled runs as they happen
+```
 
 GraphiQL is at <http://localhost:8000/graphql>. `make down` stops the stack and drops its volume.
 
@@ -109,6 +126,17 @@ see [`.env.example`](.env.example) for the full list.
 | `BACKTEST_FEE_BPS` / `BACKTEST_SLIPPAGE_BPS` | 30 / 5 | Per-side cost assumptions. |
 | `UI_HOST`, `UI_PORT` | `0.0.0.0`, 8501 | Streamlit UI. |
 | `DATA_POLL_INTERVAL` | 300 | Seconds between ingest runs. |
+| `AGENT_REPORT_SINKS` | `log,ledger` | Where agent reports go: any of `log`, `ledger`, `file`, `webhook`, `github`. |
+| `AGENT_WEBHOOK_URL`, `AGENT_REPORT_DIR`, `AGENT_GITHUB_REPO` | unset | Targets for the `webhook`, `file`, and `github` sinks. |
+| `AGENT_LLM_MODEL` / `ANTHROPIC_API_KEY` | unset | Optional: a Claude model writes the report's summary paragraph. Findings and status are computed either way. |
+| `OBSERVER_INTERVAL` | 900 | Seconds between observer runs in the `agents` service; 0 disables. |
+| `OBSERVER_STALE_INTERVALS` | 3 | Poll intervals without a successful ingest before data is stale. Twice that is critical. |
+| `OBSERVER_DRIFT_WINDOW_HOURS` / `OBSERVER_BASELINE_DAYS` | 24 / 7 | The recent window and the baseline it is compared with. |
+| `OBSERVER_VOLUME_DRIFT_RATIO` / `OBSERVER_VOLATILITY_DRIFT_RATIO` / `OBSERVER_RUN_DRIFT_RATIO` | 4 / 3 / 3 | Recent-to-baseline ratios that count as drift. |
+| `OBSERVER_SUSPICIOUS_GAP_HOURS` / `OBSERVER_LIQUID_VOLUME_USD` | 6 / 100000 | A gap this long is a finding only on a token this liquid. |
+| `JANITOR_CHECKS` | `fmt-check,lint,typecheck,test-unit` | Make targets the janitor runs. |
+| `JANITOR_OPEN_PR` / `JANITOR_BASE_BRANCH` | `false` / `main` | Push a branch and draft a PR when a fix changed files. |
+| `JANITOR_INTERVAL` | 0 | Seconds between janitor runs in `candlegraph agents`; the real schedule is a GitHub Actions cron. |
 | `INGEST_ENABLED` | `true` | `false` serves the API only. The compose stack sets this `false` for the API and runs the `worker` service instead. |
 | `HOST`, `PORT`, `LOG_LEVEL` | `0.0.0.0`, 8000, `INFO` | Server. |
 
@@ -164,6 +192,10 @@ and returns 503 when the database is unreachable.
 | `portfolio [--objective X] [--risk-free-rate R]` | Mean-variance allocation |
 | `forecast SYMBOL [--auto-order]` | ARIMA point forecast and interval |
 | `ui` | Run the Streamlit UI |
+| `observe [--strict] [--json] [--sinks X]` | Run the run-observer agent once and post its report |
+| `janitor [--open-pr] [--strict] [--checks X]` | Run the CI janitor once: checks, mechanical fixes, draft PR |
+| `agents` | Run the agents on their schedule until stopped |
+| `agent-runs [--limit N] [--agent X] [--show]` | Recent reports from the agent ledger |
 
 ## Data quality
 
@@ -183,6 +215,34 @@ swaps, so a thin token is legitimately sparse — GNO above is real, not a bug. 
 report measures coverage against `MIN_EXPECTED_COVERAGE` rather than treating any gap as an
 error. It separately flags rows that are impossible regardless of market conditions
 (`high < low`, OHLC outside the bar).
+
+## Storage
+
+The database is **TimescaleDB**, not plain PostgreSQL — the same image everywhere
+(`timescale/timescaledb:2.31.0-pg17`, pinned in compose, in CI, and in the
+integration tests). The extension is required: the migrations create hypertables
+and fail with an explanatory error without it.
+
+Not every table is a hypertable, and the split is deliberate:
+
+| Chunked on `period_start_unix` | Ordinary tables |
+|---|---|
+| `token_hours_data`, `pool_hours_data`, `signal` | `token`, `pool`, `ingest_run`, `agent_run` |
+| one measurement per instant, read by time window, never deleted | current state with no time coordinate, or small operational ledgers |
+
+`ingest_run` is the interesting exclusion: it *looks* like a series, but a run
+is updated by `run_id` when it finishes, and on a time-partitioned table that
+update would have to search every chunk.
+[`docs/storage/table-placement/DESIGN.md`](docs/storage/table-placement/DESIGN.md)
+has the measurements behind each decision and the rule for the next table.
+
+Compression and retention policies are deliberately off — invariant 4 says
+stored history is never deleted, and a retention policy is a scheduled `DELETE`.
+
+**Upgrading an existing database:** a data directory created by plain
+`postgres:17` has no `shared_preload_libraries=timescaledb`, and the server will
+refuse to load the extension on it. `make down` (which drops the volume) then
+`make up`.
 
 ## Analytics
 
@@ -223,19 +283,98 @@ in the sidebar and feed every tab.
 The UI's arithmetic lives in `candlegraph/ui/viewmodels.py`, not in the Streamlit script, so it
 is covered by ordinary unit tests; the script itself is smoke-tested with Streamlit's `AppTest`.
 
+## Agents
+
+Two LangGraph graphs, both deterministic, both only readers. Each is a `StateGraph` of plain
+functions over a typed state; the design, with flowcharts, is in
+[`docs/agents/`](docs/agents/).
+
+**The run observer** (`candlegraph observe`) answers three questions in writing: is the data
+fresh, is it complete, and does it still look like the same market?
+
+```
+# observer — 2026-10-25 12:15 UTC — WARNING
+
+observer finished WARNING: 6 findings (2 warning, 1 info, 3 ok). WETH: 7h gap
+2026-10-24 13:00..2026-10-24 19:00 (7h) on a liquid token (mean hourly volume $4,812,330).
+SHIB: median hourly volume x5.2 vs baseline ($18,402 → $95,110)
+
+| severity | kind  | subject | message                                   |
+|----------|-------|---------|-------------------------------------------|
+| warning  | drift | SHIB    | median hourly volume x5.2 vs baseline ... |
+| warning  | gap   | WETH    | 7h gap ... on a liquid token ...          |
+| ok       | fresh | ingest  | last successful ingest was 4m ago         |
+...
+```
+
+It applies the same judgement the data-quality section above asks of a human. Staleness is
+measured against `DATA_POLL_INTERVAL`. **A gap is only a finding on a liquid token** — GNO going
+quiet for a day is the market; WETH going quiet for six hours is a failed run. Drift is a ratio
+of medians between the last 24 hours and the week before, because hourly crypto volume is
+heavy-tailed and a z-score would be driven by one big hour. A window with too few bars is "not
+enough data", never drift. Drift is a warning, not an alarm: it is news for a human to look at.
+
+**The CI janitor** (`candlegraph janitor`, `make janitor`) runs the Makefile's checks, applies the
+only fixes that are mechanical (`make fmt`, for a failing `fmt-check` or `lint`), re-runs the
+checks to prove the fix, and — with `--open-pr` — commits the tracked changes on a
+`janitor/<stamp>` branch and opens a **draft** PR. It never merges, never "fixes" a type error or
+a test, and never touches a working tree that has uncommitted changes. Its schedule is
+[`.github/workflows/janitor.yml`](.github/workflows/janitor.yml), daily.
+
+**Reports** go to the sinks in `AGENT_REPORT_SINKS`: the log, the `agent_run` table (read with
+`make agent-runs`), a Markdown file, a Slack-compatible webhook, or a GitHub issue (opened only at
+warning or worse). A sink failing never fails the run. Set `AGENT_LLM_MODEL` and
+`ANTHROPIC_API_KEY` (and `uv sync --extra llm`) to have a Claude model write the summary
+paragraph; the findings, the status, and the exit code are computed and are the same either way.
+
+Add a graph by following [`docs/agents/framework/DESIGN.md`](docs/agents/framework/DESIGN.md)
+and the `add-agent` skill.
+
 ## Tests
 
 | Tier | Needs | Command |
 |---|---|---|
 | `tests/unit` | nothing — no database, no network | `make test-unit` |
-| `tests/integration` | Docker, or `TEST_DATABASE_URL` | `make test-integration` |
+| `tests/integration` | Docker, or `TEST_DATABASE_URL` pointing at a TimescaleDB | `make test-integration` |
 | `tests/e2e` | a running stack | `make up && make e2e` |
 
-The integration tier starts a throwaway PostgreSQL with testcontainers, or uses
-`TEST_DATABASE_URL` if set (which is how CI does it). Tiers that cannot run skip rather than fail,
+The integration tier starts a throwaway TimescaleDB with testcontainers, or uses
+`TEST_DATABASE_URL` if set (which is how CI does it; it must be a TimescaleDB,
+since the migration chain creates hypertables). Tiers that cannot run skip rather than fail,
 so check the skip count before reading a green run as proof.
+
+## Status and what comes next
+
+Five pieces of work are delivered and covered by the test suite:
+
+- **Stabilisation** — a clean clone that builds, lints, type-checks and comes up.
+- **Data model and ingestion** — hourly token and pool data, idempotent upserts,
+  the ingest ledger, the data-quality report.
+- **Deterministic analytics** — rolling statistics, mean-variance portfolios,
+  three strategies, a costed and lagged backtester, the Streamlit UI.
+- **Agent layer** — the run observer and the CI janitor, with their ledger and
+  report sinks.
+- **Time-series storage** — the series tables as TimescaleDB hypertables.
+
+Next, in order:
+
+1. **Knowledge graph and signaller** — assets, pools, sources and documents in
+   Postgres with pgvector, Tavily for web search, and news attached to prices,
+   so a signal can cite *why*. Paper trading only.
+2. **Harness** — YAML pipeline specs, an event bus, OpenTelemetry, and the
+   continuous aggregates deferred from the TimescaleDB migration.
+3. **Traditional markets** — NASDAQ and NYSE equities alongside crypto, which
+   means an `instrument` supertype and calendar-aware coverage.
+4. **Models and strategies** — momentum, GARCH and friends, with walk-forward
+   evaluation as a first-class command.
+5. **Market-watch agents** — an RSS feed observer and an alerting agent that
+   deduplicates instead of repeating itself.
+
+[`docs/roadmap/DESIGN.md`](docs/roadmap/DESIGN.md) has the reasoning, the
+diagram, and each stage's exit criterion.
 
 ## Contributing
 
 [`AGENTS.md`](AGENTS.md) has the working agreement: commands, layout, the invariants the test
-suite pins down, and the definition of done. Read it before changing anything.
+suite pins down, and the definition of done. Read it before changing anything. The design
+notes behind each decision live in [`docs/`](docs/), one directory per topic.

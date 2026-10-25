@@ -2,9 +2,10 @@
 # so several checkouts or git worktrees can run side by side. Override with
 # COMPOSE_PROJECT_NAME, and the published ports below, if you need two at once.
 #
-# Three services: the database, the API, and the ingest worker. The API and the
-# worker are separate processes so a long backfill cannot compete with query
-# traffic, and so either can be restarted or scaled without the other.
+# Five services: the database, the API, the ingest worker, the UI, and the
+# agents. The API and the worker are separate processes so a long backfill
+# cannot compete with query traffic, and so either can be restarted or scaled
+# without the other. The agents only read and post reports.
 
 x-app: &app
   build:
@@ -26,7 +27,10 @@ x-app: &app
 
 services:
   postgres:
-    image: postgres:17
+    # TimescaleDB, not plain PostgreSQL: the three hourly/bar tables are
+    # hypertables. Pinned exactly, for the same reason the Dockerfile pins uv.
+    # See docs/storage/timescaledb/DESIGN.md.
+    image: timescale/timescaledb:2.31.0-pg17
     environment:
       POSTGRES_DB: ${DB_NAME:-candlegraph}
       POSTGRES_USER: ${DB_USER:-candlegraph}
@@ -83,6 +87,21 @@ services:
     # Waits for the API to be *healthy*, not merely started: the API's
     # entrypoint is what applies migrations, and two containers running
     # `alembic upgrade head` at once would race on the same DDL.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      candlegraph:
+        condition: service_healthy
+
+  agents:
+    <<: *app
+    command: ["python", "-m", "candlegraph", "agents"]
+    environment:
+      <<: *app-env
+      INGEST_ENABLED: "false"
+      # The container has no git checkout, so only the observer runs here.
+      # The janitor's schedule is .github/workflows/janitor.yml.
+      JANITOR_INTERVAL: "0"
     depends_on:
       postgres:
         condition: service_healthy

@@ -87,6 +87,57 @@ class Settings(BaseSettings):
     backtest_fee_bps: float = Field(default=30.0, ge=0.0)
     backtest_slippage_bps: float = Field(default=5.0, ge=0.0)
 
+    # --- Agents ------------------------------------------------------------
+    # Where agent reports go: a comma-separated subset of
+    # log, ledger, file, webhook, github.
+    agent_report_sinks: str = "log,ledger"
+    # Directory for the `file` sink, relative to the repo root unless absolute.
+    agent_report_dir: Path = Path("reports")
+    # Slack-compatible endpoint for the `webhook` sink.
+    agent_webhook_url: str | None = None
+    # owner/repo for the `github` sink; defaults to the checkout's origin.
+    agent_github_repo: str | None = None
+    # Optional model for narrating reports. Unset = deterministic template.
+    agent_llm_model: str | None = None
+    anthropic_api_key: SecretStr | None = None
+
+    # --- Run observer ------------------------------------------------------
+    # Seconds between observer runs in `candlegraph agents`; 0 disables.
+    observer_interval: int = Field(default=900, ge=0)
+    # Poll intervals without a successful ingest before the data is stale.
+    observer_stale_intervals: int = Field(default=3, ge=1)
+    # Consecutive failed runs that is critical.
+    observer_failure_streak: int = Field(default=3, ge=1)
+    observer_baseline_days: int = Field(default=7, ge=1)
+    observer_drift_window_hours: int = Field(default=24, ge=1)
+    # A window with fewer bars than this is "not enough data", never drift.
+    observer_min_bars: int = Field(default=12, ge=2)
+    observer_volume_drift_ratio: float = Field(default=4.0, gt=1.0)
+    observer_volatility_drift_ratio: float = Field(default=3.0, gt=1.0)
+    observer_run_drift_ratio: float = Field(default=3.0, gt=1.0)
+    # A contiguous gap this long on a *liquid* token is suspicious; on a thin
+    # token it is the market (invariant 19).
+    observer_suspicious_gap_hours: int = Field(default=6, ge=1)
+    # Baseline mean hourly volume_usd above which a token counts as liquid.
+    observer_liquid_volume_usd: float = Field(default=100_000.0, ge=0.0)
+
+    # --- CI janitor --------------------------------------------------------
+    # Make targets to run, in order. Only targets: the Makefile is the single
+    # source of truth for commands.
+    janitor_checks: str = "fmt-check,lint,typecheck,test-unit"
+    # Push a branch and open a draft PR when a fix changed tracked files.
+    janitor_open_pr: bool = False
+    janitor_base_branch: str = "main"
+    janitor_timeout_seconds: float = Field(default=900.0, gt=0)
+    # Tail of command output kept in the report.
+    janitor_output_lines: int = Field(default=40, ge=1)
+    # Seconds between janitor runs in `candlegraph agents`; 0 disables. The
+    # compose container has no git checkout, so the schedule there is 0 and
+    # the real schedule is the GitHub Actions cron.
+    janitor_interval: int = Field(default=0, ge=0)
+    # Checkout the janitor operates on. Defaults to this repository.
+    janitor_repo_root: Path | None = None
+
     # --- UI ----------------------------------------------------------------
     ui_host: str = "0.0.0.0"
     ui_port: int = 8501
@@ -142,6 +193,38 @@ class Settings(BaseSettings):
         if self.tokens_file.is_absolute():
             return self.tokens_file
         return REPO_ROOT / self.tokens_file
+
+    @property
+    def report_sinks(self) -> tuple[str, ...]:
+        """The configured agent report sinks, parsed and de-duplicated in order."""
+        return _csv(self.agent_report_sinks)
+
+    @property
+    def janitor_check_targets(self) -> tuple[str, ...]:
+        """The make targets the janitor runs, in order."""
+        return _csv(self.janitor_checks)
+
+    @property
+    def janitor_root(self) -> Path:
+        """The checkout the janitor runs in: ``JANITOR_REPO_ROOT`` or this repo."""
+        return self.janitor_repo_root or REPO_ROOT
+
+    @property
+    def report_dir(self) -> Path:
+        """``agent_report_dir`` resolved against the repo root when relative."""
+        if self.agent_report_dir.is_absolute():
+            return self.agent_report_dir
+        return REPO_ROOT / self.agent_report_dir
+
+
+def _csv(text: str) -> tuple[str, ...]:
+    """Split a comma-separated setting, dropping blanks and repeats."""
+    seen: list[str] = []
+    for part in text.split(","):
+        name = part.strip()
+        if name and name not in seen:
+            seen.append(name)
+    return tuple(seen)
 
 
 @lru_cache(maxsize=1)

@@ -166,10 +166,19 @@ def test_each_insert_lists_as_many_columns_as_its_template(
 
 
 def test_the_chart_bucket_label_is_the_bucket_boundary() -> None:
-    """Labelling with MIN(timestamp) shifts the candle when an hour is missing."""
+    """Labelling with MIN(timestamp) shifts the candle when an hour is missing.
+
+    The bucket is computed from the interval and the epoch, never from the
+    rows present. This was `FLOOR(period_start_unix / interval) * interval`
+    until the TimescaleDB migration; `time_bucket` on an integer column is
+    the same arithmetic, and is the form a continuous aggregate can be
+    defined on. The behaviour this protects is asserted against a real
+    database by `test_candles_still_bucket_on_boundaries_through_time_bucket`.
+    """
     rendered = render(statements_for("candlegraph").chart_query)
 
-    assert "to_timestamp(FLOOR(period_start_unix::numeric / %(interval)s) * %(interval)s)" in rendered
+    assert "to_timestamp(time_bucket(%(interval)s::bigint, period_start_unix))" in rendered
+    assert "GROUP BY time_bucket(%(interval)s::bigint, period_start_unix)" in rendered
     assert "MIN(timestamp)" not in rendered
 
 

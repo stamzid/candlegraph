@@ -69,7 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             get_db().close()
             set_db(None)
 
-    app = FastAPI(title="candlegraph", version="0.4.0", lifespan=lifespan)
+    app = FastAPI(title="candlegraph", version="0.5.0", lifespan=lifespan)
 
     @app.get("/status")
     def status() -> JSONResponse:
