@@ -1,49 +1,121 @@
-#!/usr/bin/env python3
+"""Pure transforms between subgraph rows, database rows, and API payloads.
 
-import datetime
-from typing import List
+Everything here is a function of its arguments with no I/O, which is what makes
+the bulk of the test suite fast and offline.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Any
+
+PRICE_TYPES = ("open", "close", "high", "low", "priceUSD")
+TIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 
-def add_symbol(data: List[dict], tokens: dict[str]):
+class RowFormatError(ValueError):
+    """A subgraph row is missing fields the database write path requires."""
+
+
+def split_token_id(composite_id: str) -> str:
+    """Return the token address from a ``<address>-<hour index>`` subgraph id."""
+    return composite_id.split("-")[0].lower()
+
+
+def to_utc_iso(moment: datetime) -> str:
+    """Format a datetime as a naive-looking UTC ISO string.
+
+    Naive input is assumed to already be UTC, which is how the database hands
+    back timestamps given the pool pins ``timezone=UTC``.
     """
-    Appends token symbols and reformats timestamps in a list of data entries.
-    Args:
-        data (List[dict]): List of data entries with token IDs and Unix timestamps.
-        tokens (dict[str]): Mapping of token IDs to symbols.
-    Description:
-        For each entry, adds symbol and converts Unix timestamp to readable format.
-    """
-    for entry in data:
-        entry_token_id = entry["id"].split("-")[0]
-        entry["id"] = entry_token_id
-        entry["symbol"] = tokens[entry_token_id]
-        entry["timestamp"] = datetime.datetime.utcfromtimestamp(entry["periodStartUnix"]).strftime("%Y-%m-%dT%H:%M:%S")
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(UTC)
+    return moment.strftime(TIME_FORMAT)
 
 
-def format_chart_data(data: List[dict]):
-    """
-    Transforms raw database query results into a structured format for charting.
-    Args:
-        data (List[dict]): Raw data from database queries containing pricing information.
+def prepare_hour_rows(rows: list[dict[str, Any]], symbol_by_address: dict[str, str]) -> list[dict[str, Any]]:
+    """Turn raw ``tokenHourDatas`` rows into rows the insert statement accepts.
+
+    Replaces the composite ``id`` with the bare token address, attaches the
+    configured ``symbol``, and derives a UTC ``timestamp`` from
+    ``periodStartUnix``. Rows for tokens outside the registry are dropped: the
+    subgraph is not supposed to return them, and inserting them would store a
+    symbol we cannot resolve on read.
+
     Returns:
-        List[List[tuple]]: Formatted data grouped by price type, each entry as (time, price type, value).
-    Description:
-        Converts database results into a nested list where each sublist corresponds
-        to price types such as open, close, high, low, and average USD price, formatted for chart display.
+        A new list; the input rows are not mutated.
     """
-    opens = []
-    closes = []
-    highs = []
-    lows = []
-    price_usd = []
+    prepared: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            address = split_token_id(row["id"])
+            period_start = int(row["periodStartUnix"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RowFormatError(f"row is missing a usable id/periodStartUnix: {row!r}") from exc
+
+        symbol = symbol_by_address.get(address)
+        if symbol is None:
+            continue
+
+        missing = [field for field in ("open", "high", "low", "close", "priceUSD") if field not in row]
+        if missing:
+            raise RowFormatError(f"row {row['id']!r} is missing price fields: {missing}")
+
+        prepared.append(
+            {
+                **row,
+                "id": address,
+                "symbol": symbol,
+                "periodStartUnix": period_start,
+                "timestamp": datetime.fromtimestamp(period_start, tz=UTC),
+            }
+        )
+    return prepared
+
+
+def _as_float(value: Any) -> float:
+    """Coerce a database numeric (``Decimal``, ``str``, ``None``) to a float."""
+    if value is None:
+        return 0.0
+    if isinstance(value, Decimal | float | int):
+        return float(value)
+    return float(str(value))
+
+
+def format_chart_data(data: list[dict[str, Any]]) -> list[list[list[Any]]]:
+    """Reshape aggregated bucket rows into the five chart series.
+
+    Args:
+        data: Rows from the chart query, each holding ``interval_start``,
+            ``opens`` and ``closes`` arrays, ``max_high``, ``min_low``, and
+            ``avg_price_usd``.
+
+    Returns:
+        One list per entry in :data:`PRICE_TYPES`, in that order, each a list
+        of ``[iso_time, price_type, value]`` sorted by time.
+    """
+    series: dict[str, list[list[Any]]] = {price_type: [] for price_type in PRICE_TYPES}
 
     for record in data:
-        time_str = record['interval_start'].strftime('%Y-%m-%dT%H:%M:%S')
-        opens.append([time_str, "open", record['opens'][0] if record['opens'] else 0])
-        closes.append([time_str, "close", record['closes'][0] if record['closes'] else 0])
-        highs.append([time_str, "high", record.get('max_high', 0)])
-        lows.append([time_str, "low", record.get('min_low', 0)])
-        price_usd.append([time_str, "priceUSD", record.get('avg_price_usd', 0)])
+        time_str = to_utc_iso(record["interval_start"])
+        opens = record.get("opens") or []
+        closes = record.get("closes") or []
+        values = {
+            # `opens` is ordered ascending and `closes` descending, so the
+            # first element of each is the bucket's opening and closing price.
+            "open": opens[0] if opens else 0,
+            "close": closes[0] if closes else 0,
+            "high": record.get("max_high", 0),
+            "low": record.get("min_low", 0),
+            "priceUSD": record.get("avg_price_usd", 0),
+        }
+        for price_type in PRICE_TYPES:
+            series[price_type].append([time_str, price_type, _as_float(values[price_type])])
 
-    formatted_data = [opens, closes, highs, lows, price_usd]
-    return formatted_data
+    return [series[price_type] for price_type in PRICE_TYPES]
+
+
+def empty_chart_data() -> list[list[list[Any]]]:
+    """The placeholder payload returned when a token has no stored rows."""
+    return [[["", price_type, 0.0]] for price_type in PRICE_TYPES]

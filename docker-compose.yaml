@@ -1,37 +1,54 @@
-version: "3.9"
+# Project name is intentionally left to Compose's default (the directory name)
+# so several checkouts or git worktrees can run side by side. Override with
+# COMPOSE_PROJECT_NAME, and the published ports below, if you need two at once.
 
 services:
   postgres:
-    image: postgres:16.2
-    container_name: candlegraph_postgres
-    command: postgres -c "max_connections=1024"
+    image: postgres:17
     environment:
-      SERVICE_NAME: "postgres"
-      POSTGRES_DB: "candlegraph"
-      POSTGRES_USER: "candlegraph"
-      POSTGRES_PASSWORD: "candlegraph"
-      POSTGRES_SCHEMA: "candlegraph"
+      POSTGRES_DB: ${DB_NAME:-candlegraph}
+      POSTGRES_USER: ${DB_USER:-candlegraph}
+      POSTGRES_PASSWORD: ${DB_PASS:-candlegraph}
+      TZ: UTC
+      PGTZ: UTC
     ports:
-      - 5432:5432
-    networks:
-        - candlegraph
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
-      - ./sql/create_schema.sql:/docker-entrypoint-initdb.d/create_schema.sql
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The app waits for this, so migrations never race the database.
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-candlegraph} -d ${DB_NAME:-candlegraph}"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
 
   candlegraph:
-    image: candlegraph:latest
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: candlegraph
+    image: candlegraph:latest
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Always reach Postgres over the compose network, whatever .env says for
+      # local runs.
+      DB_HOST: postgres
+      DB_PORT: "5432"
     ports:
-      - 8000:8000
-    networks:
-      - candlegraph
+      - "${APP_HOST_PORT:-8000}:8000"
     depends_on:
-      - candlegraph_postgres
-      - candlegraph_redis
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/status', timeout=5).status == 200 else 1)\""]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
 
-networks:
-    candlegraph:
-        driver: bridge
+volumes:
+  pgdata:

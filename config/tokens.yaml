@@ -1,0 +1,15 @@
+# Tokens candlegraph ingests. Addresses are Ethereum mainnet ERC-20 contracts
+# as indexed by the Uniswap v3 subgraph, and must be lowercase.
+#
+# `symbol` is the name the GraphQL API is queried by and must be unique.
+# `name` is informational only; authoritative metadata comes from the subgraph.
+tokens:
+  - address: "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+    symbol: WBTC
+    name: Wrapped BTC
+  - address: "0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce"
+    symbol: SHIB
+    name: SHIBA INU
+  - address: "0x6810e776880c02933d47db1b9fc05908e5386b96"
+    symbol: GNO
+    name: Gnosis Token

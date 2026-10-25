@@ -1,0 +1,24 @@
+type Candle {
+  time: String!
+  priceType: String!
+  value: Float!
+}
+
+type ChartData {
+  tokenMetadata: TokenMetadata!
+  candles: [[Candle!]!]!
+}
+
+type Query {
+  getChartData(tokenSymbol: String!, timeUnitInHours: Int!): ChartData!
+  supportedTokens: [String!]!
+}
+
+type TokenMetadata {
+  id: String!
+  name: String!
+  symbol: String!
+  totalSupply: String!
+  volumeUsd: String!
+  decimals: String!
+}

@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.12.19"
+
+jobs:
+  static:
+    name: Format, lint, types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      - run: make fmt-check
+      - run: make lint
+      - run: make typecheck
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: candlegraph_test
+          POSTGRES_USER: candlegraph
+          POSTGRES_PASSWORD: candlegraph
+          TZ: UTC
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U candlegraph -d candlegraph_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # The integration tier uses this instead of starting a testcontainer.
+      TEST_DATABASE_URL: postgresql://candlegraph:candlegraph@localhost:5432/candlegraph_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      - name: Unit and integration tests
+        run: uv run pytest --cov --cov-report=term-missing --cov-report=xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  stack:
+    name: Compose stack and end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+
+      - name: Start the stack
+        env:
+          # Ingestion needs a key; without one the stack must still come up
+          # healthy and serve the API, which is what this job proves.
+          GRAPH_API_KEY: ${{ secrets.GRAPH_API_KEY }}
+        run: |
+          cp .env.example .env
+          if [ -n "$GRAPH_API_KEY" ]; then
+            sed -i "s|^GRAPH_API_KEY=.*|GRAPH_API_KEY=$GRAPH_API_KEY|" .env
+          fi
+          make up
+
+      - name: The API is healthy
+        run: |
+          curl --fail --silent --show-error http://localhost:8000/status | tee /dev/stderr
+
+      - name: End-to-end tests
+        # These assert real ingested candles, so they only mean anything with
+        # a key. Without one, the health check above is the gate.
+        if: ${{ secrets.GRAPH_API_KEY != '' }}
+        run: |
+          for _ in $(seq 1 30); do
+            count=$(docker compose exec -T postgres psql -U candlegraph -d candlegraph -tAc \
+              'SELECT COUNT(*) FROM candlegraph.token_hours_data' 2>/dev/null || echo 0)
+            [ "$count" -gt 0 ] && break
+            sleep 5
+          done
+          make e2e
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Tear down
+        if: always()
+        run: make down

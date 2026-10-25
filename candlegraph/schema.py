@@ -1,64 +1,64 @@
-#!/usr/bin/env python3
+"""The GraphQL surface: one query returning token metadata plus OHLC candles.
+
+Candles of any width are built at read time by grouping the stored hourly rows
+into ``timeUnitInHours`` buckets.
+"""
+
+from __future__ import annotations
+
+from typing import Any
 
 import strawberry
-from datetime import datetime
-from psycopg2 import sql
-from typing import List, Tuple
-from candlegraph.dba import db_manager, chart_query, get_token_metadata
-from candlegraph.tokens import supported_tokens
-from candlegraph.helpers import format_chart_data
+
+from candlegraph.dba import DatabaseManager, get_db
+from candlegraph.helpers import empty_chart_data, format_chart_data
+from candlegraph.tokens import TokenRegistry, get_token_registry
+
+MAX_TIME_UNIT_IN_HOURS = 24 * 366
 
 
-symbol_map = {v: k for k, v in supported_tokens.items()}
+def fetch_chart_data(
+    token_symbol: str,
+    time_unit_in_hours: int,
+    db: DatabaseManager | None = None,
+    registry: TokenRegistry | None = None,
+) -> list[dict[str, Any]]:
+    """Aggregated buckets for a token, or an empty list for an unknown symbol."""
+    registry = registry or get_token_registry()
+    token = registry.by_symbol(token_symbol)
+    if token is None:
+        return []
 
-def fetch_chart_data(token_symbol: str, time_unit_in_hours: int):
-    """
-    Retrieves aggregated token data for a given symbol and time interval.
-    Args:
-        token_symbol (str): Symbol of the token.
-        time_unit_in_hours (int): Time interval in hours for aggregating data.
-    Returns:
-        tuple: A tuple (status_code, data), where `status_code` is 0 if no data is found,
-        and `data` contains the aggregated chart data.
-    Description:
-        This function queries aggregated historical data such as open, close, high,
-        low, and average prices for a specified token over given time intervals.
-    """
-
-    interval = time_unit_in_hours * 3600
-    token_id = symbol_map.get(token_symbol)
-    if not token_id:
-        return 0, []
-
-    params = {"interval": interval, "token_id": token_id}
-    return db_manager.execute_read_query(chart_query, params)
+    db = db or get_db()
+    params = {
+        "interval": time_unit_in_hours * 3600,
+        "token_id": token.address,
+        "start_unix": None,
+        "end_unix": None,
+    }
+    return db.fetch_all(db.sql.chart_query, params)
 
 
-def fetch_token_metadata(token_symbol: str):
-    """
-    Retrieves token metadata associated with a give token
-    Args:
-        token_symbol (str): Symbol of the token.
-    Returns:
-        tuple: A tuple (status_code, data), where `status_code` is 0 if no data is found,
-        and `data` contains the aggregated chart data.
-    Description:
-        This function queries aggregated historical data such as open, close, high,
-        low, and average prices for a specified token over given time intervals.
-    """
-    token_id = symbol_map.get(token_symbol)
-    if not token_id:
-        return {}
-    params = {"token_id": token_id}
-    count, metadata = db_manager.execute_read_query(get_token_metadata, params)
-    if count == 0:
+def fetch_token_metadata(
+    token_symbol: str,
+    db: DatabaseManager | None = None,
+    registry: TokenRegistry | None = None,
+) -> dict[str, Any]:
+    """Stored metadata for a token, or an empty dict when unknown/not yet ingested."""
+    registry = registry or get_token_registry()
+    token = registry.by_symbol(token_symbol)
+    if token is None:
         return {}
 
-    return metadata[0]
+    db = db or get_db()
+    rows = db.fetch_all(db.sql.get_token_metadata, {"token_id": token.address})
+    return rows[0] if rows else {}
 
 
 @strawberry.type
 class Candle:
+    """One point of one price series."""
+
     time: str
     priceType: str
     value: float
@@ -66,6 +66,8 @@ class Candle:
 
 @strawberry.type
 class TokenMetadata:
+    """Token facts as reported by the subgraph."""
+
     id: str
     name: str
     symbol: str
@@ -76,47 +78,63 @@ class TokenMetadata:
 
 @strawberry.type
 class ChartData:
+    """Metadata plus one candle list per price type."""
+
     tokenMetadata: TokenMetadata
-    candles: List[List[Candle]]
+    candles: list[list[Candle]]
+
+
+def _metadata_type(record: dict[str, Any]) -> TokenMetadata:
+    return TokenMetadata(
+        id=str(record.get("id") or ""),
+        name=str(record.get("name") or ""),
+        symbol=str(record.get("symbol") or ""),
+        totalSupply=str(record.get("total_supply") or ""),
+        volumeUsd=str(record.get("volume_usd") or ""),
+        decimals=str(record.get("decimals") or ""),
+    )
+
+
+def build_chart_data(token_symbol: str, time_unit_in_hours: int) -> ChartData:
+    """Resolver body, kept outside the Strawberry type so tests can call it."""
+    if time_unit_in_hours < 1 or time_unit_in_hours > MAX_TIME_UNIT_IN_HOURS:
+        raise ValueError(f"timeUnitInHours must be between 1 and {MAX_TIME_UNIT_IN_HOURS}")
+
+    rows = fetch_chart_data(token_symbol, time_unit_in_hours)
+    formatted = format_chart_data(rows) if rows else empty_chart_data()
+    metadata = fetch_token_metadata(token_symbol)
+
+    return ChartData(
+        tokenMetadata=_metadata_type(metadata),
+        candles=[
+            [Candle(time=str(point[0]), priceType=str(point[1]), value=float(point[2])) for point in group]
+            for group in formatted
+        ],
+    )
 
 
 @strawberry.type
 class Query:
+    """Root query type."""
+
     @strawberry.field
     def get_chart_data(self, token_symbol: str, time_unit_in_hours: int) -> ChartData:
-        """
-        Provides token metadata and formatted chart data for a given token symbol and interval.
+        """Token metadata plus OHLC + USD price series bucketed to the given width.
+
         Args:
-            token_symbol (str): The symbol of the token.
-            time_unit_in_hours (int): The time interval in hours for which data is aggregated.
+            token_symbol: A symbol from the configured tokens file, case-insensitive.
+            time_unit_in_hours: Candle width in hours; 1 returns the stored rows.
+
         Returns:
-            Tuple[TokenMetadata, List[List[Candle]]]: A tuple containing token metadata and a nested list of Candle objects formatted for charting purposes.
-        Description:
-            Retrieves and formats data for visual representation in charts, including token metadata, aggregating data into specified time intervals.
+            Five series (open, close, high, low, priceUSD), each sorted by time.
+            Unknown symbols yield empty metadata and a single zero-valued point.
         """
-        _, data = fetch_chart_data(token_symbol, time_unit_in_hours)
-        if not data:
-            formatted_data = [[["", ptype, 0.0] for ptype in ['open', 'close', 'high', 'low', 'priceUSD']]]
-        else:
-            formatted_data = format_chart_data(data)
+        return build_chart_data(token_symbol, time_unit_in_hours)
 
-        token_metadata = fetch_token_metadata(token_symbol)
-        token_meta = TokenMetadata(
-            id=token_metadata.get("id", ""),
-            name=token_metadata.get("name", ""),
-            symbol=token_metadata.get("symbol", ""),
-            totalSupply=token_metadata.get("total_supply", ""),
-            volumeUsd=token_metadata.get("volume_usd", ""),
-            decimals=token_metadata.get("decimals", "")
-        )
-
-        return ChartData(
-            tokenMetadata=token_meta,
-            candles=[
-                [Candle(time=point[0], priceType=point[1], value=float(point[2])) for point in group]
-                for group in formatted_data
-            ]
-        )
+    @strawberry.field
+    def supported_tokens(self) -> list[str]:
+        """The symbols this deployment tracks."""
+        return list(get_token_registry().symbols)
 
 
 chart_schema = strawberry.Schema(query=Query)

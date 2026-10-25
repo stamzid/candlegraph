@@ -1,105 +1,130 @@
 # candlegraph
 
-A digital asset market data service. candlegraph ingests hourly Uniswap v3 token prices and metadata from the Uniswap subgraph, stores them in Postgres, and serves OHLC candles through a GraphQL API for charts and analytics.
+A digital asset market data service. candlegraph ingests hourly Uniswap v3 token prices and
+metadata from The Graph, stores them in PostgreSQL, and serves OHLC candles through a GraphQL API
+for charts and analytics.
 
-**Stack:** Python 3.11, FastAPI, Strawberry GraphQL, PostgreSQL, SQLAlchemy/Alembic, APScheduler, Poetry, Docker.
-
-> **Status:** the default `TRANSPORT_URL` points to The Graph's legacy hosted service. Moving to The Graph gateway (API key required) is the first item on the roadmap.
+**Stack:** Python 3.12, FastAPI, Strawberry GraphQL, PostgreSQL 17, SQLAlchemy/Alembic,
+APScheduler, uv, Docker.
 
 ## How it works
 
-1. On startup, the ingester backfills the last `LOOKBACK_DAYS` of `tokenHourDatas` and token metadata for each supported token.
-2. A scheduler keeps polling every `DATA_POLL_INTERVAL` seconds.
-3. The API aggregates hourly rows into candles of any size (`timeUnitInHours`) at query time.
+1. On startup the service applies migrations, then starts serving immediately.
+2. A background scheduler runs the first backfill and re-polls every `DATA_POLL_INTERVAL`
+   seconds. Each run resumes from the newest hour already stored, so restarts re-fetch nothing
+   and writes are idempotent.
+3. The API groups the stored hourly rows into candles of any width at query time.
 
-Supported tokens live in `candlegraph/tokens.py` (currently WBTC, SHIB, GNO).
+Ingestion deliberately runs *alongside* the server rather than before it: if The Graph is
+unreachable, the API still comes up and serves whatever data is already stored.
+
+The tokens tracked are config, not code — see [`config/tokens.yaml`](config/tokens.yaml)
+(currently WBTC, SHIB, GNO).
 
 ## Quick start
 
+You need Docker and a free Graph API key from <https://thegraph.com/studio/apikeys/>.
+
 ```sh
-docker compose up -d
+cp .env.example .env
+$EDITOR .env            # set GRAPH_API_KEY
+make up                 # builds, starts, and waits until healthy
 ```
 
-Or run locally against the Postgres container:
+Then:
+
+```sh
+curl -s localhost:8000/status            # {"status":"ok","database":"up",...}
+make logs                                # "Ingested 168 hourly rows for WBTC"
+```
+
+GraphiQL is at <http://localhost:8000/graphql>. `make down` stops the stack and drops its volume.
+
+### Developing locally
+
+```sh
+make install            # uv sync, including dev tools
+make test-unit          # fast, offline: no database, no network
+make check              # format, lint, types, and the full suite
+make help               # every target
+```
+
+To run the service outside Docker against the compose database:
 
 ```sh
 docker compose up -d postgres
-poetry install
-poetry run alembic upgrade head
-poetry run python -m candlegraph.app
+DB_HOST=localhost make migrate
+DB_HOST=localhost uv run python -m candlegraph
 ```
-
-Locally, set `DB_HOST=localhost` and change the host in `alembic.ini`'s `sqlalchemy.url` to `localhost`; both default to the Docker hostname.
-
-The API is at `http://localhost:8000/graphql` (GraphiQL in the browser), with a health check at `/status`.
 
 ## Configuration
 
-Copy `.env.example` and adjust. The DB credentials in the repo (`candlegraph`/`candlegraph`) are throwaway defaults for the local Docker Postgres only.
+Everything is read through typed settings ([`candlegraph/settings.py`](candlegraph/settings.py));
+see [`.env.example`](.env.example) for the full list.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TRANSPORT_URL` | legacy hosted subgraph | Uniswap v3 subgraph endpoint |
-| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASS`, `DB_NAME`, `DB_SCHEMA` | local Docker values | Postgres connection |
-| `MINIMUM_DB_CONNECTIONS` / `MAXIMUM_DB_CONNECTIONS` | 16 / 1024 | Connection pool size |
-| `LOOBACK_DAYS` | 7 | Days of history to ingest and keep (name as currently read by `settings.py`) |
-| `DATA_POLL_INTERVAL` | 300 | Seconds between polls |
-| `PERSISTANCE_MODE` | unset | Unset deletes data older than the lookback window; any value keeps it |
+| `GRAPH_API_KEY` | — | **Required for ingestion.** Gateway API key. |
+| `SUBGRAPH_ID` | Uniswap v3 mainnet | Subgraph to query. |
+| `TRANSPORT_URL` | unset | Explicit endpoint; overrides the gateway URL. |
+| `SUBGRAPH_PAGE_SIZE` / `SUBGRAPH_MAX_PAGES` | 100 / 1000 | Paging bounds. |
+| `SUBGRAPH_TIMEOUT_SECONDS` / `SUBGRAPH_MAX_TRIES` | 30 / 5 | Request timeout and retry budget. |
+| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASS`, `DB_NAME`, `DB_SCHEMA` | local compose values | Postgres connection. |
+| `DATABASE_URL` | unset | Full URL; overrides the `DB_*` values. |
+| `MIN_DB_CONNECTIONS` / `MAX_DB_CONNECTIONS` | 2 / 10 | Pool size. |
+| `TOKENS_FILE` | `config/tokens.yaml` | Which tokens to ingest. |
+| `LOOKBACK_DAYS` | 7 | How far back a first-time backfill reaches. |
+| `DATA_POLL_INTERVAL` | 300 | Seconds between ingest runs. |
+| `RETAIN_HISTORY` | `true` | `false` deletes rows older than the lookback window after each run. |
+| `INGEST_ENABLED` | `true` | `false` serves the API only. |
+| `HOST`, `PORT`, `LOG_LEVEL` | `0.0.0.0`, 8000, `INFO` | Server. |
+
+The database credentials in `.env.example` are throwaway defaults for the local Docker Postgres.
+Replace them anywhere else. `.env` is gitignored; never commit a real key.
+
+Running two checkouts at once? Compose uses the directory as its project name, so the stacks are
+already separate — just set `POSTGRES_HOST_PORT` and `APP_HOST_PORT` so the published ports differ.
 
 ## API
 
+The committed schema is [`schema.graphql`](schema.graphql).
+
 ```graphql
 query {
-  getChartData(tokenSymbol: "WBTC", timeUnitInHours: 2) {
+  getChartData(tokenSymbol: "WBTC", timeUnitInHours: 24) {
     tokenMetadata { id name symbol totalSupply volumeUsd decimals }
     candles { time priceType value }
   }
 }
 ```
 
-`candles` is a list of five series (`open`, `close`, `high`, `low`, `priceUSD`), each sorted by time:
+`candles` is a list of five series — `open`, `close`, `high`, `low`, `priceUSD` — in that order,
+each sorted by time. `tokenSymbol` is case-insensitive. An unknown symbol returns empty metadata
+and a single zero-valued point rather than an error.
 
-```json
-"candles": [
-  [{ "time": "2024-01-01T00:00:00", "priceType": "open",  "value": 50000 }, ...],
-  [{ "time": "2024-01-01T00:00:00", "priceType": "close", "value": 50500 }, ...],
-  ...
-]
-```
+Two details worth knowing:
 
-If there's no data for the token, metadata fields come back empty and each series holds a single zero-valued point.
+- **Candle times are bucket boundaries**, aligned to the Unix epoch — so `timeUnitInHours: 24`
+  buckets on midnight UTC regardless of which hours are present.
+- **Gaps produce no candle.** An hour with no Uniswap v3 activity has no row, so a bucket with no
+  rows is absent from the series rather than zero-filled.
 
-## Schema migrations
-
-```sh
-poetry run alembic revision -m "describe change"   # new migration
-poetry run alembic upgrade head                    # apply
-poetry run alembic downgrade -1                    # roll back one
-```
+`supportedTokens` returns the symbols this deployment tracks. `GET /status` is the health check
+and returns 503 when the database is unreachable.
 
 ## Tests
 
-```sh
-poetry run python -m unittest tests.test_helpers   # unit tests, no DB or network
-docker compose up -d && poetry run pytest tests/test_endpoint.py   # end-to-end, needs the stack running
-```
+| Tier | Needs | Command |
+|---|---|---|
+| `tests/unit` | nothing — no database, no network | `make test-unit` |
+| `tests/integration` | Docker, or `TEST_DATABASE_URL` | `make test-integration` |
+| `tests/e2e` | a running stack | `make up && make e2e` |
 
-## Design notes
+The integration tier starts a throwaway PostgreSQL with testcontainers, or uses
+`TEST_DATABASE_URL` if set (which is how CI does it). Tiers that cannot run skip rather than fail,
+so check the skip count before reading a green run as proof.
 
-- **Postgres:** structured time series, fast aggregate queries, and Alembic for schema history.
-- **FastAPI + Strawberry:** async ASGI server with strongly typed GraphQL; Strawberry is the GraphQL library FastAPI's docs point to.
-- **Query-time aggregation:** hourly rows are stored once and bucketed on read, so any candle size works without extra tables.
-- **Poetry + Docker:** reproducible installs locally and a cached multi-stage image for deployment.
+## Contributing
 
-## Roadmap
-
-- Move to The Graph gateway, fix compose and settings, offline test suite with CI
-- Correct per-candle OHLC, gap handling, reliable backfill and incremental ingestion
-- More tokens, pools and chains; analytics (returns, volatility, VWAP, drawdown)
-- Dashboard, alerts, caching and metrics, AWS deployment with Terraform
-- Knowledge graph linking price moves to public news (RSS, Substack)
-- Read-only research agents that explain price moves using the app's own data
-
-## License
-
-MIT
+[`AGENTS.md`](AGENTS.md) has the working agreement: commands, layout, the invariants the test
+suite pins down, and the definition of done. Read it before changing anything.
