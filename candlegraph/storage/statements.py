@@ -137,6 +137,25 @@ _POOL_HOUR_TEMPLATE = (
 )
 
 
+# --- signal ----------------------------------------------------------------
+
+SIGNAL_COLUMNS = (
+    "strategy",
+    "symbol",
+    "period_start_unix",
+    "timestamp",
+    "signal",
+    "score",
+    "params",
+    "generated_at",
+)
+
+_SIGNAL_TEMPLATE = (
+    "(%(strategy)s,%(symbol)s,%(period_start_unix)s,%(timestamp)s,"
+    "%(signal)s,%(score)s,%(params)s,%(generated_at)s)"
+)
+
+
 @dataclass(frozen=True)
 class Statements:
     """Every SQL statement, bound to a schema name.
@@ -166,6 +185,13 @@ class Statements:
     finish_ingest_run: sql.Composed
     get_recent_runs: sql.Composed
     get_last_successful_run: sql.Composed
+    # analytics
+    get_price_history: sql.Composed
+    insert_signal: sql.Composed
+    insert_signal_template: str
+    get_signals: sql.Composed
+    get_latest_signals: sql.Composed
+    get_strategies: sql.Composed
     # data quality
     coverage_report: sql.Composed
     missing_hours: sql.Composed
@@ -337,6 +363,75 @@ def statements_for(schema: str) -> Statements:
         """
     ).format(ns=ns)
 
+    # --- analytics ---------------------------------------------------------
+
+    # Close and price_usd are both returned: price_usd is the USD mark used
+    # for cross-asset portfolio maths, close is the native pair price.
+    get_price_history = sql.SQL(
+        """
+        SELECT
+            symbol,
+            token_id,
+            period_start_unix,
+            timestamp,
+            open,
+            high,
+            low,
+            close,
+            price_usd,
+            volume_usd,
+            total_value_locked_usd
+        FROM {ns}.token_hours_data
+        WHERE symbol = ANY(%(symbols)s)
+          AND (%(start_unix)s::bigint IS NULL OR period_start_unix >= %(start_unix)s)
+          AND (%(end_unix)s::bigint IS NULL OR period_start_unix < %(end_unix)s)
+        ORDER BY symbol, period_start_unix
+        """
+    ).format(ns=ns)
+
+    insert_signal = sql.SQL(
+        """
+        INSERT INTO {ns}.signal ({cols})
+        VALUES %s
+        ON CONFLICT (strategy, symbol, period_start_unix) DO UPDATE SET
+            {updates}
+        RETURNING id
+        """
+    ).format(
+        ns=ns,
+        cols=sql.SQL(_columns(*SIGNAL_COLUMNS)),
+        updates=sql.SQL(_excluded(SIGNAL_COLUMNS, key=("strategy", "symbol", "period_start_unix"))),
+    )
+
+    get_signals = sql.SQL(
+        """
+        SELECT * FROM {ns}.signal
+        WHERE strategy = %(strategy)s
+          AND symbol = %(symbol)s
+          AND (%(start_unix)s::bigint IS NULL OR period_start_unix >= %(start_unix)s)
+        ORDER BY period_start_unix
+        """
+    ).format(ns=ns)
+
+    # The newest signal per (strategy, symbol): what to act on right now.
+    get_latest_signals = sql.SQL(
+        """
+        SELECT DISTINCT ON (strategy, symbol) *
+        FROM {ns}.signal
+        ORDER BY strategy, symbol, period_start_unix DESC
+        """
+    ).format(ns=ns)
+
+    get_strategies = sql.SQL(
+        """
+        SELECT strategy, COUNT(*) AS rows_total, COUNT(DISTINCT symbol) AS symbols,
+               MAX(period_start_unix) AS last_unix
+        FROM {ns}.signal
+        GROUP BY strategy
+        ORDER BY strategy
+        """
+    ).format(ns=ns)
+
     # --- data quality ------------------------------------------------------
 
     # Coverage over the stored range, per token. `expected_hours` counts the
@@ -432,6 +527,12 @@ def statements_for(schema: str) -> Statements:
         finish_ingest_run=finish_ingest_run,
         get_recent_runs=get_recent_runs,
         get_last_successful_run=get_last_successful_run,
+        get_price_history=get_price_history,
+        insert_signal=insert_signal,
+        insert_signal_template=_SIGNAL_TEMPLATE,
+        get_signals=get_signals,
+        get_latest_signals=get_latest_signals,
+        get_strategies=get_strategies,
         coverage_report=coverage_report,
         missing_hours=missing_hours,
         ohlc_violations=ohlc_violations,

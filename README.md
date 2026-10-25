@@ -9,12 +9,17 @@ It stores hourly OHLC, USD price, volume, TVL and fees per token, plus pool-leve
 holding each token. Every ingest run is recorded, and a built-in data-quality report measures
 coverage and finds gaps.
 
+On top of that sits a deterministic analytics layer: rolling mean and volatility, mean-variance
+portfolio optimisation, Bollinger mean reversion, walk-forward ARIMA signals, and a vectorised
+backtester — all usable from the CLI or a Streamlit UI.
+
 **Stack:** Python 3.12, FastAPI, Strawberry GraphQL, PostgreSQL 17, SQLAlchemy/Alembic,
 APScheduler, uv, Docker.
 
 ## How it works
 
-The stack is three processes: PostgreSQL, the **API**, and a separate **ingest worker**.
+The stack is four processes: PostgreSQL, the **API**, a separate **ingest worker**, and the
+**Streamlit UI**.
 
 1. On startup the API applies migrations, then serves immediately.
 2. The worker discovers the deepest pools for each tracked token, then polls token and pool
@@ -23,6 +28,7 @@ The stack is three processes: PostgreSQL, the **API**, and a separate **ingest w
    **Stored data is never deleted** — it is the input to the planned analytics phases.
 3. Every run is written to the `ingest_run` ledger, so freshness and failures are queryable.
 4. The API groups the stored hourly rows into candles of any width at query time.
+5. The analytics layer reads that history and produces statistics, allocations and signals.
 
 Ingestion runs in its own process so a long backfill cannot compete with query traffic, and
 so an unreachable subgraph degrades the data rather than the service — the API comes up and
@@ -55,6 +61,8 @@ make backfill days=90                    # ~5 min for ten tokens
 make report                              # coverage, gaps, field completeness
 make runs                                # the ingest ledger
 ```
+
+The UI is at <http://localhost:8501>.
 
 GraphiQL is at <http://localhost:8000/graphql>. `make down` stops the stack and drops its volume.
 
@@ -95,6 +103,11 @@ see [`.env.example`](.env.example) for the full list.
 | `INGEST_POOLS` | `true` | `false` skips pool-level data (and so transaction counts). |
 | `POOLS_PER_TOKEN` | 3 | Deepest pools to track per token, per side of the pair. 0 freezes the set. |
 | `MIN_EXPECTED_COVERAGE` | 0.80 | Coverage below which `candlegraph report` flags a token. |
+| `RISK_FREE_RATE` | 0.0 | Annual rate for Sharpe ratios and the tangency portfolio. |
+| `ANALYTICS_LOOKBACK_DAYS` | 90 | Default window for the analytics commands. |
+| `ROLLING_WINDOW` | 24 | Default rolling lookback, in bars. |
+| `BACKTEST_FEE_BPS` / `BACKTEST_SLIPPAGE_BPS` | 30 / 5 | Per-side cost assumptions. |
+| `UI_HOST`, `UI_PORT` | `0.0.0.0`, 8501 | Streamlit UI. |
 | `DATA_POLL_INTERVAL` | 300 | Seconds between ingest runs. |
 | `INGEST_ENABLED` | `true` | `false` serves the API only. The compose stack sets this `false` for the API and runs the `worker` service instead. |
 | `HOST`, `PORT`, `LOG_LEVEL` | `0.0.0.0`, 8000, `INFO` | Server. |
@@ -144,6 +157,13 @@ and returns 503 when the database is unreachable.
 | `backfill --days 90` | One pass over a longer window, rewinding past stored history |
 | `report [--days N] [--strict]` | Data-quality report; `--strict` exits non-zero when dirty |
 | `runs [--limit N]` | Recent rows from the ingest ledger |
+| `strategies` | List the registered strategies |
+| `stats SYMBOL [--window N]` | Rolling mean and annualised volatility |
+| `signals SYMBOL [--strategy X] [--store]` | Generate signals, optionally persisting them |
+| `backtest SYMBOL [--strategy X\|all]` | Backtest, net of fees and slippage |
+| `portfolio [--objective X] [--risk-free-rate R]` | Mean-variance allocation |
+| `forecast SYMBOL [--auto-order]` | ARIMA point forecast and interval |
+| `ui` | Run the Streamlit UI |
 
 ## Data quality
 
@@ -163,6 +183,45 @@ swaps, so a thin token is legitimately sparse — GNO above is real, not a bug. 
 report measures coverage against `MIN_EXPECTED_COVERAGE` rather than treating any gap as an
 error. It separately flags rows that are impossible regardless of market conditions
 (`high < low`, OHLC outside the bar).
+
+## Analytics
+
+All of it is deterministic — the same stored data and the same flags give the same numbers.
+
+```sh
+candlegraph stats WETH --window 168           # rolling mean + annualised volatility
+candlegraph forecast WETH --auto-order        # ARIMA, order picked by AIC
+candlegraph signals WETH --strategy bollinger --store
+candlegraph backtest WETH --strategy all      # compare every strategy
+candlegraph portfolio --risk-free-rate 0.04 --objective max_sharpe --max-weight 0.4
+```
+
+**Strategies.** `bollinger` (mean reversion, with separate entry and exit thresholds so a price
+hovering at one level does not thrash), `crossover` (moving-average trend following), and
+`arima` (walk-forward forecast; the model refits on history up to the current bar only).
+
+**Portfolio.** `max_sharpe`, `min_volatility`, `target_return`, `risk_parity` and `equal_weight`,
+with a configurable risk-free rate, weight bounds, shorting, and covariance shrinkage. The
+efficient frontier is available from both the CLI and the UI.
+
+**Backtests are costed and lagged.** A position decided on bar *t* earns bar *t+1*'s return, and
+fees plus slippage are charged on every position change. Both matter: on hourly data a naive
+strategy at 35bps per side pays more in costs than it makes in edge, and the reports say so
+rather than hiding it.
+
+## UI
+
+```sh
+make ui                 # locally, against the stack's database
+```
+
+Four tabs: **Prices & volatility** (rolling statistics and Bollinger bands), **Portfolio**
+(weights and the efficient frontier), **Strategies** (signals, equity curve, drawdown), and
+**Forecast** (ARIMA with its confidence interval). The risk-free rate and cost assumptions live
+in the sidebar and feed every tab.
+
+The UI's arithmetic lives in `candlegraph/ui/viewmodels.py`, not in the Streamlit script, so it
+is covered by ordinary unit tests; the script itself is smoke-tested with Streamlit's `AppTest`.
 
 ## Tests
 

@@ -72,6 +72,25 @@ class Settings(BaseSettings):
     # only flagged when coverage falls below this fraction of the window.
     min_expected_coverage: float = Field(default=0.80, ge=0.0, le=1.0)
 
+    # --- Analytics ---------------------------------------------------------
+    # Annual risk-free rate used for Sharpe ratios and mean-variance
+    # optimisation. 0.04 is 4%.
+    risk_free_rate: float = Field(default=0.0, ge=-1.0, le=1.0)
+    # Width of one analytics bar, for annualising rates.
+    analytics_interval_hours: int = Field(default=1, ge=1)
+    # Trailing window analytics commands default to.
+    analytics_lookback_days: int = Field(default=90, ge=1)
+    # Rolling mean / volatility lookback, in bars.
+    rolling_window: int = Field(default=24, ge=2)
+    # Per-side trading cost assumptions used by the backtester, in basis
+    # points. Uniswap v3 fee tiers run 5-100bps; 30 is the common one.
+    backtest_fee_bps: float = Field(default=30.0, ge=0.0)
+    backtest_slippage_bps: float = Field(default=5.0, ge=0.0)
+
+    # --- UI ----------------------------------------------------------------
+    ui_host: str = "0.0.0.0"
+    ui_port: int = 8501
+
     # --- Server ------------------------------------------------------------
     host: str = "0.0.0.0"
     port: int = 8000

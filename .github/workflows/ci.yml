@@ -23,7 +23,7 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      - run: uv sync --locked --all-groups
+      - run: uv sync --locked --all-groups --extra ui
       - run: make fmt-check
       - run: make lint
       - run: make typecheck
@@ -55,7 +55,7 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      - run: uv sync --locked --all-groups
+      - run: uv sync --locked --all-groups --extra ui
       - name: Unit and integration tests
         run: uv run pytest --cov --cov-report=term-missing --cov-report=xml
       - uses: actions/upload-artifact@v4
@@ -116,6 +116,17 @@ jobs:
       - name: Every token ingested, and no impossible rows
         if: ${{ secrets.GRAPH_API_KEY != '' }}
         run: docker compose exec -T worker python -m candlegraph report --strict
+
+      - name: Analytics run against real data
+        if: ${{ secrets.GRAPH_API_KEY != '' }}
+        run: |
+          docker compose exec -T worker python -m candlegraph stats WETH
+          docker compose exec -T worker python -m candlegraph signals WETH --store
+          docker compose exec -T worker python -m candlegraph backtest WETH --strategy bollinger
+          docker compose exec -T worker python -m candlegraph portfolio --risk-free-rate 0.04
+
+      - name: The UI is healthy
+        run: curl --fail --silent --show-error http://localhost:8501/_stcore/health
 
       - name: Ingest ledger and logs on failure
         if: failure()

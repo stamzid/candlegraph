@@ -14,13 +14,13 @@ WORKDIR /candlegraph
 # Dependencies first: this layer is cached until the lockfile changes.
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-install-project --no-dev
+    uv sync --locked --no-install-project --no-dev --extra ui
 
 # Then the project itself.
 COPY README.md ./
 COPY candlegraph ./candlegraph
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev
+    uv sync --locked --no-dev --extra ui
 
 FROM python:3.12-slim AS runtime
 ENV PYTHONUNBUFFERED=1 \
@@ -38,7 +38,7 @@ COPY --chown=candlegraph:candlegraph alembic.ini pyproject.toml README.md entryp
 
 RUN chmod +x ./entrypoint.sh
 USER candlegraph
-EXPOSE 8000
+EXPOSE 8000 8501
 
 ENTRYPOINT ["./entrypoint.sh"]
 CMD ["python", "-m", "candlegraph"]

@@ -29,6 +29,12 @@ a target, and never let CI run something that is not one either.
 | Backfill 90 days | `make backfill days=90` |
 | Data-quality report | `make report` |
 | Recent ingest runs | `make runs` |
+| Rolling mean / volatility | `candlegraph stats WETH --window 24` |
+| Signals | `candlegraph signals WETH --strategy bollinger [--store]` |
+| Backtest | `candlegraph backtest WETH --strategy all` |
+| Portfolio | `candlegraph portfolio --risk-free-rate 0.04 --objective max_sharpe` |
+| ARIMA forecast | `candlegraph forecast WETH --auto-order` |
+| Streamlit UI | `make ui` (local) or the `ui` compose service |
 | End-to-end against the stack | `make e2e` |
 | New migration | `make revision m="description"` |
 | Apply migrations | `make migrate` |
@@ -43,7 +49,7 @@ Dependencies are managed by **uv**, not Poetry or pip. `pyproject.toml` plus
 candlegraph/
   settings.py          Typed configuration (pydantic-settings). Cross-cutting.
   tokens.py            Loads and validates config/tokens.yaml into a TokenRegistry.
-  cli.py               `candlegraph serve|worker|ingest|backfill|report|runs`.
+  cli.py               Every command; see the table above.
   storage/
     database.py        Connection pool and query helpers. Connects lazily.
     statements.py      Every SQL statement, built per schema.
@@ -52,12 +58,27 @@ candlegraph/
     transform.py       Subgraph rows -> database rows. Pure.
     runner.py          One ingest run: cursors in, upserted rows out.
     ledger.py          The ingest_run table: who ran, when, and how it went.
-    quality.py         Gap detection and the data-quality report. Pure + reads.
+    quality.py         Gap detection and the data-quality report.
     worker.py          The standalone ingest process.
+  analytics/           Pure numerics. No I/O except prices.py, which only reads.
+    rolling.py         Rolling mean, volatility, z-score, Bollinger, drawdown.
+    portfolio.py       Mean-variance optimisation and the efficient frontier.
+    arima.py           ARIMA fitting, order selection, forecasting.
+    prices.py          Stored rows -> aligned pandas frames.
+  strategies/
+    base.py            Signal, StrategyResult, and the registry.
+    bollinger.py       Mean reversion with hysteresis.
+    crossover.py       Moving-average trend following.
+    arima_signal.py    Walk-forward ARIMA signals.
+    backtest.py        Vectorised backtester. Owns the execution lag.
+    store.py           Upserting signals into the signal table.
   api/
     app.py             FastAPI app factory and health check.
     schema.py          Strawberry GraphQL types and resolvers.
     formatting.py      Database rows -> chart payload. Pure.
+  ui/
+    viewmodels.py      Everything the UI computes. Plain Python, fully tested.
+    app.py             The Streamlit script: widgets and charts only.
   utils/
     logging_utils.py   Logger setup.
 alembic/versions/    Migrations. The schema name comes from settings.
@@ -77,6 +98,7 @@ schema.graphql       Generated. `make sdl`; a test fails if it is stale.
 | `pool` | one row per tracked Uniswap v3 pool | `id` |
 | `pool_hours_data` | one row per pool per hour | `(pool_id, period_start_unix)` |
 | `ingest_run` | one row per ingest run | `run_id` |
+| `signal` | one row per strategy, symbol and bar | `(strategy, symbol, period_start_unix)` |
 
 Pool data is not optional detail: the subgraph carries **no transaction count
 on the token entity at all**, so `tx_count`, per-pair volume, and pool TVL are
@@ -118,10 +140,20 @@ Each of these has a test. Breaking one should break the build, not production.
     stored history; a normal poll only ever walks forwards.
 14. **Pools are discovered one token at a time.** Batching the whole token
     list into one `first: N` query lets the most liquid token take every slot.
-15. **A missing hour is not a fault.** Uniswap emits no row for an hour with
+15. **A backtest lags execution by one bar.** A position decided on bar *t*
+    earns bar *t+1*'s return. Multiplying an unshifted signal by same-bar
+    returns manufactures a profitable backtest silently.
+16. **Rolling windows are complete or absent.** `min_periods=window`, and
+    standard deviations use `ddof=1`.
+17. **A strategy never looks ahead.** The walk-forward ARIMA refits on
+    `prices[: i + 1]`; appending future bars must not change past signals.
+18. **Analytics are pure.** Only `analytics/prices.py` touches the database,
+    and only to read. The UI's arithmetic lives in `ui/viewmodels.py`, never
+    in the Streamlit script.
+19. **A missing hour is not a fault.** Uniswap emits no row for an hour with
     no swaps, so quality is judged by coverage against
     `MIN_EXPECTED_COVERAGE`, never by the presence of a gap.
-16. **No secrets in the repo.** `GRAPH_API_KEY` lives in `.env`, which is
+20. **No secrets in the repo.** `GRAPH_API_KEY` lives in `.env`, which is
     gitignored. `.env.example` documents it with an empty value.
 
 ## Definition of done
@@ -151,17 +183,15 @@ A change is not finished until all of these hold:
 
 ## Roadmap
 
-Phases 1 (stabilise) and 2 (data model and ingestion) are complete. Phase 2
-shipped the market-depth columns, pool tables, the run ledger, gap detection,
-and the worker/API split; its exit criterion is met by
-`make backfill days=90 && make report` over the ten tokens in
-`config/tokens.yaml`.
+Phases 1 (stabilise), 2 (data model and ingestion) and 3 (deterministic
+analytics) are complete. Phase 3 shipped rolling statistics, mean-variance
+optimisation with a configurable risk-free rate, Bollinger mean reversion,
+walk-forward ARIMA signals, the `signal` table, a vectorised backtester and
+a Streamlit UI; its exit criterion is met by
+`candlegraph signals WETH --store && candlegraph backtest WETH --strategy all`.
 
 Next phases, each with an exit criterion:
 
-3. **Deterministic analytics.** Moving-average crossover, Bollinger mean
-   reversion, one time-series signal; MPT frontier and risk parity.
-   *Exit:* a signal table and a backtest report reproducible from the CLI.
 4. **Agent layer.** A CI janitor graph and a run-observer graph (LangGraph).
    *Exit:* both run on a schedule and post reports.
 5. **Harness.** YAML pipeline specs, an event bus, OpenTelemetry metrics.

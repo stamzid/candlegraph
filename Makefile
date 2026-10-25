@@ -11,7 +11,7 @@ E2E_URL ?= http://localhost:$${APP_HOST_PORT:-8000}
 
 .PHONY: help install lock fmt fmt-check lint typecheck test test-unit test-integration \
         cov check up down logs logs-worker ps migrate revision e2e sdl clean \
-        ingest backfill report runs
+        ingest backfill report runs ui logs-ui
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -61,6 +61,12 @@ logs: ## Follow the application log
 
 logs-worker: ## Follow the ingest worker log
 	$(COMPOSE) logs -f worker
+
+logs-ui: ## Follow the UI log
+	$(COMPOSE) logs -f ui
+
+ui: ## Run the Streamlit UI locally against the stack's database
+	$(UV) run --extra ui python -m candlegraph ui
 
 ps: ## Show the stack's status
 	$(COMPOSE) ps
