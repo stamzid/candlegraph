@@ -6,23 +6,22 @@ from typing import Any
 
 import pytest
 
-from candlegraph.__main__ import main
+from candlegraph.cli import main
 from tests.conftest import make_settings
 
 
-def test_main_serves_on_the_configured_address(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_serve_binds_the_configured_address(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
     monkeypatch.setattr(
-        "candlegraph.__main__.get_settings",
+        "candlegraph.cli.get_settings",
         lambda: make_settings(host="127.0.0.1", port=9999, log_level="WARNING"),
     )
     monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: captured.update(app=app, **kwargs))
 
-    main()
-
+    assert main(["serve"]) == 0
     assert captured == {
-        "app": "candlegraph.app:app",
+        "app": "candlegraph.api.app:app",
         "host": "127.0.0.1",
         "port": 9999,
         "log_level": "warning",

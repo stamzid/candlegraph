@@ -13,8 +13,8 @@ from typing import Any
 import httpx
 import pytest
 
-from candlegraph.subgraph_client import SubgraphClient, SubgraphError
-from tests.conftest import WBTC, make_settings
+from candlegraph.ingestion.subgraph import SubgraphClient, SubgraphError
+from tests.conftest import SHIB, WBTC, make_settings
 
 
 @pytest.fixture(autouse=True)
@@ -276,3 +276,129 @@ def test_a_failing_page_propagates_instead_of_being_swallowed() -> None:
         next(pages)
         with pytest.raises(SubgraphError):
             next(pages)
+
+
+# --- pools -----------------------------------------------------------------
+
+POOL_A = "0x" + "aa" * 20
+POOL_B = "0x" + "bb" * 20
+
+
+def pool(pool_id: str, tvl: str = "1") -> dict[str, Any]:
+    return {
+        "id": pool_id,
+        "feeTier": "3000",
+        "totalValueLockedUSD": tvl,
+        "token0": {"id": WBTC, "symbol": "WBTC"},
+        "token1": {"id": "0x" + "cc" * 20, "symbol": "WETH"},
+    }
+
+
+def test_pool_discovery_queries_both_sides_of_the_pair() -> None:
+    handler, seen = responder({"data": {"asToken0": [pool(POOL_A)], "asToken1": [pool(POOL_B)]}})
+    with client_for(handler) as client:
+        pools = client.fetch_pools_for_tokens([WBTC], first=3)
+
+    body = json.loads(seen[0].content)
+    assert body["variables"] == {"id": WBTC, "first": 3}
+    assert "token0: $id" in body["query"]
+    assert "token1: $id" in body["query"]
+    assert {p["id"] for p in pools} == {POOL_A, POOL_B}
+
+
+def test_each_token_gets_its_own_ranking() -> None:
+    """One `token0_in` query with `first: N` lets a liquid token starve the rest."""
+    handler, seen = responder({"data": {"asToken0": [pool(POOL_A)], "asToken1": []}})
+    with client_for(handler) as client:
+        client.fetch_pools_for_tokens([WBTC, SHIB], first=3)
+
+    assert [json.loads(r.content)["variables"]["id"] for r in seen] == [WBTC, SHIB]
+
+
+def test_a_pool_shared_by_two_tokens_is_stored_once() -> None:
+    handler, _ = responder({"data": {"asToken0": [pool(POOL_A)], "asToken1": []}})
+    with client_for(handler) as client:
+        assert len(client.fetch_pools_for_tokens([WBTC, SHIB], first=3)) == 1
+
+
+def test_a_pool_matching_both_sides_is_returned_once() -> None:
+    """A pool can appear in both halves of the query; storing it twice is wrong."""
+    handler, _ = responder({"data": {"asToken0": [pool(POOL_A)], "asToken1": [pool(POOL_A)]}})
+    with client_for(handler) as client:
+        assert len(client.fetch_pools_for_tokens([WBTC], first=3)) == 1
+
+
+def test_pool_discovery_is_skipped_for_no_tokens() -> None:
+    handler, seen = responder({"data": {"asToken0": [], "asToken1": []}})
+    with client_for(handler) as client:
+        assert client.fetch_pools_for_tokens([], first=3) == []
+
+    assert seen == []
+
+
+def test_pool_discovery_is_skipped_when_disabled_by_count() -> None:
+    """`POOLS_PER_TOKEN=0` must not issue a request at all."""
+    handler, seen = responder({"data": {"asToken0": [], "asToken1": []}})
+    with client_for(handler) as client:
+        assert client.fetch_pools_for_tokens([WBTC], first=0) == []
+
+    assert seen == []
+
+
+def test_pool_hour_pages_follow_the_same_cursor_rule() -> None:
+    def pool_hours(start: int, count: int) -> list[dict[str, Any]]:
+        return [
+            {"id": f"{POOL_A}-{start + i}", "periodStartUnix": (start + i) * 3600, "txCount": "1"}
+            for i in range(count)
+        ]
+
+    handler, seen = responder(
+        {"data": {"poolHourDatas": pool_hours(1, 2)}},
+        {"data": {"poolHourDatas": pool_hours(3, 1)}},
+    )
+    with client_for(handler, subgraph_page_size=2) as client:
+        pages = list(client.iter_pool_hour_datas(POOL_A, 0))
+
+    assert [page.last_timestamp for page in pages] == [2 * 3600, 3 * 3600]
+    assert [json.loads(r.content)["variables"]["pool"] for r in seen] == [POOL_A, POOL_A]
+
+
+def test_a_stuck_pool_cursor_raises_too() -> None:
+    """The anti-hot-loop rule is shared, so it must hold for pools as well."""
+    stuck = {
+        "data": {
+            "poolHourDatas": [
+                {"id": f"{POOL_A}-1", "periodStartUnix": 3600},
+                {"id": f"{POOL_A}-2", "periodStartUnix": 7200},
+            ]
+        }
+    }
+    handler, _ = responder(stuck)
+
+    with client_for(handler, subgraph_page_size=2) as client:
+        pages = client.iter_pool_hour_datas(POOL_A, 0)
+        next(pages)
+        with pytest.raises(SubgraphError, match="did not advance"):
+            next(pages)
+
+
+def test_the_token_hour_query_asks_for_the_enrichment_fields() -> None:
+    """Dropping a field here silently stops populating a column."""
+    handler, seen = responder({"data": {"tokenHourDatas": []}})
+    with client_for(handler) as client:
+        client.fetch_token_hour_page(WBTC, 0)
+
+    query = json.loads(seen[0].content)["query"]
+    for field in ("volume", "volumeUSD", "totalValueLocked", "totalValueLockedUSD", "feesUSD"):
+        assert field in query
+
+
+def test_the_pool_hour_query_asks_for_tx_count() -> None:
+    """Pool data is the only source of transaction counts in this subgraph."""
+    handler, seen = responder({"data": {"poolHourDatas": []}})
+    with client_for(handler) as client:
+        client.fetch_pool_hour_page(POOL_A, 0)
+
+    query = json.loads(seen[0].content)["query"]
+    assert "txCount" in query
+    assert "tvlUSD" in query

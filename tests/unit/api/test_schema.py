@@ -9,14 +9,14 @@ from typing import Any
 
 import pytest
 
-from candlegraph.dba import set_db
-from candlegraph.schema import (
+from candlegraph.api.schema import (
     MAX_TIME_UNIT_IN_HOURS,
     build_chart_data,
     chart_schema,
     fetch_chart_data,
     fetch_token_metadata,
 )
+from candlegraph.storage import set_db
 from candlegraph.tokens import TokenRegistry
 from tests.conftest import WBTC, FakeDatabase
 

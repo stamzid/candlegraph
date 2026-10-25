@@ -1,6 +1,6 @@
 [project]
 name = "candlegraph"
-version = "0.2.0"
+version = "0.3.0"
 description = "Digital asset market data service: ingests Uniswap v3 hourly token data and serves OHLC candles over GraphQL."
 readme = "README.md"
 license = { text = "MIT" }
@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.scripts]
-candlegraph = "candlegraph.__main__:main"
+candlegraph = "candlegraph.cli:main"
 
 [dependency-groups]
 dev = [

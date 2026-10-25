@@ -14,9 +14,10 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from candlegraph.app import INGEST_JOB_ID, build_scheduler, create_app, ingest_job
-from candlegraph.dba import set_db
+from candlegraph.api.app import create_app, ingest_job
+from candlegraph.ingestion.worker import INGEST_JOB_ID, build_scheduler
 from candlegraph.settings import Settings
+from candlegraph.storage import set_db
 from tests.conftest import FakeDatabase, make_settings
 
 
@@ -61,6 +62,8 @@ def test_status_is_ok_when_the_database_answers(app_settings: Settings, db: Fake
         "database": "up",
         "ingest": "disabled",
         "tokens": ["WBTC", "SHIB"],
+        "last_ingest_seconds_ago": None,
+        "data_fresh": False,
     }
 
 
@@ -78,7 +81,7 @@ def test_status_is_503_when_the_database_is_unreachable(app_settings: Settings, 
 def test_status_reports_ingestion_as_enabled(
     tokens_file: Path, db: FakeDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("candlegraph.app.build_scheduler", lambda _s: _NullScheduler())
+    monkeypatch.setattr("candlegraph.api.app.build_scheduler", lambda _s, job=None: _NullScheduler())
     settings = make_settings(tokens_file=str(tokens_file), ingest_enabled=True)
 
     with TestClient(create_app(settings)) as client:
@@ -122,7 +125,7 @@ def test_no_scheduler_runs_when_ingestion_is_disabled(
     app_settings: Settings, db: FakeDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     started: list[Any] = []
-    monkeypatch.setattr("candlegraph.app.build_scheduler", lambda s: started.append(s))
+    monkeypatch.setattr("candlegraph.api.app.build_scheduler", lambda s, job=None: started.append(s))
 
     for client in client_for(app_settings):
         assert client.get("/status").status_code == 200
@@ -142,7 +145,7 @@ def test_the_scheduler_starts_and_shuts_down_with_the_app(
         def shutdown(self, wait: bool = True) -> None:
             events.append(f"shutdown(wait={wait})")
 
-    monkeypatch.setattr("candlegraph.app.build_scheduler", lambda _s: SpyScheduler())
+    monkeypatch.setattr("candlegraph.api.app.build_scheduler", lambda _s, job=None: SpyScheduler())
     settings = make_settings(tokens_file=str(tokens_file), ingest_enabled=True)
 
     with TestClient(create_app(settings)) as client:
@@ -160,7 +163,7 @@ def test_the_api_serves_even_when_every_ingest_run_fails(
     def always_fails(*_args: Any, **_kwargs: Any) -> None:
         raise ConnectionError("subgraph is gone")
 
-    monkeypatch.setattr("candlegraph.app.run_ingest", always_fails)
+    monkeypatch.setattr("candlegraph.ingestion.worker.run_ingest", always_fails)
     settings = make_settings(tokens_file=str(tokens_file), ingest_enabled=True, data_poll_interval=3600)
 
     with TestClient(create_app(settings)) as client:
@@ -176,13 +179,13 @@ def test_the_ingest_job_delegates_to_run_ingest(
 ) -> None:
     monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
     calls: list[tuple[Any, ...]] = []
-    monkeypatch.setattr("candlegraph.app.run_ingest", lambda *args: calls.append(args))
+    monkeypatch.setattr("candlegraph.ingestion.worker.run_ingest", lambda *a, **k: calls.append((a, k)))
     settings = make_settings(tokens_file=str(tokens_file))
 
     ingest_job(settings)
 
     assert len(calls) == 1
-    database, registry, passed_settings = calls[0]
+    (database, registry, passed_settings), _kwargs = calls[0]
     assert database is db
     assert registry.symbols == ("WBTC", "SHIB")
     assert passed_settings is settings
@@ -194,10 +197,10 @@ def test_the_ingest_job_never_raises(
     """An exception escaping the job would stop APScheduler rescheduling it."""
     monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
 
-    def boom(*_args: Any) -> None:
+    def boom(*_args: Any, **_kwargs: Any) -> None:
         raise RuntimeError("subgraph down")
 
-    monkeypatch.setattr("candlegraph.app.run_ingest", boom)
+    monkeypatch.setattr("candlegraph.ingestion.worker.run_ingest", boom)
 
     with caplog.at_level("ERROR", logger="candlegraph"):
         ingest_job(make_settings(tokens_file=str(tokens_file)))

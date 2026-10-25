@@ -13,8 +13,8 @@ from typing import Any
 import psycopg2
 import pytest
 
-from candlegraph.dba import DatabaseManager
-from candlegraph.helpers import format_chart_data
+from candlegraph.api.formatting import format_chart_data
+from candlegraph.storage import DatabaseManager
 from tests.conftest import SHIB, WBTC
 
 pytestmark = pytest.mark.integration
@@ -35,6 +35,10 @@ def hour_record(
     low: str = "90",
     close: str = "105",
     price: str = "102",
+    volume: str | None = "12.5",
+    volume_usd: str | None = "1275",
+    tvl_usd: str | None = "5000000",
+    fees_usd: str | None = "3.82",
 ) -> dict[str, Any]:
     period_start = BASE + index * HOUR
     return {
@@ -45,6 +49,12 @@ def hour_record(
         "low": low,
         "close": close,
         "priceUSD": price,
+        "volume": volume,
+        "volumeUSD": volume_usd,
+        "untrackedVolumeUSD": volume_usd,
+        "totalValueLocked": "40",
+        "totalValueLockedUSD": tvl_usd,
+        "feesUSD": fees_usd,
         "periodStartUnix": period_start,
         "timestamp": datetime.fromtimestamp(period_start, tz=UTC),
     }
@@ -153,6 +163,14 @@ def test_token_metadata_upserts_on_conflict(db: DatabaseManager) -> None:
         "totalSupply": "1",
         "volumeUSD": "2",
         "decimals": "8",
+        "volume": "3",
+        "feesUSD": "4",
+        "txCount": 5,
+        "poolCount": 6,
+        "totalValueLocked": "7",
+        "totalValueLockedUSD": "8",
+        "derivedETH": "9",
+        "updated_at": datetime.now(tz=UTC),
     }
     db.upsert_many(db.sql.insert_token, db.sql.insert_token_template, [first])
     db.upsert_many(db.sql.insert_token, db.sql.insert_token_template, [{**first, "volumeUSD": "99"}])
@@ -188,17 +206,17 @@ def test_latest_timestamps_are_empty_on_a_fresh_database(db: DatabaseManager) ->
     assert db.fetch_all(db.sql.get_latest_timestamps) == []
 
 
-# --- pruning ---------------------------------------------------------------
+# --- retention -------------------------------------------------------------
 
 
-def test_pruning_deletes_only_rows_before_the_cutoff(db: DatabaseManager) -> None:
+def test_old_rows_are_never_removed_by_a_write(db: DatabaseManager) -> None:
+    """History is retained forever; writing new hours must not touch old ones."""
     write_hours(db, [hour_record(i) for i in range(5)])
 
-    deleted = db.execute(db.sql.delete_older_data, {"interval_start": BASE + 3 * HOUR})
+    write_hours(db, [hour_record(i) for i in range(5, 8)])
 
-    assert deleted == 3
     remaining = db.fetch_all(f'SELECT period_start_unix FROM "{db.schema}".token_hours_data ORDER BY 1')
-    assert [row["period_start_unix"] for row in remaining] == [BASE + 3 * HOUR, BASE + 4 * HOUR]
+    assert [row["period_start_unix"] for row in remaining] == [BASE + i * HOUR for i in range(8)]
 
 
 # --- candle aggregation ----------------------------------------------------

@@ -10,8 +10,8 @@ from typing import Any
 
 import strawberry
 
-from candlegraph.dba import DatabaseManager, get_db
-from candlegraph.helpers import empty_chart_data, format_chart_data
+from candlegraph.api.formatting import empty_chart_data, format_chart_data
+from candlegraph.storage import DatabaseManager, get_db
 from candlegraph.tokens import TokenRegistry, get_token_registry
 
 MAX_TIME_UNIT_IN_HOURS = 24 * 366

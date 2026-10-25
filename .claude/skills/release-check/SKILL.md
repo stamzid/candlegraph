@@ -27,10 +27,11 @@ The exit criterion for this repo is a clean clone coming up and loading data.
 
 ```sh
 make down && make up
-sleep 25
-curl -s localhost:8000/status | python3 -m json.tool    # "status": "ok"
-make logs | grep "Ingested"                              # one line per token
-make e2e                                                 # 9 assertions, 0 skips
+sleep 30
+curl -s localhost:8000/status | python3 -m json.tool    # "status": "ok", "data_fresh": true
+make runs                                                # one succeeded run
+make e2e                                                 # 0 skips
+docker compose exec -T worker python -m candlegraph report --strict
 ```
 
 `make e2e` reporting `skipped` means `CANDLEGRAPH_E2E_URL` was unset — the

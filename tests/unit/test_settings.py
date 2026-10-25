@@ -23,9 +23,9 @@ def test_defaults_are_the_documented_ones() -> None:
     assert settings.subgraph_id == DEFAULT_SUBGRAPH_ID
     assert settings.lookback_days == 7
     assert settings.data_poll_interval == 300
-    assert settings.retain_history is True
     assert settings.ingest_enabled is True
     assert settings.graph_api_key is None
+    assert not hasattr(settings, "retain_history"), "history pruning was removed"
 
 
 @pytest.mark.parametrize(
@@ -54,12 +54,10 @@ def test_numeric_env_values_are_coerced_to_int(
 def test_boolean_env_values_are_coerced(
     monkeypatch: pytest.MonkeyPatch, env_value: str, expected: bool
 ) -> None:
-    monkeypatch.setenv("RETAIN_HISTORY", env_value)
     monkeypatch.setenv("INGEST_ENABLED", env_value)
 
     settings = Settings(_env_file=None)
 
-    assert settings.retain_history is expected
     assert settings.ingest_enabled is expected
 
 

@@ -1,8 +1,4 @@
-"""Pure transforms between subgraph rows, database rows, and API payloads.
-
-Everything here is a function of its arguments with no I/O, which is what makes
-the bulk of the test suite fast and offline.
-"""
+"""Reshaping aggregated database rows into the GraphQL chart payload."""
 
 from __future__ import annotations
 
@@ -14,15 +10,6 @@ PRICE_TYPES = ("open", "close", "high", "low", "priceUSD")
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 
-class RowFormatError(ValueError):
-    """A subgraph row is missing fields the database write path requires."""
-
-
-def split_token_id(composite_id: str) -> str:
-    """Return the token address from a ``<address>-<hour index>`` subgraph id."""
-    return composite_id.split("-")[0].lower()
-
-
 def to_utc_iso(moment: datetime) -> str:
     """Format a datetime as a naive-looking UTC ISO string.
 
@@ -32,46 +19,6 @@ def to_utc_iso(moment: datetime) -> str:
     if moment.tzinfo is not None:
         moment = moment.astimezone(UTC)
     return moment.strftime(TIME_FORMAT)
-
-
-def prepare_hour_rows(rows: list[dict[str, Any]], symbol_by_address: dict[str, str]) -> list[dict[str, Any]]:
-    """Turn raw ``tokenHourDatas`` rows into rows the insert statement accepts.
-
-    Replaces the composite ``id`` with the bare token address, attaches the
-    configured ``symbol``, and derives a UTC ``timestamp`` from
-    ``periodStartUnix``. Rows for tokens outside the registry are dropped: the
-    subgraph is not supposed to return them, and inserting them would store a
-    symbol we cannot resolve on read.
-
-    Returns:
-        A new list; the input rows are not mutated.
-    """
-    prepared: list[dict[str, Any]] = []
-    for row in rows:
-        try:
-            address = split_token_id(row["id"])
-            period_start = int(row["periodStartUnix"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RowFormatError(f"row is missing a usable id/periodStartUnix: {row!r}") from exc
-
-        symbol = symbol_by_address.get(address)
-        if symbol is None:
-            continue
-
-        missing = [field for field in ("open", "high", "low", "close", "priceUSD") if field not in row]
-        if missing:
-            raise RowFormatError(f"row {row['id']!r} is missing price fields: {missing}")
-
-        prepared.append(
-            {
-                **row,
-                "id": address,
-                "symbol": symbol,
-                "periodStartUnix": period_start,
-                "timestamp": datetime.fromtimestamp(period_start, tz=UTC),
-            }
-        )
-    return prepared
 
 
 def _as_float(value: Any) -> float:

@@ -1,6 +1,28 @@
 # Project name is intentionally left to Compose's default (the directory name)
 # so several checkouts or git worktrees can run side by side. Override with
 # COMPOSE_PROJECT_NAME, and the published ports below, if you need two at once.
+#
+# Three services: the database, the API, and the ingest worker. The API and the
+# worker are separate processes so a long backfill cannot compete with query
+# traffic, and so either can be restarted or scaled without the other.
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: candlegraph:latest
+  env_file:
+    - path: .env
+      required: false
+  environment: &app-env
+    # Always reach Postgres over the compose network, whatever .env says for
+    # local runs.
+    DB_HOST: postgres
+    DB_PORT: "5432"
+  depends_on:
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
 
 services:
   postgres:
@@ -25,30 +47,32 @@ services:
     restart: unless-stopped
 
   candlegraph:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: candlegraph:latest
-    env_file:
-      - path: .env
-        required: false
+    <<: *app
+    command: ["python", "-m", "candlegraph", "serve"]
     environment:
-      # Always reach Postgres over the compose network, whatever .env says for
-      # local runs.
-      DB_HOST: postgres
-      DB_PORT: "5432"
+      <<: *app-env
+      # The worker owns ingestion; the API only serves.
+      INGEST_ENABLED: "false"
     ports:
       - "${APP_HOST_PORT:-8000}:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/status', timeout=5).status == 200 else 1)\""]
       interval: 10s
       timeout: 10s
       retries: 10
       start_period: 20s
-    restart: unless-stopped
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "candlegraph", "worker"]
+    # Waits for the API to be *healthy*, not merely started: the API's
+    # entrypoint is what applies migrations, and two containers running
+    # `alembic upgrade head` at once would race on the same DDL.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      candlegraph:
+        condition: service_healthy
 
 volumes:
   pgdata:

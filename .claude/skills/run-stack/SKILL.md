@@ -20,8 +20,10 @@ test -f .env || cp .env.example .env
 make up      # build, start, and block until both containers are healthy
 ```
 
-`make up` fails if either container never reaches healthy. The app waits for
-Postgres's healthcheck, then applies migrations, then serves.
+`make up` fails if any container never reaches healthy. Three services come
+up in order: `postgres`, then `candlegraph` (the API, which applies the
+migrations), then `worker` (which ingests). The worker waits for the API to be
+*healthy* so two containers never race on the same DDL.
 
 ## Verify
 
@@ -68,7 +70,9 @@ make down    # also deletes the volume, so the next `make up` backfills fresh
 | Port already allocated | Another worktree's stack is up. Set `POSTGRES_HOST_PORT` / `APP_HOST_PORT` in `.env`, or `make down` in the other checkout. |
 | `auth error: malformed API key` in the logs | `GRAPH_API_KEY` is empty or wrong in `.env`. Get one at <https://thegraph.com/studio/apikeys/>. |
 | `/status` returns 503 | Postgres is unreachable. `docker compose ps` and `docker compose logs postgres`. |
-| App healthy but no rows | Normal for the first ~20s. After that, read `make logs` — per-token errors are logged with the symbol. |
+| App healthy but no rows | Normal for the first ~20s. After that, read `make logs-worker` — per-token errors are logged with the symbol, and `make runs` shows the run status. |
+| `"data_fresh": false` in /status | No successful run in the last three poll intervals. `make runs` shows why. |
+| Worker never starts | It waits for the API healthcheck. Fix the API first. |
 | Migration errors on start | A volume from an older schema. `make down` (which drops it) then `make up`. |
 
 Never add `name:` to `docker-compose.yaml`: the project name is left to default

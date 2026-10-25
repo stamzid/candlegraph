@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from candlegraph.schema import chart_schema
+from candlegraph.api.schema import chart_schema
 from candlegraph.settings import REPO_ROOT
 
 SDL_PATH = REPO_ROOT / "schema.graphql"

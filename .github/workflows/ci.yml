@@ -86,28 +86,42 @@ jobs:
           if [ -n "$GRAPH_API_KEY" ]; then
             sed -i "s|^GRAPH_API_KEY=.*|GRAPH_API_KEY=$GRAPH_API_KEY|" .env
           fi
+          # CI validates that the pipeline works, not that the market was
+          # liquid. Thin tokens are legitimately sparse over a short window,
+          # so the strict gate below checks only the unambiguous faults:
+          # a token that ingested nothing, and impossible rows.
+          sed -i "s|^MIN_EXPECTED_COVERAGE=.*|MIN_EXPECTED_COVERAGE=0|" .env
           make up
 
       - name: The API is healthy
         run: |
           curl --fail --silent --show-error http://localhost:8000/status | tee /dev/stderr
 
-      - name: End-to-end tests
+      - name: Wait for the worker to ingest
         # These assert real ingested candles, so they only mean anything with
         # a key. Without one, the health check above is the gate.
         if: ${{ secrets.GRAPH_API_KEY != '' }}
         run: |
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 40); do
             count=$(docker compose exec -T postgres psql -U candlegraph -d candlegraph -tAc \
               'SELECT COUNT(*) FROM candlegraph.token_hours_data' 2>/dev/null || echo 0)
             [ "$count" -gt 0 ] && break
             sleep 5
           done
-          make e2e
 
-      - name: Logs on failure
+      - name: End-to-end tests
+        if: ${{ secrets.GRAPH_API_KEY != '' }}
+        run: make e2e
+
+      - name: Every token ingested, and no impossible rows
+        if: ${{ secrets.GRAPH_API_KEY != '' }}
+        run: docker compose exec -T worker python -m candlegraph report --strict
+
+      - name: Ingest ledger and logs on failure
         if: failure()
-        run: docker compose logs --no-color
+        run: |
+          docker compose exec -T worker python -m candlegraph runs || true
+          docker compose logs --no-color
 
       - name: Tear down
         if: always()

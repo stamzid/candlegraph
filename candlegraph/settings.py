@@ -54,12 +54,23 @@ class Settings(BaseSettings):
 
     # --- Ingestion ---------------------------------------------------------
     tokens_file: Path = Path("config/tokens.yaml")
+    # How far back a first-time backfill reaches. Stored history is never
+    # deleted, so this only bounds the initial fetch for an unseen token.
     lookback_days: int = Field(default=7, ge=1)
     data_poll_interval: int = Field(default=300, ge=1)
-    # False deletes rows older than the lookback window after each run.
-    retain_history: bool = True
-    # False serves the API only.
+    # False serves the API only. The worker process ignores this.
     ingest_enabled: bool = True
+    # Pool-level data is where volume per pair, fees, and tx counts come from;
+    # the token-level entity carries no transaction count at all.
+    ingest_pools: bool = True
+    # Top pools by TVL to track per configured token, counted on each side of
+    # the pair. 0 disables discovery and tracks only already-stored pools.
+    pools_per_token: int = Field(default=3, ge=0, le=50)
+
+    # --- Data quality ------------------------------------------------------
+    # An hour with no Uniswap activity legitimately has no row, so a token is
+    # only flagged when coverage falls below this fraction of the window.
+    min_expected_coverage: float = Field(default=0.80, ge=0.0, le=1.0)
 
     # --- Server ------------------------------------------------------------
     host: str = "0.0.0.0"

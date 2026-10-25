@@ -13,6 +13,7 @@ reconstructing the steps:
 - `run-stack` — bring the stack up, check health, read logs, tear down.
 - `add-token` — add a token to `config/tokens.yaml` and verify it ingests.
 - `add-migration` — create, apply, and verify an Alembic revision.
+- `backfill-and-verify` — load history and read the data-quality report.
 - `release-check` — the full pre-merge gate.
 
 ## Working here
@@ -25,6 +26,11 @@ reconstructing the steps:
   test is usually right.
 - `.env` is gitignored and holds a real `GRAPH_API_KEY`. Never print it, commit
   it, or copy it into `.env.example`, a test fixture, or a log line.
+- Ingestion runs in the `worker` service, not the API. `make logs` shows the
+  API; `make logs-worker` shows ingestion. A question about missing data is
+  almost always answered by `make runs` and `make report`, not by the API log.
+- Low coverage in `make report` is frequently correct — a token with no swaps
+  in an hour has no row. Check average hourly volume before calling it a bug.
 - Integration tests need Docker. Without it they skip rather than fail, so a
   green `pytest` run on a machine without Docker does not mean the data layer
   was exercised — check for skips before declaring success.

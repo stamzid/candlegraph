@@ -4,22 +4,32 @@ A digital asset market data service. candlegraph ingests hourly Uniswap v3 token
 metadata from The Graph, stores them in PostgreSQL, and serves OHLC candles through a GraphQL API
 for charts and analytics.
 
+It stores hourly OHLC, USD price, volume, TVL and fees per token, plus pool-level data
+(per-pair volume, fees, liquidity and transaction counts) for the deepest Uniswap v3 pools
+holding each token. Every ingest run is recorded, and a built-in data-quality report measures
+coverage and finds gaps.
+
 **Stack:** Python 3.12, FastAPI, Strawberry GraphQL, PostgreSQL 17, SQLAlchemy/Alembic,
 APScheduler, uv, Docker.
 
 ## How it works
 
-1. On startup the service applies migrations, then starts serving immediately.
-2. A background scheduler runs the first backfill and re-polls every `DATA_POLL_INTERVAL`
-   seconds. Each run resumes from the newest hour already stored, so restarts re-fetch nothing
-   and writes are idempotent.
-3. The API groups the stored hourly rows into candles of any width at query time.
+The stack is three processes: PostgreSQL, the **API**, and a separate **ingest worker**.
 
-Ingestion deliberately runs *alongside* the server rather than before it: if The Graph is
-unreachable, the API still comes up and serves whatever data is already stored.
+1. On startup the API applies migrations, then serves immediately.
+2. The worker discovers the deepest pools for each tracked token, then polls token and pool
+   hourly data every `DATA_POLL_INTERVAL` seconds. Each run resumes from the newest hour
+   already stored, so restarts re-fetch nothing and writes are idempotent.
+   **Stored data is never deleted** — it is the input to the planned analytics phases.
+3. Every run is written to the `ingest_run` ledger, so freshness and failures are queryable.
+4. The API groups the stored hourly rows into candles of any width at query time.
+
+Ingestion runs in its own process so a long backfill cannot compete with query traffic, and
+so an unreachable subgraph degrades the data rather than the service — the API comes up and
+stays up regardless.
 
 The tokens tracked are config, not code — see [`config/tokens.yaml`](config/tokens.yaml)
-(currently WBTC, SHIB, GNO).
+(ten mainnet tokens by default: WETH, WBTC, USDC, USDT, DAI, LINK, UNI, AAVE, SHIB, GNO).
 
 ## Quick start
 
@@ -34,8 +44,16 @@ make up                 # builds, starts, and waits until healthy
 Then:
 
 ```sh
-curl -s localhost:8000/status            # {"status":"ok","database":"up",...}
-make logs                                # "Ingested 168 hourly rows for WBTC"
+curl -s localhost:8000/status            # {"status":"ok","database":"up","data_fresh":true,...}
+make logs-worker                         # "Ingested 168 hourly rows for WBTC"
+```
+
+Backfill history and check what you got:
+
+```sh
+make backfill days=90                    # ~5 min for ten tokens
+make report                              # coverage, gaps, field completeness
+make runs                                # the ingest ledger
 ```
 
 GraphiQL is at <http://localhost:8000/graphql>. `make down` stops the stack and drops its volume.
@@ -73,10 +91,12 @@ see [`.env.example`](.env.example) for the full list.
 | `DATABASE_URL` | unset | Full URL; overrides the `DB_*` values. |
 | `MIN_DB_CONNECTIONS` / `MAX_DB_CONNECTIONS` | 2 / 10 | Pool size. |
 | `TOKENS_FILE` | `config/tokens.yaml` | Which tokens to ingest. |
-| `LOOKBACK_DAYS` | 7 | How far back a first-time backfill reaches. |
+| `LOOKBACK_DAYS` | 7 | How far back a first-time backfill reaches for a token with no stored rows. |
+| `INGEST_POOLS` | `true` | `false` skips pool-level data (and so transaction counts). |
+| `POOLS_PER_TOKEN` | 3 | Deepest pools to track per token, per side of the pair. 0 freezes the set. |
+| `MIN_EXPECTED_COVERAGE` | 0.80 | Coverage below which `candlegraph report` flags a token. |
 | `DATA_POLL_INTERVAL` | 300 | Seconds between ingest runs. |
-| `RETAIN_HISTORY` | `true` | `false` deletes rows older than the lookback window after each run. |
-| `INGEST_ENABLED` | `true` | `false` serves the API only. |
+| `INGEST_ENABLED` | `true` | `false` serves the API only. The compose stack sets this `false` for the API and runs the `worker` service instead. |
 | `HOST`, `PORT`, `LOG_LEVEL` | `0.0.0.0`, 8000, `INFO` | Server. |
 
 The database credentials in `.env.example` are throwaway defaults for the local Docker Postgres.
@@ -111,6 +131,38 @@ Two details worth knowing:
 
 `supportedTokens` returns the symbols this deployment tracks. `GET /status` is the health check
 and returns 503 when the database is unreachable.
+
+## Commands
+
+`python -m candlegraph <command>` (or `candlegraph <command>` once installed):
+
+| Command | What it does |
+|---|---|
+| `serve` | Run the GraphQL API |
+| `worker` | Run the ingest loop until stopped |
+| `ingest` | One ingest pass, then exit |
+| `backfill --days 90` | One pass over a longer window, rewinding past stored history |
+| `report [--days N] [--strict]` | Data-quality report; `--strict` exits non-zero when dirty |
+| `runs [--limit N]` | Recent rows from the ingest ledger |
+
+## Data quality
+
+`make report` prints coverage per token, the gaps it found, and how populated each enrichment
+column is:
+
+```
+symbol        rows  coverage   gaps   longest  range
+WBTC          2160   100.0%      0         -  2026-07-27 09:00 .. 2026-10-25 08:00
+GNO           1026    47.5%    436       22h  2026-07-27 09:00 .. 2026-10-25 07:00
+field completeness: volume=100%  volume_usd=100%  tvl_usd=100%  fees_usd=100%
+BELOW 80% COVERAGE: GNO 47.5%
+```
+
+A gap is **not** automatically a fault. Uniswap v3 emits no `tokenHourData` for an hour with no
+swaps, so a thin token is legitimately sparse — GNO above is real, not a bug. That is why the
+report measures coverage against `MIN_EXPECTED_COVERAGE` rather than treating any gap as an
+error. It separately flags rows that are impossible regardless of market conditions
+(`high < low`, OHLC outside the bar).
 
 ## Tests
 

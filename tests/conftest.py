@@ -14,8 +14,8 @@ from typing import Any
 
 import pytest
 
-from candlegraph.dba import set_db, statements_for
 from candlegraph.settings import Settings, reset_settings_cache
+from candlegraph.storage import set_db, statements_for
 from candlegraph.tokens import TokenRegistry, load_tokens, reset_token_cache
 
 TOKENS_YAML = """
@@ -45,7 +45,6 @@ AMBIENT_ENV = (
     "GRAPH_API_KEY",
     "INGEST_ENABLED",
     "LOOKBACK_DAYS",
-    "RETAIN_HISTORY",
     "TOKENS_FILE",
     "TRANSPORT_URL",
 )
@@ -89,7 +88,6 @@ def make_settings(**overrides: Any) -> Settings:
         "graph_api_key": "test-key",
         "tokens_file": "config/tokens.yaml",
         "lookback_days": 7,
-        "retain_history": True,
         "ingest_enabled": False,
     }
     return Settings(_env_file=None, **{**defaults, **overrides})
@@ -109,7 +107,7 @@ def frozen_now() -> datetime:
 
 
 class FakeDatabase:
-    """A stand-in for :class:`~candlegraph.dba.DatabaseManager`.
+    """A stand-in for :class:`~candlegraph.storage.DatabaseManager`.
 
     Records every statement it is handed and replays canned read results, so
     the ingest and resolver logic can be tested without a database.
@@ -126,13 +124,16 @@ class FakeDatabase:
         self.closed = False
 
     def _label(self, query: Any) -> str:
-        for name in ("get_latest_timestamps", "get_token_metadata", "chart_query", "delete_older_data"):
-            if query is getattr(self.sql, name):
+        """Name the statement being run, so tests can assert on intent.
+
+        Derived from the ``Statements`` fields rather than a hand-kept list, so
+        a new statement is recognised here the moment it is added.
+        """
+        for name, statement in vars(self.sql).items():
+            if name.endswith("_template"):
+                continue
+            if query is statement:
                 return name
-        if query is self.sql.insert_token:
-            return "insert_token"
-        if query is self.sql.insert_token_hours:
-            return "insert_token_hours"
         return "unknown"
 
     def fetch_all(self, query: Any, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:

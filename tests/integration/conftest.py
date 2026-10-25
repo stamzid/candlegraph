@@ -18,8 +18,8 @@ from contextlib import contextmanager
 
 import pytest
 
-from candlegraph.dba import DatabaseManager, set_db
 from candlegraph.settings import reset_settings_cache
+from candlegraph.storage import DatabaseManager, set_db
 
 SCHEMA = "candlegraph"
 

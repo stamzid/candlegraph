@@ -16,11 +16,11 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from candlegraph.app import create_app
-from candlegraph.dba import DatabaseManager
-from candlegraph.ingest import ingest_once
+from candlegraph.api.app import create_app
+from candlegraph.ingestion.runner import ingest_once
+from candlegraph.ingestion.subgraph import SubgraphClient
 from candlegraph.settings import Settings
-from candlegraph.subgraph_client import SubgraphClient
+from candlegraph.storage import DatabaseManager
 from candlegraph.tokens import TokenRegistry
 from tests.conftest import SHIB, WBTC, make_settings
 
@@ -85,9 +85,17 @@ SHIB_HOURS = [hour_row(SHIB, 0, "1", "2", "0.5", "1.5", "1.2")]
 class FakeSubgraph:
     """An httpx handler that serves the canned rows, with real cursor paging."""
 
-    def __init__(self, rows: dict[str, list[dict]], page_size: int) -> None:
+    def __init__(
+        self,
+        rows: dict[str, list[dict]],
+        page_size: int,
+        pools: dict[str, list[dict]] | None = None,
+        pool_hours: dict[str, list[dict]] | None = None,
+    ) -> None:
         self.rows = rows
         self.page_size = page_size
+        self.pools = pools or {}
+        self.pool_hours = pool_hours or {}
         self.requests: list[dict[str, Any]] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -100,6 +108,20 @@ class FakeSubgraph:
             return httpx.Response(
                 200, json={"data": {"tokens": [t for t in TOKEN_METADATA if t["id"] in wanted]}}
             )
+
+        # Pool discovery: one token per request.
+        if "id" in variables:
+            return httpx.Response(
+                200, json={"data": {"asToken0": self.pools.get(variables["id"], []), "asToken1": []}}
+            )
+
+        if "pool" in variables:
+            rows = self.pool_hours.get(variables["pool"], [])
+            newer = sorted(
+                (r for r in rows if r["periodStartUnix"] > variables["since"]),
+                key=lambda r: r["periodStartUnix"],
+            )
+            return httpx.Response(200, json={"data": {"poolHourDatas": newer[: self.page_size]}})
 
         token_rows = self.rows.get(variables["token"], [])
         newer = [r for r in token_rows if r["periodStartUnix"] > variables["since"]]
@@ -228,7 +250,10 @@ def test_ingest_survives_one_token_failing(
         return httpx.Response(200, json={"data": {"tokenHourDatas": rows}})
 
     settings = make_settings(
-        tokens_file=str(ingest_settings.tokens_file), lookback_days=3650, subgraph_max_tries=1
+        tokens_file=str(ingest_settings.tokens_file),
+        lookback_days=3650,
+        subgraph_max_tries=1,
+        ingest_pools=False,
     )
     with SubgraphClient(settings, client=httpx.Client(transport=httpx.MockTransport(flaky))) as client:
         result = run(db, client, registry, settings)
@@ -329,16 +354,74 @@ def test_status_reports_a_healthy_database(db: DatabaseManager, api: TestClient)
     assert response.json()["database"] == "up"
 
 
-def test_pruning_removes_old_rows_end_to_end(
+def test_history_outside_the_lookback_window_survives_a_run(
     db: DatabaseManager, client: SubgraphClient, registry: TokenRegistry, tokens_file: Path
 ) -> None:
-    settings = make_settings(tokens_file=str(tokens_file), lookback_days=3650, subgraph_page_size=2)
-    run(db, client, registry, settings)
-
-    pruning = make_settings(
-        tokens_file=str(tokens_file), lookback_days=1, retain_history=False, subgraph_page_size=2
+    """A short lookback bounds the first fetch; it must not evict stored rows."""
+    run(
+        db,
+        client,
+        registry,
+        make_settings(tokens_file=str(tokens_file), lookback_days=3650, subgraph_page_size=2),
     )
-    result = ingest_once(db, client, registry, pruning, now=datetime(2026, 10, 25, tzinfo=UTC))
 
-    assert result.rows_pruned == 5
-    assert db.fetch_all(f'SELECT 1 FROM "{db.schema}".token_hours_data') == []
+    short = make_settings(tokens_file=str(tokens_file), lookback_days=1, subgraph_page_size=2)
+    result = ingest_once(db, client, registry, short, now=datetime(2026, 10, 25, tzinfo=UTC))
+
+    assert result.ok
+    [row] = db.fetch_all(f'SELECT COUNT(*) AS n FROM "{db.schema}".token_hours_data')
+    assert row["n"] == 5
+
+
+def test_a_backfill_reaches_back_past_what_is_already_stored(
+    db: DatabaseManager,
+    client: SubgraphClient,
+    registry: TokenRegistry,
+    ingest_settings: Settings,
+    subgraph: FakeSubgraph,
+) -> None:
+    """Resuming from the newest row only ever walks forwards.
+
+    Without the rewind, `candlegraph backfill --days 90` on a database that
+    already holds recent hours fetches nothing at all.
+    """
+    recent = make_settings(
+        tokens_file=str(ingest_settings.tokens_file), lookback_days=1, subgraph_page_size=2
+    )
+    subgraph.rows[WBTC] = [hour_row(WBTC, i, "1", "2", "0", "1", "1") for i in (100, 101)]
+    ingest_once(db, client, registry, recent, now=datetime(2026, 10, 25, tzinfo=UTC))
+
+    # Older history appears upstream; a plain poll must not see it.
+    subgraph.rows[WBTC] = [hour_row(WBTC, i, "1", "2", "0", "1", "1") for i in range(102)]
+    forward_only = ingest_once(db, client, registry, recent, now=datetime(2026, 10, 25, tzinfo=UTC))
+    assert forward_only.hours_by_symbol["WBTC"] == 0
+
+    backfilled = ingest_once(
+        db, client, registry, recent, now=datetime(2026, 10, 25, tzinfo=UTC), lookback_days=3650
+    )
+
+    assert backfilled.hours_by_symbol["WBTC"] == 102
+    [row] = db.fetch_all(
+        f'SELECT COUNT(*) AS n FROM "{db.schema}".token_hours_data WHERE token_id = %(t)s',
+        {"t": WBTC},
+    )
+    assert row["n"] == 102
+
+
+def test_a_backfill_already_covered_does_not_rewind(
+    db: DatabaseManager,
+    client: SubgraphClient,
+    registry: TokenRegistry,
+    ingest_settings: Settings,
+    subgraph: FakeSubgraph,
+) -> None:
+    """No point re-reading history the database already has in full."""
+    run(db, client, registry, ingest_settings)
+    subgraph.requests.clear()
+
+    ingest_once(
+        db, client, registry, ingest_settings, now=datetime(2026, 10, 25, tzinfo=UTC), lookback_days=1
+    )
+
+    wbtc = [v for v in subgraph.requests if v.get("token") == WBTC]
+    assert wbtc[0]["since"] == BASE + 3 * HOUR

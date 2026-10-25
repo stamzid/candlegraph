@@ -24,13 +24,14 @@ def write(tmp_path: Path, body: str) -> Path:
     return path
 
 
-def test_repo_tokens_file_loads_and_holds_three_tokens() -> None:
+def test_repo_tokens_file_loads_the_shipped_universe() -> None:
     """The shipped config is what docker compose ingests."""
     registry = load_tokens(REPO_ROOT / "config" / "tokens.yaml")
 
-    assert registry.symbols == ("WBTC", "SHIB", "GNO")
-    assert len(registry) == 3
+    assert len(registry) == 10
+    assert set(registry.symbols) >= {"WETH", "WBTC", "USDC", "SHIB", "GNO"}
     assert all(token.address.startswith("0x") for token in registry)
+    assert all(token.name for token in registry)
 
 
 def test_loads_addresses_symbols_and_names(registry: TokenRegistry) -> None:

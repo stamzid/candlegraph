@@ -10,7 +10,8 @@ COMPOSE ?= docker compose
 E2E_URL ?= http://localhost:$${APP_HOST_PORT:-8000}
 
 .PHONY: help install lock fmt fmt-check lint typecheck test test-unit test-integration \
-        cov check up down logs ps migrate revision e2e sdl clean
+        cov check up down logs logs-worker ps migrate revision e2e sdl clean \
+        ingest backfill report runs
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -58,6 +59,9 @@ down: ## Stop the stack and delete its volume
 logs: ## Follow the application log
 	$(COMPOSE) logs -f candlegraph
 
+logs-worker: ## Follow the ingest worker log
+	$(COMPOSE) logs -f worker
+
 ps: ## Show the stack's status
 	$(COMPOSE) ps
 
@@ -71,8 +75,20 @@ revision: ## Create a migration: make revision m="add thing"
 e2e: ## Run the end-to-end tests against a running stack
 	CANDLEGRAPH_E2E_URL=$(E2E_URL) $(UV) run pytest tests/e2e -m e2e
 
+ingest: ## Run one ingest pass inside the stack
+	$(COMPOSE) exec worker python -m candlegraph ingest
+
+backfill: ## Backfill a longer window in the stack: make backfill days=90
+	$(COMPOSE) exec worker python -m candlegraph backfill --days $${days:-90}
+
+report: ## Print the data-quality report from the stack
+	$(COMPOSE) exec worker python -m candlegraph report
+
+runs: ## Show recent ingest runs from the ledger
+	$(COMPOSE) exec worker python -m candlegraph runs
+
 sdl: ## Regenerate the committed GraphQL schema (tests fail if it is stale)
-	$(UV) run python -c "from candlegraph.schema import chart_schema; print(chart_schema)" > schema.graphql
+	$(UV) run python -c "from candlegraph.api.schema import chart_schema; print(chart_schema)" > schema.graphql
 
 clean: ## Remove caches and build artefacts
 	rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage htmlcov dist

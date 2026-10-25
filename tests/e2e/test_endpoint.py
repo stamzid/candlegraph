@@ -59,10 +59,11 @@ def test_status_is_healthy(api: httpx.Client) -> None:
 def test_the_configured_tokens_are_served(api: httpx.Client) -> None:
     data = graphql(api, "{ supportedTokens }")
 
-    assert data["supportedTokens"] == ["WBTC", "SHIB", "GNO"]
+    assert len(data["supportedTokens"]) == 10
+    assert {"WETH", "WBTC", "USDC", "SHIB", "GNO"} <= set(data["supportedTokens"])
 
 
-@pytest.mark.parametrize("symbol", ["WBTC", "SHIB", "GNO"])
+@pytest.mark.parametrize("symbol", ["WETH", "WBTC", "USDC", "LINK", "GNO"])
 def test_each_token_has_ingested_candles(api: httpx.Client, symbol: str) -> None:
     """Proves the live subgraph ingest actually landed data for every token."""
     payload = graphql(api, CHART_QUERY, tokenSymbol=symbol, timeUnitInHours=1)["getChartData"]

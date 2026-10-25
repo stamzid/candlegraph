@@ -1,152 +1,26 @@
-"""PostgreSQL access: the connection pool and every statement we issue.
+"""The PostgreSQL connection pool and thin query helpers.
 
 Two properties matter here and are enforced by the integration tests:
 
 * Nothing connects at import time. The pool is created on first use so the
   module can be imported in a test run with no database anywhere.
-* Write failures raise. The previous version logged and returned zero, which
-  turned a rejected batch into a silent data-loss bug.
+* Write failures raise. Logging and returning zero turns a rejected batch into
+  a silent data-loss bug.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any
 
 import psycopg2
-from psycopg2 import pool, sql
+from psycopg2 import pool
 from psycopg2.extras import DictCursor, execute_values
 
 from candlegraph.settings import get_settings
+from candlegraph.storage.statements import SqlQuery, Statements, statements_for
 from candlegraph.utils.logging_utils import service_logger
-
-# A ready-to-execute statement. Aliased at module level because the
-# `DatabaseManager.sql` property shadows the `sql` module inside the class body.
-SqlQuery = sql.Composed | str
-
-# Columns written per hourly row, in statement order.
-HOUR_COLUMNS = (
-    "token_id",
-    "symbol",
-    "open",
-    "high",
-    "low",
-    "close",
-    "price_usd",
-    "period_start_unix",
-    "timestamp",
-)
-
-_HOUR_TEMPLATE = (
-    "(%(id)s,%(symbol)s,%(open)s,%(high)s,%(low)s,%(close)s,%(priceUSD)s,%(periodStartUnix)s,%(timestamp)s)"
-)
-_TOKEN_TEMPLATE = "(%(id)s,%(name)s,%(symbol)s,%(totalSupply)s,%(volumeUSD)s,%(decimals)s)"
-
-
-@dataclass(frozen=True)
-class Statements:
-    """Every SQL statement, bound to a schema name.
-
-    Built per schema rather than hardcoded so a test database can use its own.
-    """
-
-    insert_token_hours: sql.Composed
-    insert_token_hours_template: str
-    insert_token: sql.Composed
-    insert_token_template: str
-    get_token_metadata: sql.Composed
-    get_latest_timestamps: sql.Composed
-    chart_query: sql.Composed
-    delete_older_data: sql.Composed
-
-
-@lru_cache(maxsize=4)
-def statements_for(schema: str) -> Statements:
-    """SQL for ``schema``, built once per schema name."""
-    ns = sql.Identifier(schema)
-
-    # Natural key is (token_id, period_start_unix): one row per token per hour.
-    # Re-ingesting the same hour refreshes it instead of failing the batch.
-    insert_token_hours = sql.SQL(
-        """
-        INSERT INTO {ns}.token_hours_data
-            (token_id, symbol, open, high, low, close, price_usd, period_start_unix, timestamp)
-        VALUES %s
-        ON CONFLICT (token_id, period_start_unix) DO UPDATE SET
-            symbol = EXCLUDED.symbol,
-            open = EXCLUDED.open,
-            high = EXCLUDED.high,
-            low = EXCLUDED.low,
-            close = EXCLUDED.close,
-            price_usd = EXCLUDED.price_usd,
-            timestamp = EXCLUDED.timestamp
-        RETURNING id
-        """
-    ).format(ns=ns)
-
-    insert_token = sql.SQL(
-        """
-        INSERT INTO {ns}.token (id, name, symbol, total_supply, volume_usd, decimals)
-        VALUES %s
-        ON CONFLICT (id) DO UPDATE SET
-            name = EXCLUDED.name,
-            symbol = EXCLUDED.symbol,
-            total_supply = EXCLUDED.total_supply,
-            volume_usd = EXCLUDED.volume_usd,
-            decimals = EXCLUDED.decimals
-        RETURNING id
-        """
-    ).format(ns=ns)
-
-    get_token_metadata = sql.SQL("SELECT * FROM {ns}.token WHERE id = %(token_id)s").format(ns=ns)
-
-    get_latest_timestamps = sql.SQL(
-        """
-        SELECT token_id, MAX(period_start_unix) AS latest_unix
-        FROM {ns}.token_hours_data
-        GROUP BY token_id
-        """
-    ).format(ns=ns)
-
-    # The bucket label is the bucket's own start, computed from the interval,
-    # not MIN(timestamp) of the rows present. A missing first hour must not
-    # shift the candle's reported time.
-    chart_query = sql.SQL(
-        """
-        SELECT
-            to_timestamp(FLOOR(period_start_unix::numeric / %(interval)s) * %(interval)s) AS interval_start,
-            array_agg(open ORDER BY period_start_unix) AS opens,
-            array_agg(close ORDER BY period_start_unix DESC) AS closes,
-            MAX(high) AS max_high,
-            MIN(low) AS min_low,
-            AVG(price_usd) AS avg_price_usd,
-            COUNT(*) AS hours
-        FROM {ns}.token_hours_data
-        WHERE token_id = %(token_id)s
-          AND (%(start_unix)s::bigint IS NULL OR period_start_unix >= %(start_unix)s)
-          AND (%(end_unix)s::bigint IS NULL OR period_start_unix < %(end_unix)s)
-        GROUP BY FLOOR(period_start_unix::numeric / %(interval)s)
-        ORDER BY interval_start
-        """
-    ).format(ns=ns)
-
-    delete_older_data = sql.SQL(
-        "DELETE FROM {ns}.token_hours_data WHERE period_start_unix < %(interval_start)s"
-    ).format(ns=ns)
-
-    return Statements(
-        insert_token_hours=insert_token_hours,
-        insert_token_hours_template=_HOUR_TEMPLATE,
-        insert_token=insert_token,
-        insert_token_template=_TOKEN_TEMPLATE,
-        get_token_metadata=get_token_metadata,
-        get_latest_timestamps=get_latest_timestamps,
-        chart_query=chart_query,
-        delete_older_data=delete_older_data,
-    )
 
 
 class DatabaseManager:

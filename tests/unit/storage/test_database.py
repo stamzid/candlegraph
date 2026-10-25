@@ -12,8 +12,8 @@ import psycopg2
 import pytest
 from psycopg2 import sql
 
-from candlegraph.dba import DatabaseManager, get_db, set_db, statements_for
 from candlegraph.settings import reset_settings_cache
+from candlegraph.storage import DatabaseManager, get_db, set_db
 
 
 def render(composed: sql.Composed) -> str:
@@ -88,68 +88,6 @@ def manager_with_pool() -> tuple[DatabaseManager, FakePool, FakeConnection]:
     return manager, fake_pool, connection
 
 
-# --- statements ------------------------------------------------------------
-
-
-def test_statements_are_cached_per_schema() -> None:
-    assert statements_for("candlegraph") is statements_for("candlegraph")
-    assert statements_for("candlegraph") is not statements_for("other")
-
-
-def test_statements_are_namespaced_to_their_schema() -> None:
-    rendered = render(statements_for("other_schema").chart_query)
-
-    assert '"other_schema".token_hours_data' in rendered
-
-
-def test_the_hourly_insert_upserts_on_the_natural_key() -> None:
-    """Without this, one duplicate row failed an entire batch silently."""
-    rendered = render(statements_for("candlegraph").insert_token_hours)
-
-    assert "ON CONFLICT (token_id, period_start_unix) DO UPDATE SET" in rendered
-    assert "price_usd = EXCLUDED.price_usd" in rendered
-    assert rendered.strip().endswith("RETURNING id")
-
-
-def test_the_token_insert_upserts_on_the_primary_key() -> None:
-    rendered = render(statements_for("candlegraph").insert_token)
-
-    assert "ON CONFLICT (id) DO UPDATE SET" in rendered
-    assert "name = EXCLUDED.name" in rendered
-
-
-@pytest.mark.parametrize(
-    ("template", "fields"),
-    [
-        (
-            "insert_token_hours_template",
-            ["id", "symbol", "open", "high", "low", "close", "priceUSD", "periodStartUnix", "timestamp"],
-        ),
-        ("insert_token_template", ["id", "name", "symbol", "totalSupply", "volumeUSD", "decimals"]),
-    ],
-)
-def test_insert_templates_name_every_column(template: str, fields: list[str]) -> None:
-    rendered = getattr(statements_for("candlegraph"), template)
-
-    assert [part for part in fields if f"%({part})s" in rendered] == fields
-    assert rendered.count("%(") == len(fields)
-
-
-def test_the_chart_bucket_label_is_the_bucket_boundary() -> None:
-    """Labelling with MIN(timestamp) shifts the candle when an hour is missing."""
-    rendered = render(statements_for("candlegraph").chart_query)
-
-    assert "to_timestamp(FLOOR(period_start_unix::numeric / %(interval)s) * %(interval)s)" in rendered
-    assert "MIN(timestamp)" not in rendered
-
-
-def test_the_chart_query_supports_an_optional_time_window() -> None:
-    rendered = render(statements_for("candlegraph").chart_query)
-
-    assert "%(start_unix)s" in rendered
-    assert "%(end_unix)s" in rendered
-
-
 # --- pool lifecycle --------------------------------------------------------
 
 
@@ -159,7 +97,7 @@ def test_no_pool_is_created_until_it_is_used(monkeypatch: pytest.MonkeyPatch) ->
     def explode(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("the pool must not be created eagerly")
 
-    monkeypatch.setattr("candlegraph.dba.pool.ThreadedConnectionPool", explode)
+    monkeypatch.setattr("candlegraph.storage.database.pool.ThreadedConnectionPool", explode)
 
     manager = DatabaseManager(dsn="postgresql://nowhere/db")
 
@@ -174,7 +112,7 @@ def test_the_pool_is_built_once_with_the_configured_bounds(monkeypatch: pytest.M
         calls.append(kwargs)
         return sentinel
 
-    monkeypatch.setattr("candlegraph.dba.pool.ThreadedConnectionPool", record)
+    monkeypatch.setattr("candlegraph.storage.database.pool.ThreadedConnectionPool", record)
     manager = DatabaseManager(dsn="postgresql://host/db", min_connections=3, max_connections=9)
 
     assert manager.pool is sentinel
@@ -278,7 +216,7 @@ def test_upsert_many_counts_the_returned_rows(
         captured.update(kwargs, records=records)
         return [(i,) for i in range(len(records))]
 
-    monkeypatch.setattr("candlegraph.dba.execute_values", fake_execute_values)
+    monkeypatch.setattr("candlegraph.storage.database.execute_values", fake_execute_values)
 
     written = manager.upsert_many(
         manager.sql.insert_token, manager.sql.insert_token_template, [{"id": "a"}, {"id": "b"}]
