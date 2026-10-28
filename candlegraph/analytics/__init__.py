@@ -9,6 +9,12 @@ and it only reads.
 """
 
 from candlegraph.analytics.arima import ArimaConfig, ArimaForecast, fit_forecast, select_order
+from candlegraph.analytics.pairwise import (
+    PairwiseComparison,
+    align_pair,
+    compare_pair,
+    format_comparison,
+)
 from candlegraph.analytics.portfolio import (
     FrontierPoint,
     PortfolioConfig,
@@ -35,13 +41,17 @@ __all__ = [
     "ArimaConfig",
     "ArimaForecast",
     "FrontierPoint",
+    "PairwiseComparison",
     "PortfolioConfig",
     "PortfolioResult",
     "PriceHistory",
+    "align_pair",
     "bollinger_bands",
+    "compare_pair",
     "drawdown_curve",
     "efficient_frontier",
     "fit_forecast",
+    "format_comparison",
     "load_price_frame",
     "log_returns",
     "max_drawdown",

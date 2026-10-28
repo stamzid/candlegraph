@@ -187,6 +187,7 @@ and returns 503 when the database is unreachable.
 | `runs [--limit N]` | Recent rows from the ingest ledger |
 | `strategies` | List the registered strategies |
 | `stats SYMBOL [--window N]` | Rolling mean and annualised volatility |
+| `compare SYMBOL_A SYMBOL_B [--window N]` | Pairwise comparison: correlation, beta, relative return |
 | `signals SYMBOL [--strategy X] [--store]` | Generate signals, optionally persisting them |
 | `backtest SYMBOL [--strategy X\|all]` | Backtest, net of fees and slippage |
 | `portfolio [--objective X] [--risk-free-rate R]` | Mean-variance allocation |
@@ -250,6 +251,7 @@ All of it is deterministic — the same stored data and the same flags give the 
 
 ```sh
 candlegraph stats WETH --window 168           # rolling mean + annualised volatility
+candlegraph compare WETH WBTC --window 168    # correlation, beta, relative performance
 candlegraph forecast WETH --auto-order        # ARIMA, order picked by AIC
 candlegraph signals WETH --strategy bollinger --store
 candlegraph backtest WETH --strategy all      # compare every strategy
@@ -263,6 +265,14 @@ hovering at one level does not thrash), `crossover` (moving-average trend follow
 **Portfolio.** `max_sharpe`, `min_volatility`, `target_return`, `risk_parity` and `equal_weight`,
 with a configurable risk-free rate, weight bounds, shorting, and covariance shrinkage. The
 efficient frontier is available from both the CLI and the UI.
+
+**Pairwise comparison** (`candlegraph compare WETH WBTC`) reports Pearson and
+Spearman return correlation, beta, total and relative return, volatilities,
+Sharpe ratios, tracking error, and a rolling correlation — computed **only
+over hours both tokens actually traded**. Nothing is forward-filled or
+interpolated first: correlating a real price against a filled one measures
+the fill policy, not the market, so a missing hour on either side simply
+drops out and the report says how many bars survived.
 
 **Backtests are costed and lagged.** A position decided on bar *t* earns bar *t+1*'s return, and
 fees plus slippage are charged on every position change. Both matter: on hourly data a naive
@@ -358,6 +368,12 @@ Five pieces of work are delivered and covered by the test suite:
 
 Next, in order:
 
+0. **Descriptive statistics, deeper** — pairwise comparison between any two
+   tokens (delivered: `candlegraph compare`), a five-token active universe
+   for the test run (WBTC, WETH, BNB, and the gap-prone GNO and SHIB), and
+   a recorded policy for filling ingestion gaps on thin tokens —
+   interpolation for display only, a causal estimator for anything a
+   strategy consumes, nothing written to the database.
 1. **Knowledge graph and signaller** — assets, pools, sources and documents in
    Postgres with pgvector, Tavily for web search, and news attached to prices,
    so a signal can cite *why*. Paper trading only.

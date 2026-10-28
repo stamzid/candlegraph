@@ -51,6 +51,14 @@ def _parser() -> argparse.ArgumentParser:
     _add_window(stats)
     stats.add_argument("--window", type=int, default=None, help="rolling lookback in bars")
 
+    compare = sub.add_parser("compare", help="pairwise comparison of two tokens' stored history")
+    compare.add_argument("symbol_a")
+    compare.add_argument("symbol_b")
+    _add_window(compare)
+    compare.add_argument("--window", type=int, default=None, help="rolling-correlation lookback in bars")
+    compare.add_argument("--risk-free-rate", type=float, default=None, help="annual, for the Sharpe ratios")
+    compare.add_argument("--tail", type=int, default=10, help="rolling-correlation rows to print")
+
     signals = sub.add_parser("signals", help="generate signals for a token")
     signals.add_argument("symbol")
     signals.add_argument("--strategy", default="bollinger", help="strategy name")
@@ -355,6 +363,48 @@ def _stats(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _compare(settings: Settings, args: argparse.Namespace) -> int:
+    from candlegraph.analytics.pairwise import compare_pair, format_comparison
+    from candlegraph.analytics.prices import load_price_frame
+    from candlegraph.storage import get_db
+    from candlegraph.tokens import get_token_registry
+
+    registry = get_token_registry()
+    for symbol in (args.symbol_a, args.symbol_b):
+        if registry.by_symbol(symbol) is None:
+            raise SystemExit(f"unknown token {symbol!r}; tracked: {', '.join(registry.symbols)}")
+    if args.symbol_a == args.symbol_b:
+        raise SystemExit("compare needs two different tokens")
+
+    window = args.days if args.days is not None else settings.analytics_lookback_days
+    # fill="none": the comparison aligns on hours both tokens actually traded;
+    # forward-filling first would correlate a real price with a stale one.
+    frame = load_price_frame(get_db(), [args.symbol_a, args.symbol_b], days=window, fill="none")
+    missing = [s for s in (args.symbol_a, args.symbol_b) if s not in frame.columns or frame[s].dropna().empty]
+    if missing:
+        raise SystemExit(f"no stored price history for {', '.join(missing)} in the last {window} days")
+
+    try:
+        result = compare_pair(
+            frame[args.symbol_a].rename(args.symbol_a),
+            frame[args.symbol_b].rename(args.symbol_b),
+            window=args.window or settings.rolling_window,
+            interval_hours=settings.analytics_interval_hours,
+            risk_free_rate=(
+                args.risk_free_rate if args.risk_free_rate is not None else settings.risk_free_rate
+            ),
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    print(format_comparison(result))
+    tail = result.frame[["ratio", "rolling_correlation"]].dropna().tail(args.tail)
+    if not tail.empty:
+        print()
+        print(tail.to_string(float_format=lambda v: f"{v:,.4f}"))
+    return 0
+
+
 def _signals(settings: Settings, args: argparse.Namespace) -> int:
     from candlegraph.storage import get_db
     from candlegraph.strategies import run_strategy
@@ -580,6 +630,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _ui(settings, args)
         case "stats":
             return _stats(settings, args)
+        case "compare":
+            return _compare(settings, args)
         case "signals":
             return _signals(settings, args)
         case "backtest":

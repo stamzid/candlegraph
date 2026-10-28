@@ -11,6 +11,7 @@ Everything needs stored history first: `make up && make backfill days=90`.
 
 ```sh
 docker compose exec -T worker python -m candlegraph stats WETH --window 168
+docker compose exec -T worker python -m candlegraph compare WETH WBTC --window 168
 docker compose exec -T worker python -m candlegraph forecast WETH --auto-order
 docker compose exec -T worker python -m candlegraph signals WETH --strategy bollinger --store
 docker compose exec -T worker python -m candlegraph backtest WETH --strategy all
@@ -19,6 +20,15 @@ docker compose exec -T worker python -m candlegraph portfolio --risk-free-rate 0
 
 The UI covers all of it interactively at <http://localhost:8501> (`make ui` to
 run it outside the stack).
+
+## Reading a pairwise comparison
+
+`compare` works only on **aligned bars** — hours both tokens traded. A thin
+token versus a liquid one can leave few aligned bars; the first line of the
+report says how many survived, and a correlation over a few hundred bars is
+noisier than it looks. Do not "fix" sparsity by forward-filling before
+comparing — that measures the fill, not the market, and the aligned-only rule
+is tested.
 
 ## Reading a backtest honestly
 

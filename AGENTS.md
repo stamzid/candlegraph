@@ -32,6 +32,7 @@ a target, and never let CI run something that is not one either.
 | Data-quality report | `make report` |
 | Recent ingest runs | `make runs` |
 | Rolling mean / volatility | `candlegraph stats WETH --window 24` |
+| Pairwise comparison | `candlegraph compare WETH WBTC` |
 | Signals | `candlegraph signals WETH --strategy bollinger [--store]` |
 | Backtest | `candlegraph backtest WETH --strategy all` |
 | Portfolio | `candlegraph portfolio --risk-free-rate 0.04 --objective max_sharpe` |
@@ -68,6 +69,7 @@ candlegraph/
     worker.py          The standalone ingest process.
   analytics/           Pure numerics. No I/O except prices.py, which only reads.
     rolling.py         Rolling mean, volatility, z-score, Bollinger, drawdown.
+    pairwise.py        Two-token comparison: correlation, beta, relative return. Aligned bars only.
     portfolio.py       Mean-variance optimisation and the efficient frontier.
     arima.py           ARIMA fitting, order selection, forecasting.
     prices.py          Stored rows -> aligned pandas frames.
@@ -249,6 +251,19 @@ unfalsifiable.
 
 ### Next
 
+0. **Descriptive statistics, deeper.** Pairwise comparison between any two
+   tracked tokens (*delivered*: `candlegraph compare WETH WBTC`, computed
+   over aligned bars only — hours both tokens traded). Still to land: an
+   `active` flag in `config/tokens.yaml` trimming the test run to five
+   active tokens (WBTC, WETH, BNB, plus GNO and SHIB chosen for their
+   gapped history), and the recorded gap-filling policy — linear
+   interpolation for display only, a causal estimator for anything a
+   strategy consumes, nothing ever written to the database. The tradeoff
+   is in `docs/roadmap/DESIGN.md`.
+   *Exit:* `candlegraph compare WETH WBTC` prints correlation, beta and
+   relative performance over aligned bars (met); the stack ingests exactly
+   the five active tokens; the fill policy exists behind `FillPolicy` with
+   a no-look-ahead test.
 1. **Knowledge graph and signaller.** Entities for assets, pools, sources
    and documents in Postgres with pgvector; Tavily for web search; news and
    text augmentation attached to the prices already stored. Paper trading

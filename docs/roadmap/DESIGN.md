@@ -1,6 +1,6 @@
 # Roadmap
 
-**Status:** living document — last revised 2026-10-25
+**Status:** living document — last revised 2026-10-28
 **Scope:** what candlegraph is, what has been built, and what comes next.
 
 `AGENTS.md` carries a condensed copy of the stage list; this is the
@@ -38,14 +38,16 @@ flowchart TB
 
   subgraph next["Next"]
     direction TB
+    DS["0 · Descriptive statistics, deeper<br/>pairwise comparison · active tokens · gap policy"]
     KG["1 · Knowledge graph<br/>pgvector · Tavily · news"]
     H["2 · Harness<br/>pipelines · event bus · OTel"]
     TM["3 · Traditional markets<br/>NASDAQ · NYSE"]
     MS["4 · Models and strategies<br/>momentum · more models"]
     MA["5 · Market-watch agents<br/>RSS observer · alerting"]
-    KG --> H --> TM --> MS --> MA
+    DS --> KG --> H --> TM --> MS --> MA
   end
 
+  AN -.-> DS
   DB -.-> KG
   ST -.->|"signals gain<br/>explanations"| KG
   ING -.-> H
@@ -54,15 +56,113 @@ flowchart TB
   classDef done fill:#e8f5e9,stroke:#2e7d32
   classDef todo fill:#e3f2fd,stroke:#1565c0
   class G,ING,DB,AN,ST,API,UI,AG done
-  class KG,H,TM,MS,MA todo
+  class DS,KG,H,TM,MS,MA todo
 ```
 
-The ordering is not arbitrary. The knowledge graph comes first because it is
+The ordering is not arbitrary. Stage 0 deepens the descriptive layer that
+already exists and settles the gap-handling policy that every later stage
+will inherit — cheaper to decide now than to retrofit under a knowledge
+graph. After that, the knowledge graph comes first because it is
 the only remaining piece of the *original* design and because the harness in
 stage 2 is much more useful once there is a second kind of pipeline to
 orchestrate than when there is only ingestion. Everything from stage 3 on
 widens the system rather than deepening it, and each of those stages is
 cheaper once the harness exists to run it.
+
+---
+
+## 0. Descriptive statistics, deeper
+
+**Goal.** Before signals learn to cite documents (stage 1), the descriptive
+layer should be able to say how two assets relate to each other, the test
+run should ingest a deliberately chosen universe rather than everything, and
+the project should have a written answer to "what do we do about gaps" —
+because stages 1, 3 and 4 all inherit whatever answer is given here.
+
+**What it adds.**
+
+- **Pairwise comparison** *(delivered)*. `candlegraph compare WETH WBTC`
+  reads both tokens' stored history and prints Pearson and Spearman return
+  correlation, beta (first symbol regressed on the second), total and
+  relative return, annualised volatilities and Sharpe ratios, annualised
+  tracking error, and a rolling correlation over the configured window. The
+  numerics live in `candlegraph/analytics/pairwise.py` and are pure, like
+  the rest of the analytics layer (invariant 18). The alignment rule is the
+  design decision: every statistic is computed **only over hours both
+  tokens actually have**. Forward-filling or interpolating before
+  correlating would manufacture correlation out of the fill policy, so a
+  missing hour on either side drops out of the comparison and the report
+  says how many bars survived.
+- **A five-token active universe for the test run.** `config/tokens.yaml`
+  keeps every token it lists — removing one would orphan stored history,
+  and invariant 4 says history is never deleted — but gains an
+  `active: true|false` flag, and ingestion only polls the active ones. The
+  active five: **WBTC** (BTC exposure), **WETH** (ETH), **BNB** (the
+  mainnet ERC-20, `0xb8c77482e45f1f44de1745f52c74426c631bdd52` — new to the
+  registry, added via the `add-token` skill), and two tokens chosen
+  *because* their history has gaps: **GNO** (routinely below 50% coverage;
+  the canonical thin token in the quality report) and **SHIB** (liquid
+  enough to matter, sparse enough to gap). The gappy pair is deliberate —
+  they are the test fixtures for the gap-filling decision below and for
+  pairwise comparison's alignment rule. The flag is a small schema change
+  to `tokens.py` plus ingestion filtering, **not** part of the pairwise
+  change; it lands separately with its own tests.
+- **A recorded gap-filling policy** — the design decision below.
+
+**Design decision: filling gaps for thin tokens — interpolation vs. an
+estimator.**
+
+First, where filling is allowed to happen at all. Never in
+`token_hours_data`: invariant 6 says a bucket with no data produces no
+candle, invariant 11 says a missing value is `NULL` and never a fabricated
+number, and ingestion writing rows the subgraph never emitted would make
+the quality report unfalsifiable — coverage would read 100% by
+construction. Any filling is a **read-time policy in
+`analytics/prices.py`** (where `ffill` with a 24-hour cap already lives as
+one option of `FillPolicy`), and a filled value must stay distinguishable
+from an observed one so downstream code can exclude synthetic bars.
+
+The two candidates, and what each trades away:
+
+| | Linear interpolation | Model-based estimator (Kalman / Brownian bridge) |
+|---|---|---|
+| Mechanics | Straight line between the last real bar before the gap and the first real bar after it. | A state-space model (local-level/random-walk Kalman smoother) or a Brownian bridge conditioned on the gap's endpoints, with variance scaled by the token's own recent volatility. |
+| Determinism | Fully deterministic, no parameters. | Deterministic if the posterior mean is used; needs an estimated volatility parameter either way. |
+| Look-ahead | **Uses the gap's right endpoint** — a future price. Fine for plots and descriptive tables; poisonous for anything a strategy consumes, because invariant 17 (no strategy looks ahead) would be violated one layer down where no test is watching. | The smoother also uses both endpoints; the *filter* variant is causal (past data only) and is the only form safe to feed a strategy. |
+| Volatility | A straight line has zero local variance, so filled stretches **understate volatility** and shrink every rolling standard deviation that overlaps a gap — Bollinger bands tighten, z-scores inflate. | The bridge preserves the variance budget across the gap (or the Kalman model widens its interval), so risk statistics over filled stretches stay honest. |
+| Correlation | Interpolated segments of two tokens are both smooth, so cross-correlations over gaps are biased upward. | Less biased, but still model output; a correlation computed mostly on filled bars is a statement about the model. |
+| Uncertainty | A point with no error bar; the reader cannot tell a confident fill from a 22-hour guess. | Produces an interval that widens with gap length — "we don't know" is representable. |
+| Cost and explainability | One line of pandas; trivially explainable. | More code, an estimated parameter per token, and a harder conversation when a filled value looks odd. |
+
+**The decision.** Both, scoped by use:
+
+1. **Pairwise comparison and the quality report fill nothing.** Alignment
+   on observed bars *is* the honest statistic; this is already shipped.
+2. **Descriptive display** (UI charts, `stats` tables) may use linear
+   interpolation, capped like `ffill` is today (beyond ~24 hours the line
+   is fiction), with filled bars flagged so the UI can render them
+   differently. Look-ahead is acceptable here because nothing trades on it.
+3. **Anything a strategy or backtest consumes** gets, at most, a **causal**
+   estimate — the Kalman filter form, or the existing capped forward-fill —
+   never interpolation, because the backtester cannot tell a real bar from
+   one that embeds the future. Invariants 15–17 do not relax for synthetic
+   bars.
+4. The estimator work (bridge/Kalman, per-token volatility estimation, the
+   `synthetic` flag plumbed through `to_wide`) is this stage's remaining
+   build item, behind a new `FillPolicy` value so the default behaviour
+   does not move.
+
+**What was rejected.** Writing filled rows into the database (breaks the
+`NULL`-means-not-collected contract and corrupts coverage); zero-filling
+(a zero is a price, and a wrong one); filling without a cap (a 3-week gap
+on a delisted pool should look like absence, not a confident line).
+
+**Exit criterion.** `candlegraph compare WETH WBTC` prints correlation,
+beta and relative performance over aligned bars only *(met)*; the compose
+stack ingests exactly the five active tokens while `tokens.yaml` still
+lists the full set; and the gap-filling policy above is implemented behind
+a `FillPolicy` with a test proving a strategy's signals are unchanged by
+data after the bar they score, even across filled gaps.
 
 ---
 
