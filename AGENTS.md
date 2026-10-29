@@ -103,7 +103,8 @@ alembic/versions/    Migrations. The schema name comes from settings.
 config/tokens.yaml   The tokens this deployment tracks.
 docs/<area>/<topic>/DESIGN.md   Design documents. Why, not how; `docs/README.md` indexes them.
   roadmap/           Delivered stages, next stages, and each exit criterion.
-  storage/           TimescaleDB adoption, and which tables are hypertables.
+  storage/           TimescaleDB adoption, which tables are hypertables, and how pgvector coexists.
+  rollout/ROLLOUT.md The one current rollout plan: ordered steps and a progress table.
   agents/            The agent framework, the observer, and the janitor.
   knowledge/         Stage 1, proposed: schema, vector store, embeddings, Tavily, MCP.
   incidents/<date>-<slug>/POSTMORTEM.md   What went down, why, and what changed so it cannot again.
@@ -278,10 +279,11 @@ unfalsifiable.
    and documents in Postgres with pgvector; Tavily for web search; news and
    text augmentation attached to the prices already stored. Paper trading
    only. *Designed* in `docs/knowledge/` (five documents: graph, vector
-   store, embeddings, Tavily, MCP); read them and the
-   `extend-knowledge-graph` skill before writing code. The stage opens
-   with a pinned image switch to `timescaledb-ha` for pgvector, which is a
-   volume rebuild.
+   store, embeddings, Tavily, MCP) and sequenced in
+   `docs/rollout/ROLLOUT.md`, the step-by-step plan the build follows;
+   read both and the `extend-knowledge-graph` skill before writing code.
+   The stage opens with a pinned image switch to `timescaledb-ha` for
+   pgvector, which is a volume rebuild.
    *Exit:* `candlegraph signals WETH --explain` prints a rationale citing a
    retrieved document with a URL and a timestamp, stored with the signal.
 2. **Harness.** YAML pipeline specs, an event bus, OpenTelemetry metrics,

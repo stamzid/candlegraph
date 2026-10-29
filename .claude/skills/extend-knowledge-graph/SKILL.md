@@ -27,8 +27,11 @@ updating the document and its Status line.
 
 ## 1. Build order
 
-Each step is finishable and testable on its own; stop at any of them with
-a working system.
+**`docs/rollout/ROLLOUT.md` is the authoritative sequence** — it carries
+the progress table, per-step entry/exit criteria, and which steps may be
+combined in one session. Update its table when a step lands. The summary
+below maps the same work; if the two ever disagree, the rollout document
+wins and this summary gets fixed.
 
 | Step | Lands | Proven by |
 |---|---|---|

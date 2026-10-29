@@ -3,8 +3,10 @@
 **Status:** implemented — 2026-10-25, preflight added 2026-10-29
 **Area:** `docker-compose.yaml`, `.github/workflows/ci.yml`,
 `tests/integration/conftest.py`, `alembic/versions/`, `candlegraph/storage/statements.py`
-**Companion:** [`../table-placement/DESIGN.md`](../table-placement/DESIGN.md) —
+**Companions:** [`../table-placement/DESIGN.md`](../table-placement/DESIGN.md) —
 which tables are hypertables and why; this document is the *how*.
+[`../pgvector-coexistence/DESIGN.md`](../pgvector-coexistence/DESIGN.md) —
+how pgvector will share the instance in stage 1 (proposed).
 
 ## What was there before
 

@@ -224,7 +224,10 @@ image, so the stage begins with a pinned switch to `timescaledb-ha` and a
 rebuilt volume, done with the lessons of
 `docs/incidents/2026-10-28-stack-would-not-start/`; and the knowledge
 tables' placement is already recorded in
-`docs/storage/table-placement/DESIGN.md`.
+`docs/storage/table-placement/DESIGN.md`. The build order is
+`docs/rollout/ROLLOUT.md` — ten sequential steps with a progress table —
+and `docs/storage/pgvector-coexistence/DESIGN.md` draws how the corpus
+tables share the instance with the hypertables.
 
 **Exit criterion.** `candlegraph signals WETH --strategy bollinger --explain`
 prints a signal whose rationale cites at least one retrieved document with a

@@ -34,6 +34,11 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
 - `docs/knowledge/` — the stage 1 design (graph, vector store, embeddings,
   Tavily, MCP). Status is *proposed*; the code does not exist yet. Read
   before starting any of it, and keep the Status lines truthful as it lands.
+- `docs/rollout/ROLLOUT.md` — **the current rollout plan.** When the user
+  refers to "the rollout", "the plan", or "step N", this is the document:
+  find the step, read its "Read first" pointers, do it, and update the
+  progress table in the same change. One current rollout at a time;
+  finished ones are archived under `docs/rollout/archive/`.
 - `docs/incidents/` — post-mortems. Read the two from October 2026 before
   changing the database image, a migration id, or a compose health check.
 

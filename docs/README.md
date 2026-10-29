@@ -8,17 +8,28 @@ something; the document here tells you *why it is that shape*.
 ```
 docs/<area>/<topic>/DESIGN.md
 docs/incidents/<date>-<slug>/POSTMORTEM.md
+docs/rollout/ROLLOUT.md
 ```
 
 Incidents are the exception to "why, not how": a post-mortem records the
 timeline, the root causes, and the follow-ups, and its Status closes when
 every follow-up has landed or been explicitly declined.
 
+The rollout plan is the other exception: it is *how and in what order*,
+sequencing decisions that the design documents already made. There is one
+current rollout (`rollout/ROLLOUT.md`, Status `current`); its progress
+table is updated every working session, and a finished rollout is archived
+under `rollout/archive/` when the next one takes its place. A rollout step
+never changes a design silently — it changes the design document in the
+same step or it follows it.
+
 | Document | Status | Covers |
 |---|---|---|
 | [`roadmap/`](roadmap/DESIGN.md) | living | What has been delivered, what comes next, and the exit criterion for each stage. |
 | [`storage/timescaledb/`](storage/timescaledb/DESIGN.md) | implemented | Adopting the TimescaleDB extension: the image, the migration, and the policies deliberately left off. |
 | [`storage/table-placement/`](storage/table-placement/DESIGN.md) | implemented | Which tables are hypertables and which stay plain, with the rule for deciding the next one. |
+| [`storage/pgvector-coexistence/`](storage/pgvector-coexistence/DESIGN.md) | proposed | How pgvector sits beside TimescaleDB in the one instance: the four table families, the query paths side by side, and what changes operationally. |
+| [`rollout/`](rollout/ROLLOUT.md) | current | **The current rollout plan** — ordered, turn-sized steps for stage 1 with a progress table. One current rollout at a time; finished ones move to `rollout/archive/`. |
 | [`knowledge/graph/`](knowledge/graph/DESIGN.md) | proposed | Stage 1: the knowledge schema, time-series versus relational placement, the retrieval and explanation flow, and how it attaches to the observer and janitor. |
 | [`knowledge/vector-store/`](knowledge/vector-store/DESIGN.md) | proposed | pgvector in the existing database, compared with Qdrant, Chroma, Neo4j and Apache AGE; the image change it implies and the triggers that would revisit it. |
 | [`knowledge/embeddings/`](knowledge/embeddings/DESIGN.md) | proposed | Embedding models compared (OpenAI, Voyage, Cohere, Gemini, bge-m3, Qwen3, nomic, …); 1024 dimensions fixed; a local free default; reuse in the harness. |
