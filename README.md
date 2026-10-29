@@ -223,7 +223,7 @@ error. It separately flags rows that are impossible regardless of market conditi
 ## Storage
 
 The database is **TimescaleDB**, not plain PostgreSQL — the same image everywhere
-(`timescale/timescaledb:2.31.0-pg17`, pinned in compose, in CI, and in the
+(`timescale/timescaledb-ha:pg17.11-ts2.31.0`, pinned in compose, in CI, and in the
 integration tests). The extension is required: the migrations create hypertables
 and fail with an explanatory error without it.
 
@@ -243,13 +243,16 @@ has the measurements behind each decision and the rule for the next table.
 Compression and retention policies are deliberately off — invariant 4 says
 stored history is never deleted, and a retention policy is a scheduled `DELETE`.
 
-**Upgrading an existing database:** a data directory created by plain
-`postgres:17` has no `shared_preload_libraries=timescaledb` of its own. Compose
-now passes that setting on the server's command line, so such a volume comes
-up preloaded, and a migration preflight refuses to run against a server that
-is not, with a message that says why. The old Debian-based volume still
-carries a glibc collation version the Alpine image cannot honour, so the
-recommended path is still `make down` (which drops the volume) then `make up`.
+**Upgrading an existing database:** the image moved twice in October 2026 —
+`postgres:17` → `timescale/timescaledb` (Alpine) → `timescale/timescaledb-ha`
+(Ubuntu, with pgvector). A volume from either earlier image is **rebuilt, not
+carried**: the data directory path differs (`/home/postgres/pgdata/data` on
+`-ha`), the C library and therefore the collation version differ, and a
+volume initialised under plain `postgres:17` has no TimescaleDB preload of
+its own. Compose forces the preload on the server's command line and a
+migration preflight refuses a server that is not preloading it, with a
+message that says why; the remedy is `make reset` (drop the volume and this
+project's image, start again).
 If the preflight instead reports the database is **stamped at a revision this
 checkout does not have**, read the message: either another worktree shares
 your Compose project, or a draft migration was applied here and renamed before

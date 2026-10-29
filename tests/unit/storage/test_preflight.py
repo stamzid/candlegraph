@@ -135,9 +135,19 @@ def test_compose_forces_the_timescale_preload_on_every_volume() -> None:
     assert isinstance(services, dict)
     postgres = services["postgres"]
 
-    assert postgres["image"] == "timescale/timescaledb:2.31.0-pg17"
+    assert postgres["image"] == "timescale/timescaledb-ha:pg17.11-ts2.31.0"
     command = " ".join(postgres["command"])
     assert "shared_preload_libraries=timescaledb" in command
+
+
+def test_the_volume_is_mounted_where_the_ha_image_keeps_pgdata() -> None:
+    """The -ha image's PGDATA is /home/postgres/pgdata/data. A volume on the
+    Debian/Alpine path /var/lib/postgresql/data would mount beside the real
+    data directory, and every `down` would silently discard the database."""
+    services = compose_file()["services"]
+    assert isinstance(services, dict)
+
+    assert "pgdata:/home/postgres/pgdata/data" in services["postgres"]["volumes"]
 
 
 def test_the_database_image_is_pinned_identically_everywhere() -> None:

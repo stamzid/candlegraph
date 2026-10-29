@@ -28,7 +28,9 @@ SCHEMA = "candlegraph"
 
 # Must match docker-compose.yaml and the CI service container. The migrations
 # create hypertables, so plain postgres:17 would fail the chain on purpose.
-POSTGRES_IMAGE = "timescale/timescaledb:2.31.0-pg17"
+# The -ha image (Ubuntu) bundles pgvector and pgvectorscale for stage 1; the
+# Alpine image does not. See docs/storage/pgvector-coexistence/DESIGN.md.
+POSTGRES_IMAGE = "timescale/timescaledb-ha:pg17.11-ts2.31.0"
 
 
 def _libpq_url(url: str) -> str:

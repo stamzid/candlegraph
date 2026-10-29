@@ -107,7 +107,9 @@ def test_only_the_api_container_migrates_a_fresh_volume() -> None:
     with (REPO_ROOT / "docker-compose.yaml").open(encoding="utf-8") as handle:
         services = yaml.safe_load(handle)["services"]
 
-    app_services = {name for name, svc in services.items() if svc.get("image") == "candlegraph:latest"}
+    app_services = {
+        name for name, svc in services.items() if str(svc.get("image", "")).startswith("candlegraph:")
+    }
     assert "candlegraph" in app_services
     for name in app_services - {"candlegraph"}:
         waits_on = services[name].get("depends_on", {})

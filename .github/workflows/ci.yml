@@ -34,7 +34,7 @@ jobs:
     services:
       postgres:
         # Must match docker-compose.yaml: the migrations create hypertables.
-        image: timescale/timescaledb:2.31.0-pg17
+        image: timescale/timescaledb-ha:pg17.11-ts2.31.0
         env:
           POSTGRES_DB: candlegraph_test
           POSTGRES_USER: candlegraph

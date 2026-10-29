@@ -1,7 +1,8 @@
 # One database, two extensions: how pgvector sits beside TimescaleDB
 
-**Status:** proposed — 2026-10-29. Describes the target state for stage 1;
-today's stack runs TimescaleDB alone. The build sequence is
+**Status:** proposed — 2026-10-29; the image switch (rollout step 1) is
+**done**, so the instance below exists and pgvector is available but not yet
+installed. The corpus tables land in step 2. The build sequence is
 [`../../rollout/ROLLOUT.md`](../../rollout/ROLLOUT.md).
 **Companions:** [`../timescaledb/DESIGN.md`](../timescaledb/DESIGN.md) (why
 the extension at all), [`../table-placement/DESIGN.md`](../table-placement/DESIGN.md)
@@ -10,8 +11,9 @@ the extension at all), [`../table-placement/DESIGN.md`](../table-placement/DESIG
 
 ## The database as it stands
 
-One PostgreSQL 17 instance, image `timescale/timescaledb:2.31.0-pg17`
-(Alpine), one schema `candlegraph`, eight tables in three families:
+One PostgreSQL 17 instance, image `timescale/timescaledb-ha:pg17.11-ts2.31.0`
+(Ubuntu; was the Alpine `timescale/timescaledb` image until rollout step 1),
+one schema `candlegraph`, eight tables in three families:
 
 - **Series** — `token_hours_data`, `pool_hours_data`, `signal`. TimescaleDB
   hypertables, chunked monthly on `period_start_unix`. Every read filters on
@@ -132,9 +134,9 @@ promise instead of a constraint.
 
 | Concern | Today | After stage 1, step 1 |
 |---|---|---|
-| Image | `timescale/timescaledb:2.31.0-pg17`, Alpine/musl | `timescale/timescaledb-ha:pg17.<x>-ts2.31.<y>` (exact tag pinned at switch time), Debian/glibc — pgvector is not packaged for the Alpine image |
+| Image | `timescale/timescaledb:2.31.0-pg17`, Alpine/musl | `timescale/timescaledb-ha:pg17.11-ts2.31.0` (**done**), Ubuntu 22.04/glibc, PostgreSQL 17.11, TimescaleDB 2.31.0, pgvector 0.8.7 and pgvectorscale 0.9.1 available — pgvector is not packaged for the Alpine image |
 | Pinned where | compose, CI, testcontainer — `test_the_database_image_is_pinned_identically_everywhere` | same three places, same test |
-| Volumes | — | **rebuilt, not carried.** musl→glibc changes the collation version under text indexes; the 2026-10-28 incident is the precedent and the procedure |
+| Volumes | mounted at `/var/lib/postgresql/data` | mounted at `/home/postgres/pgdata/data` (the `-ha` `PGDATA`); **rebuilt, not carried.** musl→glibc changes the collation version under text indexes, and the path differs anyway; `make reset` is the procedure. The `-ha` image initialises the database with `C.UTF-8`, which has no libc-version dependency going forward |
 | Preload | `shared_preload_libraries=timescaledb` forced by compose | unchanged — pgvector does **not** need preloading; `CREATE EXTENSION vector` is an ordinary transactional statement, so the whole FATAL-on-create failure class from the incident does not exist for it |
 | Migration preflight | refuses missing preload / unknown revision | plus: the knowledge migration refuses a server where `vector` is not in `pg_available_extensions`, with a message naming the image |
 | Memory | timescaledb-tune sets the usual knobs | HNSW **build** respects `maintenance_work_mem`; at our corpus (thousands of chunks) defaults are fine. Searches use normal work memory. Revisit only if `reembed` on a large corpus gets slow |

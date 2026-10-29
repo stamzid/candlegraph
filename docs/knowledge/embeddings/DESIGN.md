@@ -103,8 +103,9 @@ flowchart TD
 
   ```python
   class Embedder(Protocol):
-      name: str          # stored on every chunk row
-      dimensions: int    # must equal the column's
+      name: str  # stored on every chunk row
+      dimensions: int  # must equal the column's
+
       def embed(self, texts: Sequence[str], *, kind: Literal["document", "query"]) -> list[list[float]]: ...
   ```
 

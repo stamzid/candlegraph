@@ -1,6 +1,6 @@
 # Rollout: stage 1 — the knowledge graph on pgvector
 
-**Status:** current — 2026-10-29, not started. This directory holds **one
+**Status:** current — 2026-10-29; step 1 done, step 2 next. This directory holds **one
 current rollout at a time**; this document is it, and each working session
 should update the progress table below. When the stage ships, this file
 moves to `docs/rollout/archive/<date>-<slug>.md` and the next rollout
@@ -17,7 +17,7 @@ Status line truthful.
 
 | # | Step | Size | Depends on | Status |
 |---|---|---|---|---|
-| 1 | Database image switch to `timescaledb-ha` | S, risky | — | not started |
+| 1 | Database image switch to `timescaledb-ha` | S, risky | — | **done** 2026-10-29 |
 | 2 | Knowledge schema migration + statements | M | 1 | not started |
 | 3 | Assets and aliases from `tokens.yaml` | S | 2 | not started |
 | 4 | Documents: normalise, hash, chunk | S | 2 | not started |
@@ -59,16 +59,37 @@ section, `docs/storage/timescaledb/DESIGN.md` (image paragraph).
 **Watch for.** Pick the exact `-ha` tag carrying TimescaleDB 2.31 and pin
 it in all three places in one commit —
 `test_the_database_image_is_pinned_identically_everywhere` holds you to
-it. The `-ha` image runs as user `postgres` with a different default
-`PGDATA` layout than the Alpine image; verify the compose volume mount and
-healthcheck still line up. Keep the `-c shared_preload_libraries=timescaledb`
-command line (invariant 25's sibling); pgvector needs no preload entry.
+it. The `-ha` image runs as user `postgres` (uid 1000) with `PGDATA` at
+`/home/postgres/pgdata/data`, not `/var/lib/postgresql/data`; the volume
+mount moves with it (`test_the_volume_is_mounted_where_the_ha_image_keeps_pgdata`).
+Keep the `-c shared_preload_libraries=timescaledb` command line (invariant
+25's sibling); pgvector needs no preload entry.
 
 **Done when.** `make test-integration` is green on the new image;
 `COMPOSE_PROJECT_NAME=<unique> make up` from a **fresh volume** is healthy;
 `SELECT name FROM pg_available_extensions WHERE name='vector'` returns a
 row in the stack; old local volumes documented as rebuild-only (README
 already says so for the musl→glibc reason).
+
+**Outcome (2026-10-29).** Done, in this order: Docker cleaned to zero
+images and no candlegraph volumes; baseline `make check` on the old image
+**806 passed, 0 unexpected skips**; the compose robustness fixes landed
+first with their own post-mortem
+(`docs/incidents/2026-10-29-compose-startup-robustness/`) and were proven on
+the old image — fresh `make up` 45 s with an empty build cache, a poisoned
+volume now fails fast (container exited after 5 attempts, not looping) with
+the preflight's message printed by `make up`, `make reset` recovers; then
+the switch to `timescale/timescaledb-ha:pg17.11-ts2.31.0` in compose, CI
+and the testcontainer, volume moved to `/home/postgres/pgdata/data`.
+Verified on the new image: `make check` **817 passed, 0 unexpected skips**
+including a new full-chain round trip (`downgrade base` → `upgrade head`
+on populated tables); stack healthy in 17 s; PostgreSQL 17.11, TimescaleDB
+2.31.0 preloaded, pgvector 0.8.7 and pgvectorscale 0.9.1 available and not
+installed; three hypertables; `alembic heads` = `alembic current` = one
+head; database collation `C.UTF-8`; end-to-end, strict report and observer
+as before. A sixth robustness fault (four services building one image tag
+raced in buildx) surfaced during verification and is fixed and tested.
+Step 2 can assume `vector` is available and installs it.
 
 ## Step 2 — Knowledge schema migration and statements
 

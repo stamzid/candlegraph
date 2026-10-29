@@ -8,10 +8,17 @@
 # without the other. The agents only read and post reports.
 
 x-app: &app
-  build:
-    context: .
-    dockerfile: Dockerfile
-  image: candlegraph:latest
+  # Tagged per Compose project, not `latest`. Every worktree used to build
+  # into the same `candlegraph:latest`, so a `--build` in one checkout
+  # silently retagged the image another checkout's `--force-recreate` then
+  # ran. Only the `candlegraph` service carries `build:`; the others use the
+  # image it produces. Four services building one tag made buildx bake
+  # export it four times at once and fail with "already exists".
+  # See docs/incidents/2026-10-29-compose-startup-robustness/.
+  image: candlegraph:${COMPOSE_PROJECT_NAME}
+  # The image is built locally by `make up`, never pulled; say so when it is
+  # missing instead of failing on a Docker Hub lookup.
+  pull_policy: never
   env_file:
     - path: .env
       required: false
@@ -20,17 +27,31 @@ x-app: &app
     # local runs.
     DB_HOST: postgres
     DB_PORT: "5432"
+    # Only the API container applies migrations (overridden below for it).
+    # The others wait for the API to be healthy, so the schema is at head
+    # by the time they start; running `alembic upgrade head` four times was
+    # four chances to race on the same DDL.
+    RUN_MIGRATIONS: "false"
   depends_on:
     postgres:
       condition: service_healthy
-  restart: unless-stopped
+  # Bounded, not `unless-stopped`: a container whose entrypoint fails
+  # deterministically (a volume at an unknown revision, say) used to
+  # restart forever, `--wait` reported only "unhealthy", and the cause sat
+  # in `docker compose logs`. Five attempts, then it stays exited and
+  # `make up` prints its log. A healthy run of ten seconds resets the count,
+  # so a crash later in life is still restarted.
+  restart: on-failure:5
 
 services:
   postgres:
     # TimescaleDB, not plain PostgreSQL: the three hourly/bar tables are
-    # hypertables. Pinned exactly, for the same reason the Dockerfile pins uv.
-    # See docs/storage/timescaledb/DESIGN.md.
-    image: timescale/timescaledb:2.31.0-pg17
+    # hypertables. The -ha flavour (Ubuntu) also carries pgvector and
+    # pgvectorscale for stage 1; the Alpine image does not. Pinned exactly,
+    # for the same reason the Dockerfile pins uv, and in CI and the
+    # testcontainer too. See docs/storage/timescaledb/DESIGN.md and
+    # docs/storage/pgvector-coexistence/DESIGN.md.
+    image: timescale/timescaledb-ha:pg17.11-ts2.31.0
     # The image only writes shared_preload_libraries into postgresql.conf when
     # it runs initdb, i.e. on an empty volume. A volume initialised by the
     # plain postgres image it replaced comes up with the setting empty, and
@@ -48,9 +69,16 @@ services:
     ports:
       - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # The -ha image keeps PGDATA under /home/postgres, not /var/lib/postgresql.
+      # Mounting the old path would leave the data directory on the container
+      # layer and lose it on recreate.
+      - pgdata:/home/postgres/pgdata/data
     healthcheck:
       # The app waits for this, so migrations never race the database.
+      # Over TCP on purpose: during initdb the image runs a temporary server
+      # that listens only on the Unix socket, and `pg_isready` with no host
+      # would report it "accepting connections" moments before it is shut
+      # down again. -h 127.0.0.1 can only succeed against the real server.
       #
       # Probe cadence, here and on every service below: fast only while the
       # container is starting (start_interval, inside start_period), then
@@ -59,7 +87,7 @@ services:
       # own, so a steady-state probe every few seconds bought nothing and
       # cost a process spawn and a query each time. See
       # docs/incidents/2026-10-29-health-probe-cadence/POSTMORTEM.md.
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-candlegraph} -d ${DB_NAME:-candlegraph}"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${DB_USER:-candlegraph} -d ${DB_NAME:-candlegraph}"]
       interval: 180s
       timeout: 5s
       retries: 3
@@ -69,11 +97,17 @@ services:
 
   candlegraph:
     <<: *app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    pull_policy: build
     command: ["python", "-m", "candlegraph", "serve"]
     environment:
       <<: *app-env
       # The worker owns ingestion; the API only serves.
       INGEST_ENABLED: "false"
+      # The one container that applies migrations.
+      RUN_MIGRATIONS: "true"
     ports:
       - "${APP_HOST_PORT:-8000}:8000"
     healthcheck:

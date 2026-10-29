@@ -1,6 +1,6 @@
 # TimescaleDB: adoption, migration, and what we deliberately did not turn on
 
-**Status:** implemented — 2026-10-25, preflight added 2026-10-29
+**Status:** implemented — 2026-10-25; preflight added and image moved to `-ha` 2026-10-29
 **Area:** `docker-compose.yaml`, `.github/workflows/ci.yml`,
 `tests/integration/conftest.py`, `alembic/versions/`, `candlegraph/storage/statements.py`
 **Companions:** [`../table-placement/DESIGN.md`](../table-placement/DESIGN.md) —
@@ -50,7 +50,7 @@ flowchart TD
     I1["docker-compose.yaml"]
     I2[".github/workflows/ci.yml"]
     I3["tests/integration/conftest.py"]
-    I1 & I2 & I3 --> IT["timescale/timescaledb:2.31.0-pg17"]
+    I1 & I2 & I3 --> IT["timescale/timescaledb-ha:pg17.11-ts2.31.0<br/>(was timescale/timescaledb:2.31.0-pg17 until 2026-10-29)"]
   end
 
   subgraph mig["2 · One Alembic revision, e4b9c7a05f13"]
@@ -75,7 +75,12 @@ flowchart TD
 
 ### 1. The image
 
-`postgres:17` becomes **`timescale/timescaledb:2.31.0-pg17`** in compose, in
+`postgres:17` became **`timescale/timescaledb:2.31.0-pg17`** on 2026-10-25, and
+that became **`timescale/timescaledb-ha:pg17.11-ts2.31.0`** on 2026-10-29 (stage 1,
+step 1: the `-ha` image carries pgvector; see
+`../pgvector-coexistence/DESIGN.md`). Same PostgreSQL 17.11, same TimescaleDB
+2.31.0; Ubuntu instead of Alpine, and `PGDATA` at `/home/postgres/pgdata/data`.
+The pin lives in compose, in
 the CI service container, and in the testcontainer. All three are pinned to
 an exact version, for the reason the `Dockerfile` already records in a
 comment: an unpinned image is how this build broke before. `latest-pg17`

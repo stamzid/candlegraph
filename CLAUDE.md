@@ -94,3 +94,12 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   *other* branch. `make down` would delete their data, so do not reach for it
   reflexively: run your own stack under an explicit
   `COMPOSE_PROJECT_NAME=<something-unique>` with distinct host ports instead.
+- When the stack will not come up, `make up` prints the API container's log
+  and the fix is almost always `make reset` for *your* project. Never
+  `docker system prune` or delete volumes by hand to fix a candlegraph
+  start-up problem: other projects' databases live on the same daemon, and
+  `make reset` deletes exactly one volume and one image.
+- Several Claude sessions can run in this repository at once, each in its
+  own worktree. Use a unique `COMPOSE_PROJECT_NAME` and host ports, and put
+  scratch files under a session-unique path in `/tmp`; two sessions writing
+  the same `/tmp/<repo>-*.log` have overwritten each other's results before.

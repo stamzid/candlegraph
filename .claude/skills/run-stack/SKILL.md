@@ -70,11 +70,19 @@ Full end-to-end assertions, once rows exist:
 make e2e
 ```
 
-## Stop
+## Stop, and start over
 
 ```sh
 make down    # also deletes the volume, so the next `make up` backfills fresh
+make reset   # down -v, delete this project's image, up again — the fix for a bad volume
 ```
+
+`make up` prints the API container's last log lines when the stack does not
+become healthy, and names `make reset` if the message is about a migration
+or a volume. Do not reach for `docker system prune`: it deletes every other
+project's state to fix one volume. Note what `docker compose up -d --build
+--force-recreate` does **not** do: it recreates containers, never volumes,
+so a volume at an unknown revision fails the same way afterwards.
 
 ## Troubleshooting
 
@@ -88,6 +96,8 @@ make down    # also deletes the volume, so the next `make up` backfills fresh
 | App healthy but no rows | Normal for the first ~20s. After that, read `make logs-worker` — per-token errors are logged with the symbol, and `make runs` shows the run status. |
 | `"data_fresh": false` in /status | No successful run in the last three poll intervals. `make runs` shows why. |
 | Worker never starts | It waits for the API healthcheck. Fix the API first. |
+| API container `Exited (1)` and not restarting | By design since `restart: on-failure:5`: its entrypoint failed five times in a row, which means the fault is deterministic (almost always the volume). `make up` already printed the log; `make reset` is the remedy. |
+| `--force-recreate` "did nothing" | It recreates containers, not volumes, and before 10-29 could run another worktree's image because every checkout built `candlegraph:latest`. Images are now `candlegraph:<project>`; for a volume problem use `make reset`. |
 | Migration errors on start | A volume from an older schema. `make down` (which drops it) then `make up`. |
 | `timescaledb extension is installed on this server but not preloaded` | The migration preflight. The volume was created by plain `postgres:17`, so `initdb` never ran under the TimescaleDB image. Compose forces the preload, so on compose this means the server is not the compose one; elsewhere add `shared_preload_libraries = 'timescaledb'` and restart. `make down` then `make up` recreates the volume (it also carries a Debian collation version the Alpine image cannot verify). |
 | `could not access file "timescaledb"`, or postgres dies on `CREATE EXTENSION` with `must be preloaded` | The same condition reached without the preflight (an image built before it). `make down` then `make up`. |

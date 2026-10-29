@@ -81,7 +81,7 @@ make up                       # the entrypoint runs `alembic upgrade head`
 make test-integration         # applies the chain to a throwaway TimescaleDB
 ```
 
-The throwaway database is `timescale/timescaledb:2.31.0-pg17`, pinned in
+The throwaway database is `timescale/timescaledb-ha:pg17.11-ts2.31.0`, pinned in
 `tests/integration/conftest.py` to match compose and CI. A migration that
 passes against plain PostgreSQL proves nothing about hypertables.
 

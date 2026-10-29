@@ -10,7 +10,7 @@ COMPOSE ?= docker compose
 E2E_URL ?= http://localhost:$${APP_HOST_PORT:-8000}
 
 .PHONY: help install lock fmt fmt-check lint typecheck test test-unit test-integration \
-        cov check up down logs logs-worker ps migrate revision e2e sdl clean \
+        cov check up down reset logs logs-worker ps migrate revision e2e sdl clean \
         ingest backfill report runs ui logs-ui observe janitor agent-runs logs-agents
 
 help: ## List the available targets
@@ -50,11 +50,19 @@ cov: ## Run the suite with a coverage report
 
 check: fmt-check lint typecheck test ## Everything CI runs
 
-up: ## Build and start the stack, waiting until it is healthy
-	$(COMPOSE) up -d --build --wait
+up: ## Build and start the stack, waiting until it is healthy; prints the API log if it does not get there
+	@$(COMPOSE) up -d --build --wait || { \
+		echo; echo "--- the stack did not become healthy; last lines of the API container: ---"; \
+		$(COMPOSE) logs --no-color --tail=40 candlegraph; \
+		echo "--- if the log names a migration or volume problem, 'make reset' rebuilds the volume ---"; \
+		exit 1; }
 
 down: ## Stop the stack and delete its volume
-	$(COMPOSE) down -v
+	$(COMPOSE) down -v --remove-orphans
+
+reset: ## Rebuild from nothing: stop, delete the volume and this project's image, start again
+	$(COMPOSE) down -v --remove-orphans --rmi local
+	$(MAKE) up
 
 logs: ## Follow the application log
 	$(COMPOSE) logs -f candlegraph

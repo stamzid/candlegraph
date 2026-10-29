@@ -28,7 +28,7 @@ same step or it follows it.
 | [`roadmap/`](roadmap/DESIGN.md) | living | What has been delivered, what comes next, and the exit criterion for each stage. |
 | [`storage/timescaledb/`](storage/timescaledb/DESIGN.md) | implemented | Adopting the TimescaleDB extension: the image, the migration, and the policies deliberately left off. |
 | [`storage/table-placement/`](storage/table-placement/DESIGN.md) | implemented | Which tables are hypertables and which stay plain, with the rule for deciding the next one. |
-| [`storage/pgvector-coexistence/`](storage/pgvector-coexistence/DESIGN.md) | proposed | How pgvector sits beside TimescaleDB in the one instance: the four table families, the query paths side by side, and what changes operationally. |
+| [`storage/pgvector-coexistence/`](storage/pgvector-coexistence/DESIGN.md) | proposed, image switch done | How pgvector sits beside TimescaleDB in the one instance: the four table families, the query paths side by side, and what changes operationally. |
 | [`rollout/`](rollout/ROLLOUT.md) | current | **The current rollout plan** — ordered, turn-sized steps for stage 1 with a progress table. One current rollout at a time; finished ones move to `rollout/archive/`. |
 | [`knowledge/graph/`](knowledge/graph/DESIGN.md) | proposed | Stage 1: the knowledge schema, time-series versus relational placement, the retrieval and explanation flow, and how it attaches to the observer and janitor. |
 | [`knowledge/vector-store/`](knowledge/vector-store/DESIGN.md) | proposed | pgvector in the existing database, compared with Qdrant, Chroma, Neo4j and Apache AGE; the image change it implies and the triggers that would revisit it. |
@@ -39,6 +39,7 @@ same step or it follows it.
 | [`agents/observer/`](agents/observer/DESIGN.md) | implemented | The run observer: stale data, gaps that matter, metric drift. |
 | [`agents/janitor/`](agents/janitor/DESIGN.md) | implemented | The CI janitor: run the checks, apply mechanical fixes, draft a PR. |
 | [`incidents/2026-10-28-stack-would-not-start/`](incidents/2026-10-28-stack-would-not-start/POSTMORTEM.md) | closed | Post-mortem: the stack would not start after the TimescaleDB move. Two faults in one volume, why neither named itself, and what changed. |
+| [`incidents/2026-10-29-compose-startup-robustness/`](incidents/2026-10-29-compose-startup-robustness/POSTMORTEM.md) | closed | Post-mortem: the API container sometimes would not start until Docker was cleaned. Five causes in the compose file; bounded restarts, one image per project, one migrator, TCP probe, one build. |
 | [`incidents/2026-10-29-health-probe-cadence/`](incidents/2026-10-29-health-probe-cadence/POSTMORTEM.md) | closed | Post-mortem: the API log was nothing but health probes. By design, wasteful; start-up versus steady-state cadence, one round trip, quiet when healthy. |
 
 Read the document for an area before changing the code it describes, and

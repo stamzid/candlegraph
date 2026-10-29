@@ -27,6 +27,7 @@ a target, and never let CI run something that is not one either.
 | Everything CI runs | `make check` |
 | Coverage report | `make cov` |
 | Run the stack | `make up`, then `make logs` / `make logs-worker`, `make down` |
+| Start over from a bad volume | `make reset` (drops the volume and this project's image, then `make up`) |
 | One ingest pass | `make ingest` |
 | Backfill 90 days | `make backfill days=90` |
 | Data-quality report | `make report` |
@@ -126,8 +127,10 @@ schema.graphql       Generated. `make sdl`; a test fails if it is stale.
 | `signal` | one row per strategy, symbol and bar | `(strategy, symbol, period_start_unix)` | **hypertable** |
 | `agent_run` | one row per agent graph run | `run_id` | plain |
 
-The database is **TimescaleDB** (`timescale/timescaledb:2.31.0-pg17`, pinned
-in compose, in CI, and in the testcontainer), not plain PostgreSQL. The three
+The database is **TimescaleDB** (`timescale/timescaledb-ha:pg17.11-ts2.31.0`, pinned
+in compose, in CI, and in the testcontainer), not plain PostgreSQL. The `-ha`
+image also ships pgvector and pgvectorscale, available but not yet installed;
+stage 1 installs them. The three
 series tables are chunked monthly on `period_start_unix`; the state and
 ledger tables are deliberately ordinary tables. See invariant 24 and
 `docs/storage/table-placement/DESIGN.md`.
@@ -215,6 +218,14 @@ Each of these has a test. Breaking one should break the build, not production.
     Nothing consumes health after start-up, so a probe every few seconds
     was work for no one and buried the real log lines. See
     `docs/incidents/2026-10-29-health-probe-cadence/`.
+26. **The stack starts the same way from any state.** One service builds
+    the image, tagged `candlegraph:<project>`; one container applies
+    migrations (`RUN_MIGRATIONS`) and the rest wait for it to be healthy;
+    app containers restart `on-failure` a bounded number of times so a
+    deterministic failure stays visible instead of looping; the Postgres
+    probe uses TCP so initdb's temporary server cannot pass it. The remedy
+    for a bad volume is `make reset`, never "clean Docker". See
+    `docs/incidents/2026-10-29-compose-startup-robustness/`.
 
 ## Definition of done
 
