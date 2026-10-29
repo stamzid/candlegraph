@@ -7,7 +7,12 @@ something; the document here tells you *why it is that shape*.
 
 ```
 docs/<area>/<topic>/DESIGN.md
+docs/incidents/<date>-<slug>/POSTMORTEM.md
 ```
+
+Incidents are the exception to "why, not how": a post-mortem records the
+timeline, the root causes, and the follow-ups, and its Status closes when
+every follow-up has landed or been explicitly declined.
 
 | Document | Status | Covers |
 |---|---|---|
@@ -17,6 +22,7 @@ docs/<area>/<topic>/DESIGN.md
 | [`agents/framework/`](agents/framework/DESIGN.md) | implemented | The conventions every LangGraph agent follows: state, nodes, findings, narration, sinks, scheduling, testing. |
 | [`agents/observer/`](agents/observer/DESIGN.md) | implemented | The run observer: stale data, gaps that matter, metric drift. |
 | [`agents/janitor/`](agents/janitor/DESIGN.md) | implemented | The CI janitor: run the checks, apply mechanical fixes, draft a PR. |
+| [`incidents/2026-10-28-stack-would-not-start/`](incidents/2026-10-28-stack-would-not-start/POSTMORTEM.md) | closed | Post-mortem: the stack would not start after the TimescaleDB move. Two faults in one volume, why neither named itself, and what changed. |
 
 Read the document for an area before changing the code it describes, and
 update it in the same change — the definition of done in `AGENTS.md` asks

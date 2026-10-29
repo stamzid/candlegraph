@@ -31,6 +31,7 @@ import sqlalchemy as sa
 from alembic import op
 
 from candlegraph.settings import get_settings
+from candlegraph.storage.preflight import explain_missing_preload, timescaledb_is_preloaded
 
 revision: str = "e4b9c7a05f13"
 down_revision: str | None = "d8f2a6c41e07"
@@ -110,16 +111,22 @@ def _primary_key_name(table: str) -> str:
 
 
 def _require_extension() -> None:
-    """Fail with something actionable when the image is plain PostgreSQL.
+    """Fail with something actionable when the server cannot create the extension.
 
-    Silently leaving the tables unchunked would give a developer a different
-    schema from CI's, which is worse than not starting.
+    Two distinct ways that happens, and both are checked, because the second
+    one slipped through the first check and took the stack down: the image is
+    plain PostgreSQL and has no extension at all, or the image is TimescaleDB
+    but the data directory predates it, so the library is on disk and
+    "available" while ``shared_preload_libraries`` is empty. In that second
+    case ``CREATE EXTENSION`` is a backend ``FATAL`` rather than an error a
+    transaction can roll back. Silently leaving the tables unchunked would
+    give a developer a different schema from CI's, which is worse than not
+    starting.
     """
-    available = (
-        op.get_bind()
-        .execute(sa.text("SELECT 1 FROM pg_available_extensions WHERE name = 'timescaledb'"))
-        .scalar()
-    )
+    bind = op.get_bind()
+    available = bind.execute(
+        sa.text("SELECT 1 FROM pg_available_extensions WHERE name = 'timescaledb'")
+    ).scalar()
     if not available:
         raise RuntimeError(
             "the timescaledb extension is not available on this server. "
@@ -127,6 +134,9 @@ def _require_extension() -> None:
             "docs/storage/timescaledb/DESIGN.md. Point DB_HOST at the compose "
             "database, or `make down && make up` to rebuild it."
         )
+    setting = str(bind.execute(sa.text("SHOW shared_preload_libraries")).scalar() or "")
+    if not timescaledb_is_preloaded(setting):
+        raise RuntimeError(explain_missing_preload(setting))
 
 
 def upgrade() -> None:

@@ -50,6 +50,15 @@ Rules:
     waits for a measured problem.
 - Write a real `downgrade`. It is tested by `make test-integration`, which
   applies the chain to a fresh database.
+- **A revision id is permanent the moment it has been applied anywhere** —
+  your compose volume counts. If you must rename or rewrite a draft you have
+  already run, `uv run alembic downgrade -1` on every database that has it
+  *first*, then edit. A database stamped with an id no committed file carries
+  cannot be reached by any migration and has to be rebuilt; that is what took
+  the stack down on 2026-10-28 (`docs/incidents/2026-10-28-stack-would-not-start/`).
+  `test_the_migration_chain_is_linear_with_one_head` and
+  `test_every_revision_file_is_named_after_its_id` catch the tree-side drift;
+  nothing can catch the volume-side drift but this rule.
 - If you add a constraint, **de-duplicate existing rows first** in the same
   revision — see `8c1d47f2b3a0`, which does exactly that before tightening the
   natural key.

@@ -1,6 +1,6 @@
 # TimescaleDB: adoption, migration, and what we deliberately did not turn on
 
-**Status:** implemented — 2026-10-25
+**Status:** implemented — 2026-10-25, preflight added 2026-10-29
 **Area:** `docker-compose.yaml`, `.github/workflows/ci.yml`,
 `tests/integration/conftest.py`, `alembic/versions/`, `candlegraph/storage/statements.py`
 **Companion:** [`../table-placement/DESIGN.md`](../table-placement/DESIGN.md) —
@@ -79,14 +79,30 @@ an exact version, for the reason the `Dockerfile` already records in a
 comment: an unpinned image is how this build broke before. `latest-pg17`
 would have been a rolling tag.
 
-The image is PostgreSQL 17 with the extension in `shared_preload_libraries`
-and an init script that creates it in the default database. The data
-directory layout is unchanged, so an existing `pgdata` volume keeps working.
+The image is PostgreSQL 17 with an init script that, **on `initdb` only**,
+writes `shared_preload_libraries = 'timescaledb'` into `postgresql.conf` and
+creates the extension in the default database. An existing `pgdata` volume
+does **not** inherit any of that: the server reuses the data directory as it
+finds it, the preload stays empty, and `CREATE EXTENSION timescaledb` is a
+backend `FATAL` rather than an error. That is how the stack went down on
+2026-10-28 (see
+[`docs/incidents/2026-10-28-stack-would-not-start/`](../../incidents/2026-10-28-stack-would-not-start/POSTMORTEM.md)).
+Two things now make the preload a property of the service rather than of the
+volume's history: compose starts the server with
+`-c shared_preload_libraries=timescaledb`, and `alembic/env.py` runs a
+preflight that refuses to migrate a server that is not preloading it, with a
+message naming the cause. The image is also Alpine where `postgres:17` was
+Debian, so a volume carried across records a glibc collation version the
+musl server cannot honour; that is one more reason an old volume is rebuilt,
+not migrated.
 
 The extension is now **required**, not optional. The migration raises a
-clear error if it is missing rather than silently leaving plain tables,
-because a schema that differs between a developer's database and CI's is
-worse than a failure that says what to do.
+clear error if it is missing *or not preloaded* rather than silently leaving
+plain tables, because a schema that differs between a developer's database
+and CI's is worse than a failure that says what to do. "Available" and
+"preloaded" are checked separately: `pg_available_extensions` lists the
+library the moment it is on disk, which is exactly the state of an old volume
+under the new image.
 
 ### 2. The migration
 
@@ -176,6 +192,9 @@ choosing an extension over a different database.
 | `test_a_hypertable_still_upserts_on_the_natural_key` | invariant 4 across chunk boundaries |
 | `test_rows_spread_across_chunks_by_time` | partitioning actually partitions |
 | `test_the_timescale_migration_round_trips` | `downgrade` then `upgrade` on a populated database, rows and sequence intact |
+| `test_a_server_that_does_not_preload_timescaledb_is_refused_before_any_ddl` | the preflight stops a server with the library on disk but not preloaded, before the first revision runs |
+| `test_a_version_table_stamped_with_an_unknown_revision_is_refused_with_a_cause` | a database at a revision this checkout lacks is refused with both causes named |
+| `test_compose_forces_the_timescale_preload_on_every_volume` (unit) | the service, not the volume's history, decides the preload |
 | the existing `test_database.py` suite, unchanged | candles, bucket boundaries, gaps, idempotency and "never deletes" all behave identically on hypertables |
 
 The last row is the important one: the migration is correct to the extent

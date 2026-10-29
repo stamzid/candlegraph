@@ -60,6 +60,7 @@ candlegraph/
   storage/
     database.py        Connection pool and query helpers. Connects lazily.
     statements.py      Every SQL statement, built per schema.
+    preflight.py       Pure rules alembic/env.py checks before migrating: preload, known revision.
   ingestion/
     subgraph.py        Synchronous GraphQL client for The Graph gateway.
     transform.py       Subgraph rows -> database rows. Pure.
@@ -104,6 +105,7 @@ docs/<area>/<topic>/DESIGN.md   Design documents. Why, not how; `docs/README.md`
   roadmap/           Delivered stages, next stages, and each exit criterion.
   storage/           TimescaleDB adoption, and which tables are hypertables.
   agents/            The agent framework, the observer, and the janitor.
+  incidents/<date>-<slug>/POSTMORTEM.md   What went down, why, and what changed so it cannot again.
 tests/unit/          Offline. No database, no network. Mirrors the package layout.
 tests/integration/   Throwaway TimescaleDB (testcontainers, or TEST_DATABASE_URL).
 tests/e2e/           Against a running stack; skipped unless CANDLEGRAPH_E2E_URL is set.

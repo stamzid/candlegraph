@@ -31,6 +31,14 @@ services:
     # hypertables. Pinned exactly, for the same reason the Dockerfile pins uv.
     # See docs/storage/timescaledb/DESIGN.md.
     image: timescale/timescaledb:2.31.0-pg17
+    # The image only writes shared_preload_libraries into postgresql.conf when
+    # it runs initdb, i.e. on an empty volume. A volume initialised by the
+    # plain postgres image it replaced comes up with the setting empty, and
+    # CREATE EXTENSION timescaledb is then a backend FATAL. Passing it on the
+    # command line makes the preload a property of the service, not of
+    # whichever image happened to create the data directory. See
+    # docs/incidents/2026-10-28-stack-would-not-start/POSTMORTEM.md.
+    command: ["postgres", "-c", "shared_preload_libraries=timescaledb"]
     environment:
       POSTGRES_DB: ${DB_NAME:-candlegraph}
       POSTGRES_USER: ${DB_USER:-candlegraph}

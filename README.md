@@ -241,9 +241,17 @@ Compression and retention policies are deliberately off — invariant 4 says
 stored history is never deleted, and a retention policy is a scheduled `DELETE`.
 
 **Upgrading an existing database:** a data directory created by plain
-`postgres:17` has no `shared_preload_libraries=timescaledb`, and the server will
-refuse to load the extension on it. `make down` (which drops the volume) then
-`make up`.
+`postgres:17` has no `shared_preload_libraries=timescaledb` of its own. Compose
+now passes that setting on the server's command line, so such a volume comes
+up preloaded, and a migration preflight refuses to run against a server that
+is not, with a message that says why. The old Debian-based volume still
+carries a glibc collation version the Alpine image cannot honour, so the
+recommended path is still `make down` (which drops the volume) then `make up`.
+If the preflight instead reports the database is **stamped at a revision this
+checkout does not have**, read the message: either another worktree shares
+your Compose project, or a draft migration was applied here and renamed before
+it was committed. The second case can only be rebuilt. The full account is in
+[`docs/incidents/2026-10-28-stack-would-not-start/POSTMORTEM.md`](docs/incidents/2026-10-28-stack-would-not-start/POSTMORTEM.md).
 
 ## Analytics
 

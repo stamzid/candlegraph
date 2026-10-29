@@ -237,3 +237,93 @@ def test_the_timescale_migration_round_trips(db: DatabaseManager, migrated_dsn: 
     assert snapshot() == before, "constraints and indexes must come back under their own names"
     rows = db.fetch_all(f'SELECT COUNT(*) AS n FROM "{db.schema}".token_hours_data')
     assert int(rows[0]["n"]) == 5
+
+
+# --- the preflight ---------------------------------------------------------
+#
+# Both of these reproduce the 2026-10-28 outage, where the stack would not
+# start and neither error named its cause. See
+# docs/incidents/2026-10-28-stack-would-not-start/POSTMORTEM.md.
+
+
+def test_a_version_table_stamped_with_an_unknown_revision_is_refused_with_a_cause(
+    db: DatabaseManager, migrated_dsn: str
+) -> None:
+    """A draft revision applied locally and renamed before commit leaves the
+    database at an id no checkout has. Alembic says only "can't locate"."""
+    from alembic import command
+    from alembic.config import Config
+
+    from tests.integration.conftest import _env
+
+    version_table = f'"{db.schema}".alembic_version'
+    (current,) = db.fetch_all(f"SELECT version_num FROM {version_table}")
+    db.execute(f"UPDATE {version_table} SET version_num = 'd2f8b6a41c35'")
+    try:
+        with (
+            _env(DATABASE_URL=migrated_dsn, DB_SCHEMA=db.schema),
+            pytest.raises(RuntimeError, match="stamped at revision d2f8b6a41c35") as raised,
+        ):
+            command.upgrade(Config("alembic.ini"), "head")
+        message = str(raised.value)
+        assert "COMPOSE_PROJECT_NAME" in message
+        assert "renamed or rewritten before it was committed" in message
+    finally:
+        db.execute(
+            f"UPDATE {version_table} SET version_num = %(version)s",
+            {"version": current["version_num"]},
+        )
+
+
+def test_a_server_that_does_not_preload_timescaledb_is_refused_before_any_ddl() -> None:
+    """The image with the library on disk but `shared_preload_libraries` empty:
+    exactly what a volume from plain postgres:17 looks like under the
+    TimescaleDB image. `pg_available_extensions` still says available, so the
+    old check passed and `CREATE EXTENSION` killed the connection."""
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy.exc import OperationalError
+
+    from tests.integration.conftest import POSTGRES_IMAGE, _env, _libpq_url
+
+    try:
+        from testcontainers.community.postgres import PostgresContainer
+    except ImportError:  # pragma: no cover
+        pytest.skip("testcontainers is not installed")
+
+    # The image's own init scripts would CREATE EXTENSION during initdb and
+    # die on exactly the condition under test, so they are hidden behind an
+    # empty tmpfs. What remains is a data directory initialised with no
+    # TimescaleDB involvement, served by the TimescaleDB binary: the shape of
+    # every volume that predates the move to this image.
+    container = (
+        PostgresContainer(POSTGRES_IMAGE, driver=None)
+        .with_command(["postgres", "-c", "shared_preload_libraries="])
+        .with_tmpfs_mount("/docker-entrypoint-initdb.d")
+    )
+    try:
+        container.start()
+    except Exception as exc:  # pragma: no cover - depends on the host
+        pytest.skip(f"no Docker for a second throwaway Postgres: {exc}")
+
+    try:
+        dsn = _libpq_url(container.get_connection_url())
+        with (
+            _env(DATABASE_URL=dsn, DB_SCHEMA="candlegraph"),
+            pytest.raises(RuntimeError, match="installed on this server but not preloaded") as raised,
+        ):
+            command.upgrade(Config("alembic.ini"), "head")
+        assert "shared_preload_libraries=timescaledb" in str(raised.value)
+
+        manager = DatabaseManager(dsn=dsn, schema="candlegraph", min_connections=1, max_connections=2)
+        try:
+            tables = manager.fetch_all(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'candlegraph' AND tablename <> 'alembic_version'"
+            )
+        finally:
+            manager.close()
+        assert tables == [], "the preflight must run before the first revision, not after it"
+    except OperationalError as exc:  # pragma: no cover - the image refused the command
+        pytest.fail(f"the throwaway server did not come up: {exc}")
+    finally:
+        container.stop()
