@@ -1,6 +1,6 @@
 # Table placement: which tables are hypertables, and which stay plain
 
-**Status:** implemented — 2026-10-25
+**Status:** implemented — 2026-10-25; knowledge tables proposed 2026-10-29
 **Area:** `alembic/versions/`, `candlegraph/storage/statements.py`
 **Companion:** [`../timescaledb/DESIGN.md`](../timescaledb/DESIGN.md) — why we
 adopted the extension at all, and how the migration works.
@@ -161,6 +161,26 @@ upserts can `RETURNING id` and count rows. Dropping it entirely and promoting
 the natural key to primary was the tidier alternative, and was rejected: it
 would touch the write path, `missing_hours`, and a dozen tests to remove a
 column that costs eight bytes and breaks nothing.
+
+## Proposed: the knowledge tables (stage 1)
+
+Recorded here before any migration is written, as the rule below requires.
+The reasoning is in `docs/knowledge/graph/DESIGN.md`; this is the verdict
+per table against the four questions.
+
+| Table | 1. Observation grain | 2. Time-ordered writes | 3. Range reads | 4. Unbounded growth | Placement |
+|---|---|---|---|---|---|
+| `asset`, `source` | no: current state | no | no | no | plain |
+| `document` | no: `published_at` is an attribute, often NULL | no: upserted on `url_hash` | sometimes | yes | **plain** |
+| `chunk` | no | no: re-embedded by id | no: read by similarity | yes | **plain** — an ANN index must be global; a hypertable would give each chunk its own HNSW index and turn one search into a union of partial searches |
+| `mention`, `edge` | no | no | `edge` by validity window | slowly | plain |
+| `explanation` | yes: `(strategy, symbol, period_start_unix)` | yes | yes | yes, but written on demand | plain for now; **revisit** when explanations are generated for every bar (stage 2) |
+| `source_call` | no: a record that something ran | append | recent window | yes, slowly | plain, like `ingest_run` |
+
+The new case this adds to the rule: a table can satisfy question 4 and
+still stay plain when its dominant read is **similarity, not time**.
+Chunking by time and indexing by nearest neighbour pull in opposite
+directions, and recall wins.
 
 ## How to apply this to a new table
 

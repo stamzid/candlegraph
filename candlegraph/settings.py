@@ -146,6 +146,10 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "INFO"
+    # Whether a *successful* GET /status is written to the access log. The
+    # compose health probe is the only steady-state caller, and one line per
+    # probe buried every real request. Failures are always logged.
+    log_health_probes: bool = False
 
     @model_validator(mode="after")
     def _check_pool_bounds(self) -> Settings:

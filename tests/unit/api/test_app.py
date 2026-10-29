@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import psycopg2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -69,13 +70,32 @@ def test_status_is_ok_when_the_database_answers(app_settings: Settings, db: Fake
 
 def test_status_is_503_when_the_database_is_unreachable(app_settings: Settings, db: FakeDatabase) -> None:
     """A health check that passes while the database is down is worse than none."""
-    db.ping = lambda: False  # type: ignore[method-assign]
+
+    def unreachable(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        raise psycopg2.OperationalError("connection refused")
+
+    db.fetch_all = unreachable  # type: ignore[method-assign]
 
     for client in client_for(app_settings):
         response = client.get("/status")
 
     assert response.status_code == 503
     assert response.json()["database"] == "down"
+    assert "data_fresh" not in response.json()
+
+
+def test_status_costs_one_database_round_trip(app_settings: Settings, db: FakeDatabase) -> None:
+    """The compose probe is the most frequent request the API answers.
+
+    It used to run `SELECT 1` and then the ledger read; the second proves
+    liveness on its own, so the first was a query per probe for nothing.
+    """
+    db.ping = lambda: (_ for _ in ()).throw(AssertionError("ping must not be called"))  # type: ignore[method-assign]
+
+    for client in client_for(app_settings):
+        assert client.get("/status").status_code == 200
+
+    assert [label for label, _ in db.fetches] == ["get_last_successful_run"]
 
 
 def test_status_reports_ingestion_as_enabled(

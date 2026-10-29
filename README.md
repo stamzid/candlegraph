@@ -171,7 +171,10 @@ Two details worth knowing:
   rows is absent from the series rather than zero-filled.
 
 `supportedTokens` returns the symbols this deployment tracks. `GET /status` is the health check
-and returns 503 when the database is unreachable.
+and returns 503 when the database is unreachable. It costs one database round trip, and the
+compose stack probes it every three seconds while starting and every three minutes afterwards.
+A successful probe is not written to the access log (`LOG_HEALTH_PROBES=true` to change that);
+a failing one always is.
 
 ## Commands
 
@@ -384,7 +387,8 @@ Next, in order:
    strategy consumes, nothing written to the database.
 1. **Knowledge graph and signaller** — assets, pools, sources and documents in
    Postgres with pgvector, Tavily for web search, and news attached to prices,
-   so a signal can cite *why*. Paper trading only.
+   so a signal can cite *why*. Paper trading only. The design is written:
+   see `docs/knowledge/` (status *proposed*).
 2. **Harness** — YAML pipeline specs, an event bus, OpenTelemetry, and the
    continuous aggregates deferred from the TimescaleDB migration.
 3. **Traditional markets** — NASDAQ and NYSE equities alongside crypto, which

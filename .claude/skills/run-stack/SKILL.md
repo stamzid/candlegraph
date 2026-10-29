@@ -20,8 +20,12 @@ test -f .env || cp .env.example .env
 make up      # build, start, and block until both containers are healthy
 ```
 
-`make up` fails if any container never reaches healthy. The services come up
-in order: `postgres` (TimescaleDB, not plain PostgreSQL), then `candlegraph`
+`make up` fails if any container never reaches healthy. Health probes run
+every three seconds while a container is starting and every three minutes
+once it is healthy, so `make up` is still quick and the steady-state log is
+not a probe every ten seconds. A healthy `GET /status` is not logged at all;
+if you need to see the probes, set `LOG_HEALTH_PROBES=true`. The services
+come up in order: `postgres` (TimescaleDB, not plain PostgreSQL), then `candlegraph`
 (the API, which applies the migrations), then `worker` (which ingests), `ui`,
 and `agents`. The worker waits for the API to be *healthy* so two containers
 never race on the same DDL.
@@ -78,7 +82,9 @@ make down    # also deletes the volume, so the next `make up` backfills fresh
 |---|---|
 | Port already allocated | Another worktree's stack is up. Set `POSTGRES_HOST_PORT` / `APP_HOST_PORT` in `.env`, or `make down` in the other checkout. |
 | `auth error: malformed API key` in the logs | `GRAPH_API_KEY` is empty or wrong in `.env`. Get one at <https://thegraph.com/studio/apikeys/>. |
-| `/status` returns 503 | Postgres is unreachable. `docker compose ps` and `docker compose logs postgres`. |
+| `/status` returns 503 | Postgres is unreachable. `docker compose ps` and `docker compose logs postgres`. The 503 *is* in `make logs` even though healthy probes are not. |
+| `make logs` shows no `GET /status` lines | Expected. Healthy probes are filtered; see `docs/incidents/2026-10-29-health-probe-cadence/`. |
+| A container shows `unhealthy` long after start | Steady-state probes are three minutes apart with three retries, so "unhealthy" means ~9 minutes of failures, not a blip. `docker inspect <container> --format '{{json .State.Health}}'` has the probe history. |
 | App healthy but no rows | Normal for the first ~20s. After that, read `make logs-worker` — per-token errors are logged with the symbol, and `make runs` shows the run status. |
 | `"data_fresh": false` in /status | No successful run in the last three poll intervals. `make runs` shows why. |
 | Worker never starts | It waits for the API healthcheck. Fix the API first. |

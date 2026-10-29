@@ -19,6 +19,8 @@ reconstructing the steps:
   tell a real finding from an expected one.
 - `add-agent` — add a new LangGraph graph that follows the framework.
 - `release-check` — the full pre-merge gate.
+- `extend-knowledge-graph` — stage 1 is designed, not built: the order to
+  build it in, and how to add a source, an entity, or a retriever to it.
 
 `docs/` holds the design documents, arranged the same way — one directory per
 topic, with a `DESIGN.md` inside and a flowchart in most of them:
@@ -29,6 +31,11 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   touching the Postgres image, a migration, or the hourly tables.
 - `docs/agents/framework/`, `.../observer/`, `.../janitor/` — read before
   touching `candlegraph/agents/`.
+- `docs/knowledge/` — the stage 1 design (graph, vector store, embeddings,
+  Tavily, MCP). Status is *proposed*; the code does not exist yet. Read
+  before starting any of it, and keep the Status lines truthful as it lands.
+- `docs/incidents/` — post-mortems. Read the two from October 2026 before
+  changing the database image, a migration id, or a compose health check.
 
 ## Working here
 

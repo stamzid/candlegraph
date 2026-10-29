@@ -19,10 +19,16 @@ every follow-up has landed or been explicitly declined.
 | [`roadmap/`](roadmap/DESIGN.md) | living | What has been delivered, what comes next, and the exit criterion for each stage. |
 | [`storage/timescaledb/`](storage/timescaledb/DESIGN.md) | implemented | Adopting the TimescaleDB extension: the image, the migration, and the policies deliberately left off. |
 | [`storage/table-placement/`](storage/table-placement/DESIGN.md) | implemented | Which tables are hypertables and which stay plain, with the rule for deciding the next one. |
+| [`knowledge/graph/`](knowledge/graph/DESIGN.md) | proposed | Stage 1: the knowledge schema, time-series versus relational placement, the retrieval and explanation flow, and how it attaches to the observer and janitor. |
+| [`knowledge/vector-store/`](knowledge/vector-store/DESIGN.md) | proposed | pgvector in the existing database, compared with Qdrant, Chroma, Neo4j and Apache AGE; the image change it implies and the triggers that would revisit it. |
+| [`knowledge/embeddings/`](knowledge/embeddings/DESIGN.md) | proposed | Embedding models compared (OpenAI, Voyage, Cohere, Gemini, bge-m3, Qwen3, nomic, …); 1024 dimensions fixed; a local free default; reuse in the harness. |
+| [`knowledge/tavily/`](knowledge/tavily/DESIGN.md) | proposed | Web search as a metered source: credit budget guard, `(asset, day)` cache, the `source_call` ledger, REST rather than MCP. |
+| [`knowledge/mcp/`](knowledge/mcp/DESIGN.md) | proposed | A read-only MCP server over existing functions, useful now for operating the stack; agents as MCP clients later; not for Tavily. |
 | [`agents/framework/`](agents/framework/DESIGN.md) | implemented | The conventions every LangGraph agent follows: state, nodes, findings, narration, sinks, scheduling, testing. |
 | [`agents/observer/`](agents/observer/DESIGN.md) | implemented | The run observer: stale data, gaps that matter, metric drift. |
 | [`agents/janitor/`](agents/janitor/DESIGN.md) | implemented | The CI janitor: run the checks, apply mechanical fixes, draft a PR. |
 | [`incidents/2026-10-28-stack-would-not-start/`](incidents/2026-10-28-stack-would-not-start/POSTMORTEM.md) | closed | Post-mortem: the stack would not start after the TimescaleDB move. Two faults in one volume, why neither named itself, and what changed. |
+| [`incidents/2026-10-29-health-probe-cadence/`](incidents/2026-10-29-health-probe-cadence/POSTMORTEM.md) | closed | Post-mortem: the API log was nothing but health probes. By design, wasteful; start-up versus steady-state cadence, one round trip, quiet when healthy. |
 
 Read the document for an area before changing the code it describes, and
 update it in the same change — the definition of done in `AGENTS.md` asks

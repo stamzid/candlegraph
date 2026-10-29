@@ -105,6 +105,7 @@ docs/<area>/<topic>/DESIGN.md   Design documents. Why, not how; `docs/README.md`
   roadmap/           Delivered stages, next stages, and each exit criterion.
   storage/           TimescaleDB adoption, and which tables are hypertables.
   agents/            The agent framework, the observer, and the janitor.
+  knowledge/         Stage 1, proposed: schema, vector store, embeddings, Tavily, MCP.
   incidents/<date>-<slug>/POSTMORTEM.md   What went down, why, and what changed so it cannot again.
 tests/unit/          Offline. No database, no network. Mirrors the package layout.
 tests/integration/   Throwaway TimescaleDB (testcontainers, or TEST_DATABASE_URL).
@@ -206,6 +207,13 @@ Each of these has a test. Breaking one should break the build, not production.
     partitioning column, which is why those three primary keys are
     `(id, period_start_unix)`. Both halves are tested;
     `docs/storage/table-placement/DESIGN.md` has the rule for a new table.
+25. **Health probes are cheap and quiet after start-up.** Every compose
+    `healthcheck` polls fast only inside `start_period` (`start_interval`)
+    and every three minutes after; `/status` costs one database round trip;
+    a successful probe is not written to the access log, a failing one is.
+    Nothing consumes health after start-up, so a probe every few seconds
+    was work for no one and buried the real log lines. See
+    `docs/incidents/2026-10-29-health-probe-cadence/`.
 
 ## Definition of done
 
@@ -269,7 +277,11 @@ unfalsifiable.
 1. **Knowledge graph and signaller.** Entities for assets, pools, sources
    and documents in Postgres with pgvector; Tavily for web search; news and
    text augmentation attached to the prices already stored. Paper trading
-   only.
+   only. *Designed* in `docs/knowledge/` (five documents: graph, vector
+   store, embeddings, Tavily, MCP); read them and the
+   `extend-knowledge-graph` skill before writing code. The stage opens
+   with a pinned image switch to `timescaledb-ha` for pgvector, which is a
+   volume rebuild.
    *Exit:* `candlegraph signals WETH --explain` prints a rationale citing a
    retrieved document with a URL and a timestamp, stored with the signal.
 2. **Harness.** YAML pipeline specs, an event bus, OpenTelemetry metrics,

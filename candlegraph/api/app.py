@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import psycopg2
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -26,7 +27,7 @@ from candlegraph.ingestion.worker import INGEST_JOB_ID, build_scheduler, ingest_
 from candlegraph.settings import Settings, get_settings
 from candlegraph.storage import get_db, set_db
 from candlegraph.tokens import get_token_registry
-from candlegraph.utils.logging_utils import configure_logging, service_logger
+from candlegraph.utils.logging_utils import configure_logging, quiet_health_probes, service_logger
 
 __all__ = ["INGEST_JOB_ID", "build_scheduler", "create_app", "ingest_job"]
 
@@ -47,6 +48,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """Build the ASGI app. Called by the entrypoint and by the tests."""
     settings = settings or get_settings()
     configure_logging(settings.log_level)
+    quiet_health_probes(enabled=not settings.log_health_probes)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -73,9 +75,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/status")
     def status() -> JSONResponse:
-        """Liveness, a real database round-trip, and ingest freshness."""
+        """Liveness, a real database round-trip, and ingest freshness.
+
+        One round trip, not two: the freshness read *is* the liveness probe.
+        A separate ``SELECT 1`` before it doubled the queries of the most
+        frequent request this service answers — the compose health probe —
+        and proved nothing the ledger read does not.
+        """
         db = get_db()
-        database_up = db.ping()
+        try:
+            age: float | None = seconds_since_last_success(db)
+            database_up = True
+        except psycopg2.Error as exc:
+            service_logger.warning("Database unreachable from /status: %s", exc)
+            age, database_up = None, False
 
         body: dict[str, object] = {
             "status": "ok" if database_up else "degraded",
@@ -85,7 +98,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
         if database_up:
-            age = seconds_since_last_success(db)
             # Reported, never fatal: the API serving stale data is still the
             # API working. Alerting on staleness is the observer's job.
             body["last_ingest_seconds_ago"] = None if age is None else round(age)

@@ -51,11 +51,20 @@ services:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       # The app waits for this, so migrations never race the database.
+      #
+      # Probe cadence, here and on every service below: fast only while the
+      # container is starting (start_interval, inside start_period), then
+      # once every three minutes. Compose and depends_on act on health only
+      # at start-up, and Docker never restarts an unhealthy container on its
+      # own, so a steady-state probe every few seconds bought nothing and
+      # cost a process spawn and a query each time. See
+      # docs/incidents/2026-10-29-health-probe-cadence/POSTMORTEM.md.
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-candlegraph} -d ${DB_NAME:-candlegraph}"]
-      interval: 3s
+      interval: 180s
       timeout: 5s
-      retries: 20
-      start_period: 10s
+      retries: 3
+      start_period: 60s
+      start_interval: 3s
     restart: unless-stopped
 
   candlegraph:
@@ -69,10 +78,11 @@ services:
       - "${APP_HOST_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/status', timeout=5).status == 200 else 1)\""]
-      interval: 10s
+      interval: 180s
       timeout: 10s
-      retries: 10
-      start_period: 20s
+      retries: 3
+      start_period: 90s
+      start_interval: 3s
 
   ui:
     <<: *app
@@ -80,14 +90,25 @@ services:
     environment:
       <<: *app-env
       INGEST_ENABLED: "false"
+    # Same rule as the worker and the agents: only the API container runs
+    # `alembic upgrade head` against a fresh volume. Without this the UI and
+    # the API raced on CREATE TABLE alembic_version and one of them crashed
+    # on a duplicate-key error in pg_type. See
+    # docs/incidents/2026-10-29-health-probe-cadence/POSTMORTEM.md.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      candlegraph:
+        condition: service_healthy
     ports:
       - "${UI_HOST_PORT:-8501}:8501"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5).status == 200 else 1)\""]
-      interval: 10s
+      interval: 180s
       timeout: 10s
-      retries: 10
-      start_period: 25s
+      retries: 3
+      start_period: 90s
+      start_interval: 3s
 
   worker:
     <<: *app

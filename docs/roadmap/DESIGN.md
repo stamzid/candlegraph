@@ -1,6 +1,6 @@
 # Roadmap
 
-**Status:** living document — last revised 2026-10-28
+**Status:** living document — last revised 2026-10-29
 **Scope:** what candlegraph is, what has been built, and what comes next.
 
 `AGENTS.md` carries a condensed copy of the stage list; this is the
@@ -208,6 +208,23 @@ together — and cite it.
   URL, and the time it was retrieved, or the explanation is unfalsifiable.
 - **Paper trading only.** No order goes anywhere. That is a property of the
   project, not of this stage.
+
+**Design (2026-10-29).** The stage is now designed in `docs/knowledge/`,
+one document per decision: the schema, retrieval flow and agent
+integration ([`graph/`](../knowledge/graph/DESIGN.md)); pgvector inside the
+existing database versus Neo4j, Qdrant and others
+([`vector-store/`](../knowledge/vector-store/DESIGN.md)); the embedding
+model, fixed at 1024 dimensions with a local free default and OpenAI as the
+hosted option ([`embeddings/`](../knowledge/embeddings/DESIGN.md)); Tavily
+under a credit budget with a cache keyed on `(asset, day)`
+([`tavily/`](../knowledge/tavily/DESIGN.md)); and where MCP fits
+([`mcp/`](../knowledge/mcp/DESIGN.md)). Two consequences worth knowing
+before the first line of code: pgvector is not in the Alpine TimescaleDB
+image, so the stage begins with a pinned switch to `timescaledb-ha` and a
+rebuilt volume, done with the lessons of
+`docs/incidents/2026-10-28-stack-would-not-start/`; and the knowledge
+tables' placement is already recorded in
+`docs/storage/table-placement/DESIGN.md`.
 
 **Exit criterion.** `candlegraph signals WETH --strategy bollinger --explain`
 prints a signal whose rationale cites at least one retrieved document with a
