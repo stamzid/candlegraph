@@ -71,12 +71,14 @@ the counts.
 ```python
 @dataclass(frozen=True)
 class Budget:
-    monthly_credits: int     # TAVILY_MONTHLY_CREDITS
-    daily_credits: int       # TAVILY_DAILY_CREDITS
-    reserve: int = 50        # kept back for operator use; the pipeline never spends it
+    monthly_credits: int  # TAVILY_MONTHLY_CREDITS
+    daily_credits: int  # TAVILY_DAILY_CREDITS
+    reserve: int = 50  # kept back for operator use; the pipeline never spends it
 
-def decide(spent_this_month: int, spent_today: int, cost: int, budget: Budget) -> Decision:
-    ...  # ALLOW, or REFUSE with the reason: "daily", "monthly", "reserve"
+
+def decide(
+    spent_this_month: int, spent_today: int, cost: int, budget: Budget
+) -> Decision: ...  # ALLOW, or REFUSE with the reason: "daily", "monthly", "reserve"
 ```
 
 - **Daily cap smooths the month.** 1,000 a month is ~33 a day; a daily
