@@ -29,6 +29,18 @@ BASE = 1_700_000_000 // HOUR * HOUR
 # docs/storage/table-placement/DESIGN.md is the rationale; this is the rule.
 HYPERTABLES = {"token_hours_data", "pool_hours_data", "signal"}
 PLAIN_TABLES = {"token", "pool", "ingest_run", "agent_run"}
+# Plain on purpose too: `chunk`'s ANN index must be global, and the rest are
+# state, links, or ledgers. See the knowledge rows in the placement table.
+KNOWLEDGE_TABLES = {
+    "asset",
+    "source",
+    "document",
+    "chunk",
+    "mention",
+    "edge",
+    "explanation",
+    "source_call",
+}
 
 
 def hypertable_names(db: DatabaseManager) -> set[str]:
@@ -83,9 +95,10 @@ def test_the_ledger_and_state_tables_are_not_hypertables(db: DatabaseManager) ->
 
     `token` and `pool` are current state with no time coordinate. `ingest_run`
     is updated by `run_id` after the run finishes, which on a time-partitioned
-    table would have to search every chunk.
+    table would have to search every chunk. The knowledge tables stay plain
+    too — most pointedly `chunk`, whose ANN index has to be one global graph.
     """
-    assert PLAIN_TABLES.isdisjoint(hypertable_names(db))
+    assert (PLAIN_TABLES | KNOWLEDGE_TABLES).isdisjoint(hypertable_names(db))
 
 
 def test_chunking_is_on_the_column_the_queries_filter(db: DatabaseManager) -> None:
@@ -221,7 +234,9 @@ def test_the_timescale_migration_round_trips(db: DatabaseManager, migrated_dsn: 
     config = Config("alembic.ini")
 
     with _env(DATABASE_URL=migrated_dsn, DB_SCHEMA=db.schema):
-        command.downgrade(config, "-1")
+        # To just below the timescale revision — "-1" would only undo whatever
+        # sits at head (the knowledge schema, since stage 1's step 2).
+        command.downgrade(config, "d8f2a6c41e07")
 
         assert "token_hours_data" not in hypertable_names(db)
         rows = db.fetch_all(f'SELECT COUNT(*) AS n FROM "{db.schema}".token_hours_data')

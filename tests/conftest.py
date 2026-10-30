@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from candlegraph.knowledge.statements import knowledge_statements_for
 from candlegraph.settings import Settings, reset_settings_cache
 from candlegraph.storage import set_db, statements_for
 from candlegraph.tokens import TokenRegistry, load_tokens, reset_token_cache
@@ -116,6 +117,7 @@ class FakeDatabase:
     def __init__(self, schema: str = "candlegraph", **reads: list[dict[str, Any]]) -> None:
         self.schema = schema
         self.sql = statements_for(schema)
+        self.knowledge_sql = knowledge_statements_for(schema)
         self.reads = reads
         self.upserts: list[tuple[str, list[dict[str, Any]]]] = []
         self.executed: list[tuple[str, dict[str, Any] | None]] = []
@@ -129,11 +131,12 @@ class FakeDatabase:
         Derived from the ``Statements`` fields rather than a hand-kept list, so
         a new statement is recognised here the moment it is added.
         """
-        for name, statement in vars(self.sql).items():
-            if name.endswith("_template"):
-                continue
-            if query is statement:
-                return name
+        for statements in (self.sql, self.knowledge_sql):
+            for name, statement in vars(statements).items():
+                if name.endswith("_template"):
+                    continue
+                if query is statement:
+                    return name
         return "unknown"
 
     def fetch_all(self, query: Any, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:

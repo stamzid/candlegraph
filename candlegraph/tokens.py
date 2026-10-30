@@ -30,6 +30,9 @@ class Token:
     address: str
     symbol: str
     name: str | None = None
+    # Names a document might use for this token ("Ether", "Ethereum"). Config
+    # for the knowledge layer's entity linking; empty means "symbol and name".
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +92,23 @@ def _parse_entry(index: int, raw: Any) -> Token:
     if name is not None and not isinstance(name, str):
         raise TokenConfigError(f"tokens[{index}] name must be a string when present")
 
-    return Token(address=address, symbol=symbol, name=name)
+    return Token(address=address, symbol=symbol, name=name, aliases=_parse_aliases(index, raw))
+
+
+def _parse_aliases(index: int, raw: dict[str, Any]) -> tuple[str, ...]:
+    """Validate one entry's alias list: non-empty strings, none repeated."""
+    aliases = raw.get("aliases")
+    if aliases is None:
+        return ()
+    if not isinstance(aliases, list):
+        raise TokenConfigError(f"tokens[{index}] aliases must be a list when present")
+
+    cleaned: list[str] = []
+    for position, alias in enumerate(aliases):
+        if not isinstance(alias, str) or not alias.strip():
+            raise TokenConfigError(f"tokens[{index}] aliases[{position}] must be a non-empty string")
+        cleaned.append(alias.strip())
+    return tuple(cleaned)
 
 
 def load_tokens(path: Path) -> TokenRegistry:
@@ -116,6 +135,8 @@ def load_tokens(path: Path) -> TokenRegistry:
 
     _reject_duplicates(path, "address", [t.address for t in tokens])
     _reject_duplicates(path, "symbol", [t.symbol.casefold() for t in tokens])
+    # An alias shared by two tokens would make a document's mention ambiguous.
+    _reject_duplicates(path, "alias", [a.casefold() for t in tokens for a in t.aliases])
 
     return TokenRegistry(tokens=tokens)
 

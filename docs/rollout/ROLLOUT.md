@@ -1,6 +1,6 @@
 # Rollout: stage 1 — the knowledge graph on pgvector
 
-**Status:** current — 2026-10-29; step 1 done, step 2 next. This directory holds **one
+**Status:** current — 2026-10-30; steps 1–3 done, step 4 next. This directory holds **one
 current rollout at a time**; this document is it, and each working session
 should update the progress table below. When the stage ships, this file
 moves to `docs/rollout/archive/<date>-<slug>.md` and the next rollout
@@ -18,8 +18,8 @@ Status line truthful.
 | # | Step | Size | Depends on | Status |
 |---|---|---|---|---|
 | 1 | Database image switch to `timescaledb-ha` | S, risky | — | **done** 2026-10-29 |
-| 2 | Knowledge schema migration + statements | M | 1 | not started |
-| 3 | Assets and aliases from `tokens.yaml` | S | 2 | not started |
+| 2 | Knowledge schema migration + statements | M | 1 | **done** 2026-10-30 |
+| 3 | Assets and aliases from `tokens.yaml` | S | 2 | **done** 2026-10-30 |
 | 4 | Documents: normalise, hash, chunk | S | 2 | not started |
 | 5 | Embeddings: Protocol, local provider, HNSW proven | M | 2, 4 | not started |
 | 6 | Tavily source, budget guard, `source_call` ledger | M | 2 | not started |
@@ -113,6 +113,18 @@ from `timescaledb_information.hypertables`
 migration round-trips on a populated database (copy the
 `test_the_timescale_migration_round_trips` pattern); `make check` green.
 
+**Outcome (2026-10-30).** Done, with step 3 in the same session. Revision
+`f399ca0770a0`: `_require_extension` for `vector` (message names the `-ha`
+image), `CREATE EXTENSION vector`, the eight tables plain, `halfvec(1024)`
+with the HNSW cosine index (`m=16, ef_construction=64`) and the generated
+`tsvector` + GIN on `chunk`, unique `url_hash`, and a `downgrade` that drops
+only the knowledge tables. `candlegraph/knowledge/statements.py` holds the
+statements that exist so far (the asset upsert and read); later steps add
+theirs as they land. `tests/integration/test_knowledge.py` proves extension,
+plainness, indexes, the unique hash, and the populated round trip; the
+pre-existing timescale round-trip test now downgrades to its own revision
+explicitly instead of `-1`.
+
 ## Step 3 — Assets and aliases
 
 **Goal.** `config/tokens.yaml` gains an `aliases` list per token;
@@ -127,6 +139,16 @@ subcommand, Makefile target, AGENTS.md commands table.
 sync is idempotent (second run changes nothing); a token with no aliases
 still gets an `asset` row keyed by address with `[symbol, name]` as the
 default alias set.
+
+**Outcome (2026-10-30).** Done. `config/tokens.yaml` carries an `aliases`
+list for all ten tokens; `tokens.py` validates them (non-empty strings,
+stripped, unique case-insensitively across the file — two tokens sharing an
+alias would make a mention ambiguous). `knowledge/assets.py` is the pure
+transform plus one idempotent upsert; a token with no aliases gets
+`[symbol, name]` (deduplicated when they match case-insensitively). CLI
+`candlegraph knowledge sync-assets`, Makefile `sync-assets`, AGENTS.md and
+README updated. Unit and integration tests as specified; `make check` green,
+no unexpected skips.
 
 ## Step 4 — Documents: normalise, hash, chunk
 

@@ -20,6 +20,7 @@ from tests.integration.test_timescale import (
     BASE,
     HOUR,
     HYPERTABLES,
+    KNOWLEDGE_TABLES,
     PLAIN_TABLES,
     hour_record,
     hypertable_names,
@@ -28,7 +29,7 @@ from tests.integration.test_timescale import (
 
 pytestmark = pytest.mark.integration
 
-ALL_TABLES = HYPERTABLES | PLAIN_TABLES
+ALL_TABLES = HYPERTABLES | PLAIN_TABLES | KNOWLEDGE_TABLES
 
 
 def tables_in(db: DatabaseManager) -> set[str]:

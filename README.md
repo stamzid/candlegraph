@@ -200,6 +200,7 @@ a failing one always is.
 | `janitor [--open-pr] [--strict] [--checks X]` | Run the CI janitor once: checks, mechanical fixes, draft PR |
 | `agents` | Run the agents on their schedule until stopped |
 | `agent-runs [--limit N] [--agent X] [--show]` | Recent reports from the agent ledger |
+| `knowledge sync-assets` | Load `asset` rows (addresses, symbols, aliases) from `config/tokens.yaml` |
 
 ## Data quality
 
@@ -390,8 +391,10 @@ Next, in order:
    strategy consumes, nothing written to the database.
 1. **Knowledge graph and signaller** — assets, pools, sources and documents in
    Postgres with pgvector, Tavily for web search, and news attached to prices,
-   so a signal can cite *why*. Paper trading only. The design is written:
-   see `docs/knowledge/` (status *proposed*).
+   so a signal can cite *why*. Paper trading only. In progress: the schema
+   (pgvector installed, eight knowledge tables) and the asset sync
+   (`candlegraph knowledge sync-assets`) are in; retrieval and explanation
+   are next. See `docs/knowledge/` and `docs/rollout/ROLLOUT.md`.
 2. **Harness** — YAML pipeline specs, an event bus, OpenTelemetry, and the
    continuous aggregates deferred from the TimescaleDB migration.
 3. **Traditional markets** — NASDAQ and NYSE equities alongside crypto, which

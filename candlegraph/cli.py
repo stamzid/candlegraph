@@ -128,6 +128,13 @@ def _parser() -> argparse.ArgumentParser:
     agent_runs.add_argument("--agent", default=None, help="only this agent")
     agent_runs.add_argument("--show", action="store_true", help="print the newest matching report in full")
 
+    # --- knowledge ---
+    knowledge = sub.add_parser("knowledge", help="operate the knowledge layer (stage 1)")
+    knowledge_sub = knowledge.add_subparsers(dest="knowledge_command", required=True)
+    knowledge_sub.add_parser(
+        "sync-assets", help="upsert asset rows (addresses, symbols, aliases) from config/tokens.yaml"
+    )
+
     return parser
 
 
@@ -605,6 +612,20 @@ def _agent_runs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _knowledge(args: argparse.Namespace) -> int:
+    from candlegraph.knowledge.assets import sync_assets
+    from candlegraph.storage import get_db
+    from candlegraph.tokens import get_token_registry
+
+    match args.knowledge_command:
+        case "sync-assets":
+            written = sync_assets(get_db(), get_token_registry())
+            print(f"synced {written} assets from the token registry")
+            return 0
+        case _:  # pragma: no cover - argparse rejects anything else
+            raise SystemExit(f"unknown knowledge command {args.knowledge_command!r}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse arguments and dispatch. Returns the process exit code."""
     args = _parser().parse_args(argv)
@@ -648,5 +669,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _agents(settings)
         case "agent-runs":
             return _agent_runs(args)
+        case "knowledge":
+            return _knowledge(args)
         case _:  # pragma: no cover - argparse rejects anything else
             raise SystemExit(f"unknown command {args.command!r}")

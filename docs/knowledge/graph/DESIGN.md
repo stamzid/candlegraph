@@ -1,7 +1,10 @@
 # Knowledge graph: schema, retrieval, and how it attaches to what exists
 
-**Status:** proposed — 2026-10-29. No code yet; this is the design the
-roadmap's stage 1 will be built from.
+**Status:** in progress — 2026-10-30. The schema (all eight tables, pgvector
+installed, revision `f399ca0770a0`) and the asset sync
+(`candlegraph knowledge sync-assets`, aliases in `config/tokens.yaml`) are
+implemented — rollout steps 2 and 3. Documents, embeddings, Tavily,
+retrieval, and `--explain` are still design only.
 **Area (when built):** `candlegraph/knowledge/`, `alembic/versions/`,
 `candlegraph/cli.py` (`signals --explain`, `knowledge *`),
 `candlegraph/agents/observer/` (one new collect node)

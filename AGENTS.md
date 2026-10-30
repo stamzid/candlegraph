@@ -32,6 +32,7 @@ a target, and never let CI run something that is not one either.
 | Backfill 90 days | `make backfill days=90` |
 | Data-quality report | `make report` |
 | Recent ingest runs | `make runs` |
+| Sync assets and aliases from `tokens.yaml` | `make sync-assets` (in the stack) or `candlegraph knowledge sync-assets` |
 | Rolling mean / volatility | `candlegraph stats WETH --window 24` |
 | Pairwise comparison | `candlegraph compare WETH WBTC` |
 | Signals | `candlegraph signals WETH --strategy bollinger [--store]` |
@@ -89,6 +90,9 @@ candlegraph/
   ui/
     viewmodels.py      Everything the UI computes. Plain Python, fully tested.
     app.py             The Streamlit script: widgets and charts only.
+  knowledge/           Stage 1, growing with docs/rollout/ROLLOUT.md. So far: schema + assets.
+    statements.py      Every SQL statement for the knowledge tables, built per schema.
+    assets.py          tokens.yaml aliases -> asset rows. Pure transform + one upsert.
   agents/              LangGraph graphs. Readers and reporters; never writers of market data.
     base.py            Severity, Finding, AgentReport: the vocabulary every graph speaks.
     shell.py           Subprocess runner behind a Protocol, plus secret redaction.
@@ -101,7 +105,7 @@ candlegraph/
   utils/
     logging_utils.py   Logger setup.
 alembic/versions/    Migrations. The schema name comes from settings.
-config/tokens.yaml   The tokens this deployment tracks.
+config/tokens.yaml   The tokens this deployment tracks, with their knowledge-layer aliases.
 docs/<area>/<topic>/DESIGN.md   Design documents. Why, not how; `docs/README.md` indexes them.
   roadmap/           Delivered stages, next stages, and each exit criterion.
   storage/           TimescaleDB adoption, which tables are hypertables, and how pgvector coexists.
@@ -126,11 +130,20 @@ schema.graphql       Generated. `make sdl`; a test fails if it is stale.
 | `ingest_run` | one row per ingest run | `run_id` | plain |
 | `signal` | one row per strategy, symbol and bar | `(strategy, symbol, period_start_unix)` | **hypertable** |
 | `agent_run` | one row per agent graph run | `run_id` | plain |
+| `asset` | one row per knowledge entity (token addresses today) | `id` | plain |
+| `source` | one row per document source (`tavily`, `rss:<feed>`, `manual`) | `id` | plain |
+| `document` | one row per retrieved document | `url_hash` (unique) | plain |
+| `chunk` | one embedded piece of a document | `(document_id, ordinal)` | plain — the ANN index must be global |
+| `mention` | a chunk naming an asset | `(chunk_id, asset_id, method)` | plain |
+| `edge` | a derived, time-bounded relation between assets | `(from_id, to_id, relation, valid_from)` | plain |
+| `explanation` | one explained signal | `(strategy, symbol, period_start_unix)` | plain for now |
+| `source_call` | one metered-source call, refusals included | `id` | plain |
 
 The database is **TimescaleDB** (`timescale/timescaledb-ha:pg17.11-ts2.31.0`, pinned
 in compose, in CI, and in the testcontainer), not plain PostgreSQL. The `-ha`
-image also ships pgvector and pgvectorscale, available but not yet installed;
-stage 1 installs them. The three
+image also ships pgvector (installed by the knowledge migration, which the
+stage-1 tables use for `chunk.embedding halfvec(1024)`) and pgvectorscale
+(available, not installed). The three
 series tables are chunked monthly on `period_start_unix`; the state and
 ledger tables are deliberately ordinary tables. See invariant 24 and
 `docs/storage/table-placement/DESIGN.md`.

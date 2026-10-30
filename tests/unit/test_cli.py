@@ -224,3 +224,24 @@ def test_runs_tolerates_an_unfinished_run(
 
     assert main(["runs"]) == 0
     assert "running" in capsys.readouterr().out
+
+
+# --- knowledge ---------------------------------------------------------------
+
+
+def test_knowledge_sync_assets_upserts_the_registry(
+    cli_env: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["knowledge", "sync-assets"]) == 0
+
+    assert [label for label, _ in cli_env.upserts] == ["upsert_asset"]
+    _, rows = cli_env.upserts[0]
+    assert [row["symbol"] for row in rows] == ["WBTC", "SHIB"]
+    assert "synced 2 assets" in capsys.readouterr().out
+
+
+def test_knowledge_without_a_subcommand_is_an_error(cli_env: FakeDatabase) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["knowledge"])
+
+    assert exc.value.code != 0

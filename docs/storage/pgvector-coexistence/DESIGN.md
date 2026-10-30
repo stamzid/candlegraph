@@ -1,8 +1,9 @@
 # One database, two extensions: how pgvector sits beside TimescaleDB
 
-**Status:** proposed — 2026-10-29; the image switch (rollout step 1) is
-**done**, so the instance below exists and pgvector is available but not yet
-installed. The corpus tables land in step 2. The build sequence is
+**Status:** in progress — 2026-10-30; the image switch (rollout step 1) and
+the corpus tables (step 2, revision `f399ca0770a0`, `CREATE EXTENSION
+vector`) are **done**. Retrieval-path specifics below describe steps still
+to land. The build sequence is
 [`../../rollout/ROLLOUT.md`](../../rollout/ROLLOUT.md).
 **Companions:** [`../timescaledb/DESIGN.md`](../timescaledb/DESIGN.md) (why
 the extension at all), [`../table-placement/DESIGN.md`](../table-placement/DESIGN.md)

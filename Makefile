@@ -11,7 +11,7 @@ E2E_URL ?= http://localhost:$${APP_HOST_PORT:-8000}
 
 .PHONY: help install lock fmt fmt-check lint typecheck test test-unit test-integration \
         cov check up down reset logs logs-worker ps migrate revision e2e sdl clean \
-        ingest backfill report runs ui logs-ui observe janitor agent-runs logs-agents
+        ingest backfill report runs ui logs-ui observe janitor agent-runs logs-agents sync-assets
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -100,6 +100,9 @@ backfill: ## Backfill a longer window in the stack: make backfill days=90
 
 report: ## Print the data-quality report from the stack
 	$(COMPOSE) exec worker python -m candlegraph report
+
+sync-assets: ## Load asset rows (addresses, symbols, aliases) from config/tokens.yaml into the stack
+	$(COMPOSE) exec worker python -m candlegraph knowledge sync-assets
 
 runs: ## Show recent ingest runs from the ledger
 	$(COMPOSE) exec worker python -m candlegraph runs

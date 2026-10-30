@@ -32,6 +32,8 @@ def test_repo_tokens_file_loads_the_shipped_universe() -> None:
     assert set(registry.symbols) >= {"WETH", "WBTC", "USDC", "SHIB", "GNO"}
     assert all(token.address.startswith("0x") for token in registry)
     assert all(token.name for token in registry)
+    # Every shipped token carries an alias list for the knowledge layer.
+    assert all(token.aliases for token in registry)
 
 
 def test_loads_addresses_symbols_and_names(registry: TokenRegistry) -> None:
@@ -100,6 +102,46 @@ def test_duplicate_symbol_is_rejected(tmp_path: Path) -> None:
     body = f'tokens:\n  - address: "{WBTC}"\n    symbol: DUP\n  - address: "{SHIB}"\n    symbol: dup\n'
 
     with pytest.raises(TokenConfigError, match="duplicate symbol"):
+        load_tokens(write(tmp_path, body))
+
+
+def test_aliases_are_loaded_and_stripped(tmp_path: Path) -> None:
+    body = f'tokens:\n  - address: "{WBTC}"\n    symbol: WBTC\n    aliases: ["  Bitcoin ", "BTC"]\n'
+
+    registry = load_tokens(write(tmp_path, body))
+
+    assert registry.tokens[0].aliases == ("Bitcoin", "BTC")
+
+
+def test_a_token_without_aliases_loads_with_an_empty_tuple(tmp_path: Path) -> None:
+    body = f'tokens:\n  - address: "{WBTC}"\n    symbol: WBTC\n'
+
+    assert load_tokens(write(tmp_path, body)).tokens[0].aliases == ()
+
+
+@pytest.mark.parametrize(
+    ("aliases", "message"),
+    [
+        ("aliases: not-a-list", "aliases must be a list"),
+        ('aliases: ["ok", 7]', r"aliases\[1\] must be a non-empty string"),
+        ('aliases: [" "]', r"aliases\[0\] must be a non-empty string"),
+    ],
+)
+def test_malformed_aliases_are_rejected(tmp_path: Path, aliases: str, message: str) -> None:
+    body = f'tokens:\n  - address: "{WBTC}"\n    symbol: WBTC\n    {aliases}\n'
+
+    with pytest.raises(TokenConfigError, match=message):
+        load_tokens(write(tmp_path, body))
+
+
+def test_an_alias_shared_by_two_tokens_is_rejected(tmp_path: Path) -> None:
+    """A shared alias would make a document's mention ambiguous; case-insensitive."""
+    body = (
+        f'tokens:\n  - address: "{WBTC}"\n    symbol: WBTC\n    aliases: [Bitcoin]\n'
+        f'  - address: "{SHIB}"\n    symbol: SHIB\n    aliases: [bitcoin]\n'
+    )
+
+    with pytest.raises(TokenConfigError, match="duplicate alias"):
         load_tokens(write(tmp_path, body))
 
 

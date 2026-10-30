@@ -1,6 +1,7 @@
 # Table placement: which tables are hypertables, and which stay plain
 
-**Status:** implemented — 2026-10-25; knowledge tables proposed 2026-10-29
+**Status:** implemented — 2026-10-25; knowledge tables implemented as
+recorded 2026-10-30 (revision `f399ca0770a0`, all plain)
 **Area:** `alembic/versions/`, `candlegraph/storage/statements.py`
 **Companion:** [`../timescaledb/DESIGN.md`](../timescaledb/DESIGN.md) — why we
 adopted the extension at all, and how the migration works.
@@ -162,9 +163,11 @@ the natural key to primary was the tidier alternative, and was rejected: it
 would touch the write path, `missing_hours`, and a dozen tests to remove a
 column that costs eight bytes and breaks nothing.
 
-## Proposed: the knowledge tables (stage 1)
+## The knowledge tables (stage 1) — implemented 2026-10-30 as recorded
 
-Recorded here before any migration is written, as the rule below requires.
+Recorded here before the migration was written, as the rule below requires;
+revision `f399ca0770a0` created them exactly as this table says, and
+`test_the_ledger_and_state_tables_are_not_hypertables` now covers them.
 The reasoning is in `docs/knowledge/graph/DESIGN.md`; this is the verdict
 per table against the four questions.
 
