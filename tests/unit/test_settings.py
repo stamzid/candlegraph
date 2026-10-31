@@ -147,3 +147,22 @@ def test_get_settings_is_cached_until_reset(monkeypatch: pytest.MonkeyPatch) -> 
 
     reset_settings_cache()
     assert get_settings().lookback_days == 12
+
+
+def test_risk_defaults_are_the_documented_ones() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.risk_free_rate_source == "constant"
+    assert settings.inflation_rate == 0.0
+    assert settings.risk_confidence == 0.95
+    assert settings.risk_horizon_bars == 24
+    assert settings.risk_var_method == "historical"
+    assert settings.risk_benchmark == "WETH"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), [("risk_confidence", 0.5), ("risk_confidence", 1.0), ("risk_horizon_bars", 0)]
+)
+def test_out_of_range_risk_values_are_rejected(field: str, value: float) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(**{field: value})

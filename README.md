@@ -1,24 +1,30 @@
 # candlegraph
 
-A digital asset market data service. candlegraph ingests hourly Uniswap v3 token prices and
-metadata from The Graph, stores them in PostgreSQL, and serves OHLC candles through a GraphQL API
-for charts and analytics.
+candlegraph turns raw on-chain trading activity into something you can reason about: it ingests
+hourly Uniswap v3 prices from The Graph into TimescaleDB, serves them as OHLC candles over GraphQL,
+and layers deterministic analytics — rolling statistics, mean-variance portfolios, trading signals,
+costed backtests and tail-risk measures — on top of that stored history. LangGraph agents watch the
+pipeline and report on it, and a knowledge layer (in progress) will let a signal cite the news that
+was true when it fired.
 
-It stores hourly OHLC, USD price, volume, TVL and fees per token, plus pool-level data
-(per-pair volume, fees, liquidity and transaction counts) for the deepest Uniswap v3 pools
-holding each token. Every ingest run is recorded, and a built-in data-quality report measures
-coverage and finds gaps.
+In more detail: a separate ingest worker discovers the deepest pools for each tracked token and
+stores hourly OHLC, USD price, volume, TVL and fees per token, plus pool-level volume, fees,
+liquidity and transaction counts, recording every run in a ledger and measuring coverage with a
+built-in data-quality report. The analytics layer reads that history and never the network:
+rolling mean and volatility, Bollinger mean reversion, moving-average crossover and walk-forward
+ARIMA signals, Markowitz portfolios (tangency, minimum variance, risk parity) with an efficient
+frontier, pairwise correlation and beta over aligned bars, a vectorised backtester that lags
+execution by one bar and charges fees on every trade, and a risk report with Value at Risk,
+expected shortfall and a systematic-versus-idiosyncratic split against a benchmark. The maths
+behind each of those is written up, with equations, in
+[`docs/analytics/models/`](docs/analytics/models/DESIGN.md) and
+[`docs/analytics/risk/`](docs/analytics/risk/DESIGN.md). A **run observer** agent reads the
+ledger on a schedule and reports stale data, gaps that matter and metric drift; a **CI janitor**
+runs the repository's checks, applies the mechanical fixes and drafts a pull request. Both post
+reports; neither writes market data. Everything is reachable from one CLI, a Streamlit UI, and the
+GraphQL API, and the whole stack runs locally under Docker with no paid service required.
 
-On top of that sits a deterministic analytics layer: rolling mean and volatility, mean-variance
-portfolio optimisation, Bollinger mean reversion, walk-forward ARIMA signals, and a vectorised
-backtester — all usable from the CLI or a Streamlit UI.
-
-Watching over it is an agent layer built on LangGraph: a **run observer** that reads the ingest
-ledger on a schedule and reports stale data, gaps that matter, and metric drift, and a **CI
-janitor** that runs the repository's checks, applies the mechanical fixes, and drafts a pull
-request. Both post reports; neither writes market data.
-
-**Stack:** Python 3.12, FastAPI, Strawberry GraphQL, PostgreSQL 17 + TimescaleDB,
+**Stack:** Python 3.12, FastAPI, Strawberry GraphQL, PostgreSQL 17 + TimescaleDB + pgvector,
 SQLAlchemy/Alembic, APScheduler, LangGraph, uv, Docker.
 
 ## How it works
@@ -124,6 +130,9 @@ see [`.env.example`](.env.example) for the full list.
 | `ANALYTICS_LOOKBACK_DAYS` | 90 | Default window for the analytics commands. |
 | `ROLLING_WINDOW` | 24 | Default rolling lookback, in bars. |
 | `BACKTEST_FEE_BPS` / `BACKTEST_SLIPPAGE_BPS` | 30 / 5 | Per-side cost assumptions. |
+| `RISK_CONFIDENCE` / `RISK_HORIZON_BARS` / `RISK_VAR_METHOD` | 0.95 / 24 / `historical` | Value-at-Risk confidence, horizon in bars, and estimator (`historical`, `parametric`, `cornish_fisher`). |
+| `RISK_BENCHMARK` | `WETH` | Market proxy for the systematic/idiosyncratic split; empty disables it. |
+| `RISK_FREE_RATE_SOURCE` / `INFLATION_RATE` | `constant` / 0.0 | Where the risk-free rate comes from (a Tavily source is planned), and the inflation rate for the real rate printed beside it. |
 | `UI_HOST`, `UI_PORT` | `0.0.0.0`, 8501 | Streamlit UI. |
 | `DATA_POLL_INTERVAL` | 300 | Seconds between ingest runs. |
 | `AGENT_REPORT_SINKS` | `log,ledger` | Where agent reports go: any of `log`, `ledger`, `file`, `webhook`, `github`. |
@@ -195,6 +204,7 @@ a failing one always is.
 | `backtest SYMBOL [--strategy X\|all]` | Backtest, net of fees and slippage |
 | `portfolio [--objective X] [--risk-free-rate R]` | Mean-variance allocation |
 | `forecast SYMBOL [--auto-order]` | ARIMA point forecast and interval |
+| `risk SYMBOL [--benchmark X] [--confidence C] [--horizon N] [--method M]` | VaR, CVaR, drawdown, and the systematic/idiosyncratic split |
 | `ui` | Run the Streamlit UI |
 | `observe [--strict] [--json] [--sinks X]` | Run the run-observer agent once and post its report |
 | `janitor [--open-pr] [--strict] [--checks X]` | Run the CI janitor once: checks, mechanical fixes, draft PR |
@@ -271,7 +281,14 @@ candlegraph forecast WETH --auto-order        # ARIMA, order picked by AIC
 candlegraph signals WETH --strategy bollinger --store
 candlegraph backtest WETH --strategy all      # compare every strategy
 candlegraph portfolio --risk-free-rate 0.04 --objective max_sharpe --max-weight 0.4
+candlegraph risk WETH --benchmark WBTC --confidence 0.99   # VaR, CVaR, systematic vs idiosyncratic
 ```
+
+The theory behind every number here — returns and annualisation, rolling statistics, Bollinger,
+ARIMA, correlation and beta, Sharpe and drawdown, Markowitz portfolios and the backtester — is
+written out with equations in [`docs/analytics/models/DESIGN.md`](docs/analytics/models/DESIGN.md);
+the risk measures and how to tune them are in
+[`docs/analytics/risk/DESIGN.md`](docs/analytics/risk/DESIGN.md).
 
 **Strategies.** `bollinger` (mean reversion, with separate entry and exit thresholds so a price
 hovering at one level does not thrash), `crossover` (moving-average trend following), and
@@ -288,6 +305,15 @@ over hours both tokens actually traded**. Nothing is forward-filled or
 interpolated first: correlating a real price against a filled one measures
 the fill policy, not the market, so a missing hour on either side simply
 drops out and the report says how many bars survived.
+
+**Risk** (`candlegraph risk WETH`) reports annualised and downside volatility, maximum
+drawdown, Value at Risk and expected shortfall (historical, parametric, or Cornish–Fisher, at a
+configurable confidence and horizon), Sharpe, Sortino and Calmar, skew and kurtosis, and — against
+a benchmark, WETH by default — beta, alpha, R² and the split of the token's variance into the
+systematic part diversification cannot remove and the idiosyncratic part it can. The portfolio
+report prints the VaR and CVaR of the solved allocation. The risk-free rate comes through one
+seam (`RISK_FREE_RATE_SOURCE`), constant today and ready for a Tavily-backed source that pulls
+live bill yields and inflation; the real rate is printed beside the nominal one.
 
 **Backtests are costed and lagged.** A position decided on bar *t* earns bar *t+1*'s return, and
 fees plus slippage are charged on every position change. Both matter: on hourly data a naive

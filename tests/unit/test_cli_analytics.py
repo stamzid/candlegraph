@@ -389,3 +389,116 @@ def test_a_forecast_with_too_little_history_exits_non_zero(
 
 def test_the_default_arima_config_is_the_documented_one() -> None:
     assert ArimaConfig().order == (1, 1, 1)
+
+
+# --- risk --------------------------------------------------------------------
+
+
+def test_risk_prints_tail_risk_and_the_benchmark_split(
+    cli: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["risk", "SHIB", "--benchmark", "WBTC"]) == 0
+
+    out = capsys.readouterr().out
+    assert "VaR 95% 1d" in out
+    assert "CVaR 95% 1d" in out
+    assert "versus WBTC" in out
+    assert "systematic share" in out
+    assert "risk-free rate:" in out
+
+
+def test_risk_without_a_benchmark_omits_the_split(
+    cli: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["risk", "SHIB", "--no-benchmark"]) == 0
+
+    out = capsys.readouterr().out
+    assert "VaR" in out
+    assert "versus" not in out
+
+
+def test_risk_against_itself_skips_the_split_and_says_so(
+    cli: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The default benchmark (WETH) is not in this fixture's registry; the report still prints."""
+    assert main(["risk", "WBTC"]) == 0
+
+    out = capsys.readouterr().out
+    assert "versus" not in out
+    assert "no benchmark split" in out
+
+
+def test_risk_flags_reach_the_report(cli: FakeDatabase, capsys: pytest.CaptureFixture[str]) -> None:
+    assert (
+        main(
+            [
+                "risk",
+                "SHIB",
+                "--no-benchmark",
+                "--method",
+                "parametric",
+                "--confidence",
+                "0.99",
+                "--horizon",
+                "1",
+            ]
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "parametric" in out
+    assert "VaR 99% 1h" in out
+
+
+def test_risk_reports_the_real_rate_from_the_configured_inflation(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    monkeypatch.setattr(
+        "candlegraph.cli.get_settings",
+        lambda: make_settings(
+            tokens_file=str(tokens_file), analytics_lookback_days=30, risk_free_rate=0.04, inflation_rate=0.05
+        ),
+    )
+    set_db(FakeDatabase(get_price_history=price_rows("WBTC", 400)))
+
+    assert main(["risk", "WBTC", "--no-benchmark"]) == 0
+
+    out = capsys.readouterr().out
+    assert "4.00% nominal" in out
+    assert "-0.95% real" in out
+
+
+def test_risk_on_an_unknown_token_exits_with_the_tracked_list(cli: FakeDatabase) -> None:
+    with pytest.raises(SystemExit, match="tracked: WBTC, SHIB"):
+        main(["risk", "DOGE"])
+
+
+def test_risk_without_history_exits(empty_cli: FakeDatabase) -> None:
+    with pytest.raises(SystemExit, match="no stored price history"):
+        main(["risk", "WBTC", "--no-benchmark"])
+
+
+def test_an_unknown_rate_source_exits_with_a_message(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    monkeypatch.setattr(
+        "candlegraph.cli.get_settings",
+        lambda: make_settings(tokens_file=str(tokens_file), risk_free_rate_source="tavily"),
+    )
+    set_db(FakeDatabase(get_price_history=price_rows("WBTC", 400)))
+
+    with pytest.raises(SystemExit, match="RISK_FREE_RATE_SOURCE"):
+        main(["risk", "WBTC", "--no-benchmark"])
+
+
+def test_portfolio_reports_the_allocations_tail_risk(
+    cli: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["portfolio", "--objective", "equal_weight"]) == 0
+
+    out = capsys.readouterr().out
+    assert "VaR 95% 1d" in out
+    assert "CVaR 95% 1d" in out

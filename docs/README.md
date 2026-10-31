@@ -35,6 +35,8 @@ same step or it follows it.
 | [`knowledge/embeddings/`](knowledge/embeddings/DESIGN.md) | proposed | Embedding models compared (OpenAI, Voyage, Cohere, Gemini, bge-m3, Qwen3, nomic, …); 1024 dimensions fixed; a local free default; reuse in the harness. |
 | [`knowledge/tavily/`](knowledge/tavily/DESIGN.md) | proposed | Web search as a metered source: credit budget guard, `(asset, day)` cache, the `source_call` ledger, REST rather than MCP. |
 | [`knowledge/mcp/`](knowledge/mcp/DESIGN.md) | proposed | A read-only MCP server over existing functions, useful now for operating the stack; agents as MCP clients later; not for Tavily. |
+| [`analytics/models/`](analytics/models/DESIGN.md) | implemented | The statistics and models, with equations: returns and annualisation, rolling statistics, Bollinger, crossover, ARIMA, pairwise correlation and beta, Sharpe/Sortino/drawdown, Markowitz portfolios and the frontier, the backtester. |
+| [`analytics/risk/`](analytics/risk/DESIGN.md) | implemented; Tavily rate source planned | Risk management: systematic versus idiosyncratic risk, VaR and CVaR (three estimators), how to tune them, and the nominal/real risk-free rate seam. |
 | [`agents/framework/`](agents/framework/DESIGN.md) | implemented | The conventions every LangGraph agent follows: state, nodes, findings, narration, sinks, scheduling, testing. |
 | [`agents/observer/`](agents/observer/DESIGN.md) | implemented | The run observer: stale data, gaps that matter, metric drift. |
 | [`agents/janitor/`](agents/janitor/DESIGN.md) | implemented | The CI janitor: run the checks, apply mechanical fixes, draft a PR. |

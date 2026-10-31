@@ -3,7 +3,7 @@
 One binary, several roles. The API server, the ingest worker, the UI and the
 agent scheduler are separate processes in the compose stack; the one-shot
 commands (``backfill``, ``report``, ``signals``, ``backtest``, ``portfolio``,
-``observe``, ``janitor``) are what CI and an operator use without starting
+``risk``, ``observe``, ``janitor``) are what CI and an operator use without starting
 any of them.
 
 Every analytics command is deterministic: the same stored data and the same
@@ -92,6 +92,27 @@ def _parser() -> argparse.ArgumentParser:
     portfolio.add_argument("--max-weight", type=float, default=1.0)
     portfolio.add_argument("--shrinkage", type=float, default=0.0, help="covariance shrinkage, 0-1")
     portfolio.add_argument("--frontier", type=int, default=0, help="also print N frontier points")
+
+    risk = sub.add_parser("risk", help="tail risk and systematic/idiosyncratic split for a token")
+    risk.add_argument("symbol")
+    _add_window(risk)
+    risk.add_argument("--benchmark", default=None, help="token to regress against (default: RISK_BENCHMARK)")
+    risk.add_argument("--no-benchmark", action="store_true", help="skip the systematic/idiosyncratic split")
+    risk.add_argument(
+        "--confidence", type=float, default=None, help="VaR confidence, e.g. 0.95 (default: RISK_CONFIDENCE)"
+    )
+    risk.add_argument(
+        "--horizon", type=int, default=None, help="VaR horizon in bars (default: RISK_HORIZON_BARS)"
+    )
+    risk.add_argument(
+        "--method",
+        default=None,
+        choices=["historical", "parametric", "cornish_fisher"],
+        help="VaR estimator (default: RISK_VAR_METHOD)",
+    )
+    risk.add_argument(
+        "--risk-free-rate", type=float, default=None, help="annual, for the Sharpe and Sortino ratios"
+    )
 
     forecast = sub.add_parser("forecast", help="ARIMA forecast for a token")
     forecast.add_argument("symbol")
@@ -496,6 +517,7 @@ def _portfolio(settings: Settings, args: argparse.Namespace) -> int:
 
     print(f"{len(returns)} aligned bars over {window} days")
     print(format_portfolio(result))
+    print(_portfolio_tail_risk(settings, returns, result.weights))
 
     if args.frontier:
         print()
@@ -503,6 +525,104 @@ def _portfolio(settings: Settings, args: argparse.Namespace) -> int:
         for point in efficient_frontier(returns, config, points=args.frontier):
             print(f"{point.expected_return:>9.2%}{point.volatility:>11.2%}{point.sharpe:>10.3f}")
     return 0 if result.converged else 1
+
+
+def _risk_config(settings: Settings, args: argparse.Namespace) -> Any:
+    """The risk knobs: flags when given, settings otherwise."""
+    from candlegraph.analytics.risk import RiskConfig, RiskError
+
+    given = {k: v for k, v in vars(args).items() if v is not None}
+    try:
+        return RiskConfig(
+            confidence=given.get("confidence", settings.risk_confidence),
+            horizon_bars=given.get("horizon", settings.risk_horizon_bars),
+            method=given.get("method", settings.risk_var_method),
+            interval_hours=settings.analytics_interval_hours,
+            risk_free_rate=given.get("risk_free_rate", settings.risk_free_rate),
+        )
+    except RiskError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _portfolio_tail_risk(settings: Settings, returns: Any, weights: dict[str, float]) -> str:
+    """VaR and CVaR of the solved allocation, in the same units as its volatility."""
+    from candlegraph.analytics.risk import (
+        RiskConfig,
+        RiskError,
+        conditional_value_at_risk,
+        portfolio_returns,
+        value_at_risk,
+    )
+
+    held = {k: v for k, v in weights.items() if v != 0.0}
+    try:
+        config = RiskConfig(
+            confidence=settings.risk_confidence,
+            horizon_bars=settings.risk_horizon_bars,
+            method=settings.risk_var_method,  # type: ignore[arg-type]
+            interval_hours=settings.analytics_interval_hours,
+            risk_free_rate=settings.risk_free_rate,
+        )
+        series = portfolio_returns(returns, held)
+        var = value_at_risk(series, config)
+        cvar = conditional_value_at_risk(series, config)
+    except RiskError as exc:
+        return f"tail risk: not estimated ({exc})"
+    hours = config.horizon_bars * config.interval_hours
+    label = f"{hours}h" if hours % 24 else f"{hours // 24}d"
+    return (
+        f"{f'VaR {config.confidence:.0%} {label}':<10}{var:>9.2%}  ({config.method})\n"
+        f"{f'CVaR {config.confidence:.0%} {label}':<10}{cvar:>9.2%}"
+    )
+
+
+def _risk(settings: Settings, args: argparse.Namespace) -> int:
+    from candlegraph.analytics.prices import load_price_frame
+    from candlegraph.analytics.rates import RateSourceError, rate_provider_for
+    from candlegraph.analytics.risk import RiskError, format_risk_report, risk_report
+    from candlegraph.storage import get_db
+    from candlegraph.tokens import get_token_registry
+
+    registry = get_token_registry()
+    if registry.by_symbol(args.symbol) is None:
+        raise SystemExit(f"unknown token {args.symbol!r}; tracked: {', '.join(registry.symbols)}")
+
+    benchmark = None if args.no_benchmark else (args.benchmark or settings.risk_benchmark or None)
+    if benchmark is not None and (benchmark == args.symbol or registry.by_symbol(benchmark) is None):
+        # A token against itself is a tautology, and an untracked benchmark
+        # has no history to regress on; the report simply omits the split.
+        benchmark = None
+
+    try:
+        quote = rate_provider_for(settings).quote()
+    except RateSourceError as exc:
+        raise SystemExit(str(exc)) from exc
+    config = _risk_config(settings, args)
+
+    window = args.days if args.days is not None else settings.analytics_lookback_days
+    symbols = [args.symbol] + ([benchmark] if benchmark else [])
+    # fill="none": the decomposition aligns on hours both tokens traded.
+    frame = load_price_frame(get_db(), symbols, days=window, fill="none")
+    if frame.empty or args.symbol not in frame.columns or frame[args.symbol].dropna().empty:
+        raise SystemExit(f"no stored price history for {args.symbol} in the last {window} days")
+    prices = frame[args.symbol].dropna().rename(args.symbol)
+    benchmark_prices = None
+    if benchmark and benchmark in frame.columns and not frame[benchmark].dropna().empty:
+        benchmark_prices = frame[benchmark].dropna().rename(benchmark)
+
+    try:
+        report = risk_report(prices, config, benchmark_prices)
+    except RiskError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    print(format_risk_report(report))
+    print(
+        f"risk-free rate: {quote.nominal:.2%} nominal, {quote.real:.2%} real "
+        f"(inflation {quote.inflation:.2%}, source: {quote.source})"
+    )
+    if benchmark_prices is None and not args.no_benchmark:
+        print("no benchmark split: set RISK_BENCHMARK or --benchmark to a different tracked token")
+    return 0
 
 
 def _forecast(settings: Settings, args: argparse.Namespace) -> int:
@@ -661,6 +781,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _portfolio(settings, args)
         case "forecast":
             return _forecast(settings, args)
+        case "risk":
+            return _risk(settings, args)
         case "observe":
             return _observe(settings, args)
         case "janitor":

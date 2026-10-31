@@ -39,6 +39,7 @@ a target, and never let CI run something that is not one either.
 | Backtest | `candlegraph backtest WETH --strategy all` |
 | Portfolio | `candlegraph portfolio --risk-free-rate 0.04 --objective max_sharpe` |
 | ARIMA forecast | `candlegraph forecast WETH --auto-order` |
+| Risk report | `candlegraph risk WETH --benchmark WBTC --confidence 0.99` |
 | Streamlit UI | `make ui` (local) or the `ui` compose service |
 | Run observer, once | `make observe` (in the stack) or `candlegraph observe [--strict]` |
 | CI janitor, once | `make janitor ARGS="--open-pr --strict"` |
@@ -75,6 +76,8 @@ candlegraph/
     pairwise.py        Two-token comparison: correlation, beta, relative return. Aligned bars only.
     portfolio.py       Mean-variance optimisation and the efficient frontier.
     arima.py           ARIMA fitting, order selection, forecasting.
+    risk.py            VaR, CVaR, systematic/idiosyncratic split, the risk report. Pure.
+    rates.py           RateProvider seam: nominal and real risk-free rate; constant today, Tavily planned.
     prices.py          Stored rows -> aligned pandas frames.
   strategies/
     base.py            Signal, StrategyResult, and the registry.
@@ -109,6 +112,7 @@ config/tokens.yaml   The tokens this deployment tracks, with their knowledge-lay
 docs/<area>/<topic>/DESIGN.md   Design documents. Why, not how; `docs/README.md` indexes them.
   roadmap/           Delivered stages, next stages, and each exit criterion.
   storage/           TimescaleDB adoption, which tables are hypertables, and how pgvector coexists.
+  analytics/         The statistics and models with their equations; risk management and the rate seam.
   rollout/ROLLOUT.md The one current rollout plan: ordered steps and a progress table.
   agents/            The agent framework, the observer, and the janitor.
   knowledge/         Stage 1, proposed: schema, vector store, embeddings, Tavily, MCP.

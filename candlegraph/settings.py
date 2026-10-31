@@ -87,6 +87,24 @@ class Settings(BaseSettings):
     backtest_fee_bps: float = Field(default=30.0, ge=0.0)
     backtest_slippage_bps: float = Field(default=5.0, ge=0.0)
 
+    # --- Risk --------------------------------------------------------------
+    # Where the risk-free rate comes from. `constant` is RISK_FREE_RATE above;
+    # a Tavily-backed source (current bill yield and CPI) is planned for the
+    # knowledge layer and plugs in here. See docs/analytics/risk/DESIGN.md.
+    risk_free_rate_source: str = "constant"
+    # Annual inflation rate, for the *real* risk-free rate reported beside the
+    # nominal one. Sharpe ratios keep using the nominal rate by convention.
+    inflation_rate: float = Field(default=0.0, gt=-1.0, le=1.0)
+    # Value-at-Risk confidence level and horizon (in bars) for `candlegraph
+    # risk` and the portfolio report. 0.95 over 24 hourly bars is a one-day
+    # 95% VaR.
+    risk_confidence: float = Field(default=0.95, gt=0.5, lt=1.0)
+    risk_horizon_bars: int = Field(default=24, ge=1)
+    # VaR estimator: historical | parametric | cornish_fisher.
+    risk_var_method: str = "historical"
+    # Benchmark for the systematic/idiosyncratic split; empty disables it.
+    risk_benchmark: str | None = "WETH"
+
     # --- Agents ------------------------------------------------------------
     # Where agent reports go: a comma-separated subset of
     # log, ledger, file, webhook, github.

@@ -16,6 +16,7 @@ docker compose exec -T worker python -m candlegraph forecast WETH --auto-order
 docker compose exec -T worker python -m candlegraph signals WETH --strategy bollinger --store
 docker compose exec -T worker python -m candlegraph backtest WETH --strategy all
 docker compose exec -T worker python -m candlegraph portfolio --risk-free-rate 0.04 --max-weight 0.4
+docker compose exec -T worker python -m candlegraph risk WETH --benchmark WBTC --confidence 0.99
 ```
 
 The UI covers all of it interactively at <http://localhost:8501> (`make ui` to
@@ -29,6 +30,25 @@ report says how many survived, and a correlation over a few hundred bars is
 noisier than it looks. Do not "fix" sparsity by forward-filling before
 comparing — that measures the fill, not the market, and the aligned-only rule
 is tested.
+
+## Reading a risk report
+
+`risk` prints tail risk (VaR and CVaR at the configured confidence and
+horizon), drawdown and the ratios, and — against `RISK_BENCHMARK` (WETH by
+default) — beta, R² and the systematic/idiosyncratic split. The theory is in
+`docs/analytics/risk/DESIGN.md`. Three things to check:
+
+1. **Compare estimators.** Run with `--method historical`, `parametric` and
+   `cornish_fisher`. A parametric VaR well below the other two is the tail
+   telling you it is fat; prefer the historical or Cornish–Fisher figure.
+2. **Read CVaR, not VaR,** when one number must be chosen. VaR is the
+   threshold; CVaR is the average bill once it is crossed.
+3. **Check the aligned bar count** on the benchmark split. A thin token
+   against WETH may have few common hours and a noisy beta.
+
+The rate line prints the nominal and the real risk-free rate and which
+source supplied them. `RISK_FREE_RATE_SOURCE=tavily` is refused until the
+knowledge-layer provider exists; that is deliberate, not a bug.
 
 ## Reading a backtest honestly
 
@@ -60,6 +80,9 @@ both directions. Prefer `excess` and `max drawdown` for judgement.
 | Portfolio puts everything in one token | Set `--max-weight 0.3`, or `--shrinkage 0.3` to condition a noisy covariance |
 | Portfolio loves USDC/USDT | Correct, not a bug: stablecoins priced in USD have near-zero variance. Exclude them with `--symbols` if you want risk-asset-only weights |
 | "cannot sum to 1" | `--max-weight` is below `1/n`; raise it |
+| VaR "need at least 30 returns" | Too little history for a tail; widen `--days` |
+| Parametric VaR much smaller than historical | Fat tails; use `--method cornish_fisher` or `historical` |
+| No benchmark split printed | The benchmark is the token itself or is not tracked; pass `--benchmark` |
 
 ## What not to change
 
