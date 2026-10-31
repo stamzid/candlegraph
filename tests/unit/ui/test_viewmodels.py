@@ -17,19 +17,26 @@ import pytest
 
 from candlegraph.analytics.arima import ArimaConfig, ArimaForecast
 from candlegraph.analytics.portfolio import PortfolioConfig
+from candlegraph.analytics.risk import RiskConfig
 from candlegraph.strategies.backtest import BacktestConfig
 from candlegraph.strategies.bollinger import BollingerConfig
 from candlegraph.ui.viewmodels import (
     ViewError,
     available_symbols,
+    build_agents_view,
     build_forecast,
+    build_market_view,
+    build_pair_view,
     build_portfolio_view,
-    build_price_view,
+    build_risk_view,
     build_strategy_view,
+    build_token_view,
+    candle_frame,
     forecast_frame,
     load_prices,
+    run_observer_now,
 )
-from tests.conftest import FakeDatabase
+from tests.conftest import FakeDatabase, make_settings
 
 HOUR = 3600
 BASE = 1_700_000_000 // (24 * HOUR) * (24 * HOUR)
@@ -46,8 +53,8 @@ def price_rows(symbol: str, n: int, seed: int = 3) -> list[dict[str, Any]]:
             "period_start_unix": BASE + i * HOUR,
             "timestamp": datetime.fromtimestamp(BASE + i * HOUR, tz=UTC),
             "open": Decimal(str(p)),
-            "high": Decimal(str(p)),
-            "low": Decimal(str(p)),
+            "high": Decimal(str(p * 1.01)),
+            "low": Decimal(str(p * 0.99)),
             "close": Decimal(str(p)),
             "price_usd": Decimal(str(p)),
             "volume_usd": Decimal("1000"),
@@ -57,28 +64,22 @@ def price_rows(symbol: str, n: int, seed: int = 3) -> list[dict[str, Any]]:
     ]
 
 
+def coverage_row(symbol: str, stored: int = 400, expected: int = 400) -> dict[str, Any]:
+    return {
+        "token_id": f"0x{symbol.lower()}",
+        "symbol": symbol,
+        "stored_hours": stored,
+        "first_unix": BASE,
+        "last_unix": BASE + (expected - 1) * HOUR,
+        "expected_hours": expected,
+    }
+
+
 @pytest.fixture
 def db() -> FakeDatabase:
     return FakeDatabase(
         get_price_history=price_rows("WETH", 400) + price_rows("WBTC", 400, seed=4),
-        coverage_report=[
-            {
-                "token_id": "0xw",
-                "symbol": "WETH",
-                "stored_hours": 400,
-                "first_unix": BASE,
-                "last_unix": BASE + 399 * HOUR,
-                "expected_hours": 400,
-            },
-            {
-                "token_id": "0xb",
-                "symbol": "WBTC",
-                "stored_hours": 400,
-                "first_unix": BASE,
-                "last_unix": BASE + 399 * HOUR,
-                "expected_hours": 400,
-            },
-        ],
+        coverage_report=[coverage_row("WETH"), coverage_row("WBTC")],
     )
 
 
@@ -107,40 +108,173 @@ def test_an_empty_window_is_a_readable_error() -> None:
         load_prices(FakeDatabase(), ["WETH"], days=30)
 
 
-# --- the price view --------------------------------------------------------
+# --- the market view ---------------------------------------------------------
 
 
-def test_the_price_view_carries_prices_bands_and_summary(db: FakeDatabase) -> None:
-    view = build_price_view(db, "WETH", days=30, window=24)
+def test_the_market_view_rebases_every_token_to_100(db: FakeDatabase) -> None:
+    view = build_market_view(db, ["WETH", "WBTC"], days=30)
+
+    first = view.rebased.apply(lambda col: col.dropna().iloc[0])
+    assert first.to_numpy() == pytest.approx([100.0, 100.0])
+    assert set(view.rebased.columns) == {"WETH", "WBTC"}
+
+
+def test_the_snapshot_carries_one_row_per_token_with_the_headline_columns(db: FakeDatabase) -> None:
+    snapshot = build_market_view(db, ["WETH", "WBTC"], days=30).snapshot
+
+    assert set(snapshot.index) == {"WETH", "WBTC"}
+    assert {"last", "change_24h", "change_7d", "volatility", "max_drawdown", "volume_24h"} <= set(
+        snapshot.columns
+    )
+    assert snapshot["volume_24h"].gt(0).all()
+
+
+def test_the_snapshot_sorts_by_the_24h_move(db: FakeDatabase) -> None:
+    snapshot = build_market_view(db, ["WETH", "WBTC"], days=30).snapshot
+
+    changes = snapshot["change_24h"].dropna()
+    assert list(changes) == sorted(changes, reverse=True)
+
+
+def test_a_change_without_enough_history_is_nan_not_zero() -> None:
+    """A 30-day change over a 100-bar history is undefined, not 0% (invariant 11's shape)."""
+    db = FakeDatabase(get_price_history=price_rows("WETH", 100))
+
+    snapshot = build_market_view(db, ["WETH"], days=30).snapshot
+
+    assert np.isnan(snapshot.loc["WETH", "change_30d"])
+    assert np.isfinite(snapshot.loc["WETH", "change_24h"])
+
+
+def test_the_correlation_matrix_is_symmetric_with_a_unit_diagonal(db: FakeDatabase) -> None:
+    corr = build_market_view(db, ["WETH", "WBTC"], days=30).correlation
+
+    assert corr.loc["WETH", "WETH"] == pytest.approx(1.0)
+    assert corr.loc["WETH", "WBTC"] == pytest.approx(corr.loc["WBTC", "WETH"])
+
+
+def test_the_market_view_with_nothing_stored_is_a_readable_error() -> None:
+    with pytest.raises(ViewError, match="No stored price history"):
+        build_market_view(FakeDatabase(), ["WETH"], days=30)
+
+
+# --- the token view ---------------------------------------------------------
+
+
+def test_the_token_view_carries_candles_bands_and_summary(db: FakeDatabase) -> None:
+    view = build_token_view(db, "WETH", days=30, window=24)
 
     assert view.symbol == "WETH"
     assert view.bars == 400
+    assert {"open", "high", "low", "close", "volume_usd"} <= set(view.ohlc.columns)
     assert {"price", "rolling_mean", "rolling_volatility"} <= set(view.summary.columns)
     assert {"middle", "upper", "lower", "zscore"} <= set(view.bands.columns)
+    assert (view.drawdown <= 0).all()
 
 
-def test_the_latest_row_skips_incomplete_windows(db: FakeDatabase) -> None:
-    latest = build_price_view(db, "WETH", days=30, window=24).latest
+def test_the_latest_strip_skips_incomplete_windows_and_prices_the_tail(db: FakeDatabase) -> None:
+    latest = build_token_view(db, "WETH", days=30, window=24).latest
 
     assert np.isfinite(latest["rolling_mean"])
     assert np.isfinite(latest["rolling_volatility"])
+    assert np.isfinite(latest["change_24h"])
+    assert latest["var_1d"] > 0
+
+
+def test_too_few_bars_for_a_tail_leaves_var_nan_rather_than_guessing() -> None:
+    db = FakeDatabase(get_price_history=price_rows("WETH", 25))
+
+    view = build_token_view(db, "WETH", days=30, window=10)
+
+    assert np.isnan(view.var_1d)
 
 
 def test_a_window_longer_than_the_history_says_so(db: FakeDatabase) -> None:
     with pytest.raises(ViewError, match="fewer than the 500-bar window"):
-        build_price_view(db, "WETH", days=30, window=500)
+        build_token_view(db, "WETH", days=30, window=500)
 
 
 def test_an_unknown_token_is_a_readable_error(db: FakeDatabase) -> None:
     with pytest.raises(ViewError, match="No stored price history for DOGE"):
-        build_price_view(db, "DOGE", days=30, window=24)
+        build_token_view(db, "DOGE", days=30, window=24)
 
 
 def test_band_width_is_configurable(db: FakeDatabase) -> None:
-    narrow = build_price_view(db, "WETH", 30, 24, num_std=1.0).bands.dropna().iloc[-1]
-    wide = build_price_view(db, "WETH", 30, 24, num_std=3.0).bands.dropna().iloc[-1]
+    narrow = build_token_view(db, "WETH", 30, 24, num_std=1.0).bands.dropna().iloc[-1]
+    wide = build_token_view(db, "WETH", 30, 24, num_std=3.0).bands.dropna().iloc[-1]
 
     assert wide["upper"] > narrow["upper"]
+
+
+def test_short_histories_are_not_resampled(db: FakeDatabase) -> None:
+    ohlc = build_token_view(db, "WETH", 30, 24).ohlc
+
+    assert candle_frame(ohlc, target_bars=500).equals(ohlc)
+
+
+def test_resampled_candles_keep_the_true_extremes_and_total_volume(db: FakeDatabase) -> None:
+    """Display resampling must not invent or lose a high, a low, or volume."""
+    ohlc = build_token_view(db, "WETH", 30, 24).ohlc
+
+    candles = candle_frame(ohlc, target_bars=100)
+
+    assert len(candles) <= 101
+    assert candles["high"].max() == pytest.approx(ohlc["high"].max())
+    assert candles["low"].min() == pytest.approx(ohlc["low"].min())
+    assert candles["volume_usd"].sum() == pytest.approx(ohlc["volume_usd"].sum())
+    assert candles["open"].iloc[0] == pytest.approx(ohlc["open"].iloc[0])
+    assert candles["close"].iloc[-1] == pytest.approx(ohlc["close"].iloc[-1])
+
+
+# --- the risk view -----------------------------------------------------------
+
+
+def test_the_risk_view_reports_and_compares_every_estimator(db: FakeDatabase) -> None:
+    view = build_risk_view(db, "WETH", "WBTC", 30, RiskConfig(confidence=0.95, horizon_bars=24))
+
+    assert view.report.symbol == "WETH"
+    assert view.report.decomposition is not None
+    assert view.report.decomposition.benchmark == "WBTC"
+    assert set(view.estimators.index) == {"historical", "parametric", "cornish_fisher"}
+    assert (view.estimators["CVaR"] >= view.estimators["VaR"]).all()
+    assert (view.drawdown <= 0).all()
+
+
+def test_a_token_is_never_its_own_benchmark(db: FakeDatabase) -> None:
+    """Regressing a token on itself is a tautology; the split is simply omitted."""
+    view = build_risk_view(db, "WETH", "WETH", 30, RiskConfig())
+
+    assert view.report.decomposition is None
+
+
+def test_too_little_history_for_a_tail_is_a_readable_error() -> None:
+    db = FakeDatabase(get_price_history=price_rows("WETH", 20))
+
+    with pytest.raises(ViewError, match="need at least"):
+        build_risk_view(db, "WETH", None, 30, RiskConfig())
+
+
+# --- the pair view -----------------------------------------------------------
+
+
+def test_the_pair_view_compares_and_shapes_the_beta_cloud(db: FakeDatabase) -> None:
+    view = build_pair_view(db, "WETH", "WBTC", 30, window=24)
+
+    assert view.comparison.bars == 400
+    assert list(view.scatter.columns) == ["WBTC", "WETH"]
+    line = view.beta_line
+    slope = (line["y"].iloc[1] - line["y"].iloc[0]) / (line["x"].iloc[1] - line["x"].iloc[0])
+    assert slope == pytest.approx(view.comparison.beta)
+
+
+def test_comparing_a_token_with_itself_is_a_readable_error(db: FakeDatabase) -> None:
+    with pytest.raises(ViewError, match="two different tokens"):
+        build_pair_view(db, "WETH", "WETH", 30, window=24)
+
+
+def test_a_missing_leg_is_a_readable_error(db: FakeDatabase) -> None:
+    with pytest.raises(ViewError, match="DOGE"):
+        build_pair_view(db, "WETH", "DOGE", 30, window=24)
 
 
 # --- the portfolio view ----------------------------------------------------
@@ -165,6 +299,30 @@ def test_the_weights_frame_drops_zero_positions_and_sorts(db: FakeDatabase) -> N
 
     assert list(frame["weight"]) == sorted(frame["weight"], reverse=True)
     assert (frame["weight"].abs() > 1e-6).all()
+
+
+def test_the_risk_budget_shares_sum_to_one_for_the_held_assets(db: FakeDatabase) -> None:
+    view = build_portfolio_view(db, ["WETH", "WBTC"], 30, PortfolioConfig(objective="equal_weight"))
+
+    budget = view.risk_contributions
+    assert set(budget.index) <= {"WETH", "WBTC"}
+    assert float(budget["risk_share"].sum()) == pytest.approx(1.0)
+
+
+def test_tail_risk_is_measured_on_the_solved_allocation(db: FakeDatabase) -> None:
+    view = build_portfolio_view(
+        db, ["WETH", "WBTC"], 30, PortfolioConfig(objective="equal_weight"), risk=RiskConfig()
+    )
+
+    assert view.var > 0
+    assert view.cvar >= view.var
+
+
+def test_tail_risk_is_nan_when_not_asked_for(db: FakeDatabase) -> None:
+    view = build_portfolio_view(db, ["WETH", "WBTC"], 30, PortfolioConfig())
+
+    assert np.isnan(view.var)
+    assert np.isnan(view.cvar)
 
 
 def test_no_frontier_is_traced_by_default(db: FakeDatabase) -> None:
@@ -211,6 +369,15 @@ def test_the_equity_frame_compares_against_buy_and_hold(db: FakeDatabase) -> Non
     assert list(frame.columns) == ["strategy", "buy and hold"]
     # Both start from the same capital, so the comparison is fair.
     assert frame["strategy"].iloc[0] == pytest.approx(frame["buy and hold"].iloc[0], rel=1e-6)
+
+
+def test_the_trade_ledger_lists_every_position_change(db: FakeDatabase) -> None:
+    view = build_strategy_view(db, "WETH", "bollinger", 30, None, FREE)
+
+    trades = view.trades_frame
+    assert list(trades.columns) == ["from", "to", "price"]
+    assert len(trades) == view.strategy.trades()
+    assert (trades["from"] != trades["to"]).all()
 
 
 def test_each_registered_strategy_renders(db: FakeDatabase) -> None:
@@ -274,3 +441,89 @@ def test_too_little_history_fails_softly_rather_than_raising() -> None:
 
     assert forecast.ok is False
     assert forecast.message
+
+
+# --- the agents view ---------------------------------------------------------
+
+
+def agent_run_row(status: str = "warning", agent: str = "observer") -> dict[str, Any]:
+    return {
+        "run_id": "r-1",
+        "agent": agent,
+        "status": status,
+        "started_at": datetime(2026, 10, 30, 12, 0, tzinfo=UTC),
+        "finished_at": datetime(2026, 10, 30, 12, 0, 5, tzinfo=UTC),
+        "duration_seconds": 5.0,
+        "findings_total": 2,
+        "summary": "WETH: 7h gap on a liquid token",
+        "report": "# observer",
+        "findings": [
+            {"kind": "gap", "severity": "warning", "subject": "WETH", "message": "7h gap", "evidence": {}},
+            {"kind": "stale", "severity": "ok", "subject": "ingest", "message": "fresh", "evidence": {}},
+        ],
+        "detail": {},
+    }
+
+
+def ingest_run_row(written: int = 100) -> dict[str, Any]:
+    return {
+        "run_id": "i-1",
+        "trigger": "scheduled",
+        "status": "succeeded",
+        "started_at": datetime(2026, 10, 30, 12, 0, tzinfo=UTC),
+        "token_hours_written": written,
+        "pool_hours_written": written * 3,
+        "duration_seconds": 3.0,
+    }
+
+
+def test_the_agents_view_reads_both_ledgers_and_the_coverage() -> None:
+    db = FakeDatabase(
+        get_recent_agent_runs=[agent_run_row(), agent_run_row(status="ok", agent="janitor")],
+        get_recent_runs=[ingest_run_row()],
+        coverage_report=[coverage_row("WETH"), coverage_row("GNO", stored=190, expected=400)],
+    )
+
+    view = build_agents_view(db)
+
+    assert view.status == "warning"
+    assert len(view.agent_runs) == 2
+    assert list(view.findings.columns) == ["severity", "kind", "subject", "message"]
+    assert len(view.findings) == 2
+    assert list(view.ingest_runs["token_hours_written"]) == [100]
+    # Thinnest coverage first, so the dashboard's headline reads off row one.
+    assert view.coverage.index[0] == "GNO"
+    assert view.coverage.loc["GNO", "coverage"] == pytest.approx(190 / 400)
+
+
+def test_the_latest_report_is_the_newest_observer_run_not_the_janitors() -> None:
+    db = FakeDatabase(
+        get_recent_agent_runs=[agent_run_row(status="ok", agent="janitor"), agent_run_row()],
+    )
+
+    view = build_agents_view(db)
+
+    assert view.latest is not None
+    assert view.latest["agent"] == "observer"
+
+
+def test_an_empty_system_renders_calmly() -> None:
+    view = build_agents_view(FakeDatabase())
+
+    assert view.status == "none"
+    assert view.latest is None
+    assert view.agent_runs.empty
+    assert view.findings.empty
+    assert view.ingest_runs.empty
+    assert view.coverage.empty
+
+
+def test_run_observer_now_posts_to_the_ledger_and_returns_the_report(tokens_file: Any) -> None:
+    """The on-demand run must land in the history the dashboard reads."""
+    db = FakeDatabase()
+    settings = make_settings(tokens_file=str(tokens_file))
+
+    report = run_observer_now(settings, db)
+
+    assert report.agent == "observer"
+    assert "insert_agent_run" in [label for label, _ in db.executed]

@@ -5,6 +5,9 @@ bottom, records what was rendered, and captures any exception. That makes it
 possible to catch a broken widget call or a bad column name without a
 browser, which is the failure mode the view-model tests cannot see.
 
+One dashboard renders per run (the sidebar radio picks it), so each page gets
+its own smoke test by setting the radio and re-running.
+
 Skipped when the UI extra is not installed, so ``make test-unit`` still works
 on a core install.
 """
@@ -30,8 +33,10 @@ from streamlit.testing.v1 import AppTest
 APP = str(REPO_ROOT / "candlegraph" / "ui" / "app.py")
 HOUR = 3600
 BASE = 1_700_000_000 // (24 * HOUR) * (24 * HOUR)
-# ARIMA refits make the strategy tab slow; the script runs every tab.
+# ARIMA refits make the strategy page slow when selected.
 TIMEOUT = 120
+
+PAGES = ("Market", "Token", "Risk", "Compare", "Portfolio", "Strategy", "Forecast", "Agents")
 
 
 def price_rows(symbol: str, n: int, seed: int = 3) -> list[dict[str, Any]]:
@@ -44,8 +49,8 @@ def price_rows(symbol: str, n: int, seed: int = 3) -> list[dict[str, Any]]:
             "period_start_unix": BASE + i * HOUR,
             "timestamp": datetime.fromtimestamp(BASE + i * HOUR, tz=UTC),
             "open": Decimal(str(p)),
-            "high": Decimal(str(p)),
-            "low": Decimal(str(p)),
+            "high": Decimal(str(p * 1.01)),
+            "low": Decimal(str(p * 0.99)),
             "close": Decimal(str(p)),
             "price_usd": Decimal(str(p)),
             "volume_usd": Decimal("1000"),
@@ -66,6 +71,36 @@ def coverage(symbol: str, n: int) -> dict[str, Any]:
     }
 
 
+def agent_run_row() -> dict[str, Any]:
+    return {
+        "run_id": "r-1",
+        "agent": "observer",
+        "status": "warning",
+        "started_at": datetime(2026, 10, 30, 12, 0, tzinfo=UTC),
+        "finished_at": datetime(2026, 10, 30, 12, 0, 5, tzinfo=UTC),
+        "duration_seconds": 5.0,
+        "findings_total": 1,
+        "summary": "WETH: 7h gap on a liquid token",
+        "report": "# observer",
+        "findings": [
+            {"kind": "gap", "severity": "warning", "subject": "WETH", "message": "7h gap", "evidence": {}}
+        ],
+        "detail": {},
+    }
+
+
+def ingest_run_row() -> dict[str, Any]:
+    return {
+        "run_id": "i-1",
+        "trigger": "scheduled",
+        "status": "succeeded",
+        "started_at": datetime(2026, 10, 30, 12, 0, tzinfo=UTC),
+        "token_hours_written": 100,
+        "pool_hours_written": 300,
+        "duration_seconds": 3.0,
+    }
+
+
 @pytest.fixture(autouse=True)
 def _clear_streamlit_cache() -> None:
     """The symbol list is cached for five minutes; tests must not share it."""
@@ -78,56 +113,117 @@ def seeded_db(bars: int = 300) -> FakeDatabase:
     db = FakeDatabase(
         get_price_history=price_rows("WETH", bars) + price_rows("WBTC", bars, seed=4),
         coverage_report=[coverage("WETH", bars), coverage("WBTC", bars)],
+        get_recent_agent_runs=[agent_run_row()],
+        get_recent_runs=[ingest_run_row()],
     )
     set_db(db)
     return db
 
 
-def run_app(db: FakeDatabase | None = None) -> AppTest:
-    if db is None:
-        seeded_db()
+def run_app(page: str | None = None) -> AppTest:
+    seeded_db()
     app = AppTest.from_file(APP, default_timeout=TIMEOUT)
     app.run()
+    if page is not None:
+        app.sidebar.radio[0].set_value(page).run()
     return app
 
 
-# --- the script executes ---------------------------------------------------
+# --- every dashboard renders -------------------------------------------------
 
 
-def test_the_app_runs_without_an_exception() -> None:
+@pytest.mark.parametrize("page", PAGES)
+def test_each_dashboard_renders_without_an_exception(page: str) -> None:
     """Catches broken widget calls and bad column names the view-models cannot."""
-    app = run_app()
+    app = run_app(page)
 
     assert not app.exception, [str(e) for e in app.exception]
 
 
-def test_every_tab_is_present() -> None:
+def test_the_sidebar_offers_every_dashboard() -> None:
     app = run_app()
 
-    labels = [tab.label for tab in app.tabs] if hasattr(app, "tabs") else []
-    rendered = " ".join(labels) or app.get("markdown").__repr__()
-    assert rendered  # tabs exist in some form
+    assert tuple(app.sidebar.radio[0].options) == PAGES
 
 
-def test_the_sidebar_exposes_the_risk_free_rate() -> None:
+# --- units are stated where they are entered ---------------------------------
+
+
+def test_rates_are_entered_in_percent_and_say_so() -> None:
+    """The old input took 0.04 with no unit; a trader could read it as 4 bps."""
     app = run_app()
 
-    labels = [widget.label for widget in app.sidebar.number_input]
-    assert any("Risk-free" in label for label in labels)
+    rate = next(w for w in app.sidebar.number_input if "Risk-free" in w.label)
+    assert "% / yr" in rate.label
+    assert "not basis points" in (rate.help or "")
 
 
-def test_the_sidebar_exposes_the_cost_assumptions() -> None:
+def test_costs_are_entered_in_basis_points_and_say_so() -> None:
     app = run_app()
 
-    labels = " ".join(widget.label for widget in app.sidebar.number_input)
-    assert "Fee" in labels
-    assert "Slippage" in labels
+    labels = {w.label for w in app.sidebar.number_input}
+    assert any("Fee (bps" in label for label in labels)
+    assert any("Slippage (bps" in label for label in labels)
+
+
+def test_the_percent_rate_is_converted_before_it_reaches_a_sharpe() -> None:
+    """Entering 5 must mean 5% a year (0.05), not 500%."""
+    app = run_app("Portfolio")
+
+    rate = next(w for w in app.sidebar.number_input if "Risk-free" in w.label)
+    rate.set_value(5.0).run()
+
+    assert not app.exception
+    # The portfolio metric help names the decimal rate the ratio used.
+    helps = " ".join((m.help or "") for m in app.main.metric)
+    assert "5.00%/yr" in helps
+
+
+def test_the_real_rate_is_shown_beside_the_nominal_one() -> None:
+    app = run_app()
+
+    inflation = next(w for w in app.sidebar.number_input if "Inflation" in w.label)
+    inflation.set_value(5.0).run()
+
+    captions = " ".join(c.value for c in app.sidebar.caption)
+    assert "real" in captions
 
 
 def test_the_history_window_can_be_chosen() -> None:
     app = run_app()
 
     assert any("History" in widget.label for widget in app.sidebar.selectbox)
+
+
+# --- the agents dashboard -----------------------------------------------------
+
+
+def test_the_agents_dashboard_offers_an_on_demand_observer_run() -> None:
+    app = run_app("Agents")
+
+    assert any("Run observer" in b.label for b in app.main.button)
+
+
+def test_pressing_the_button_runs_the_observer_and_writes_the_ledger() -> None:
+    seeded_db()
+    app = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    app.run()
+    app.sidebar.radio[0].set_value("Agents").run()
+
+    db = seeded_db()  # fresh fake wired in for the click's re-run
+    button = next(b for b in app.main.button if "Run observer" in b.label)
+    button.click().run()
+
+    assert not app.exception
+    assert "insert_agent_run" in [label for label, _ in db.executed]
+
+
+def test_the_latest_findings_are_on_screen() -> None:
+    app = run_app("Agents")
+
+    frames = app.main.dataframe
+    assert frames, "the findings table must render"
+    assert not app.exception
 
 
 # --- empty and broken states ----------------------------------------------
@@ -168,26 +264,17 @@ def test_too_little_history_is_explained_rather_than_crashing() -> None:
 
     app = AppTest.from_file(APP, default_timeout=TIMEOUT)
     app.run()
+    app.sidebar.radio[0].set_value("Token").run()
 
     assert not app.exception
-    # One token and five bars: the portfolio tab needs two, prices needs a window.
     assert app.info
 
 
 # --- interaction -----------------------------------------------------------
 
 
-def test_changing_the_risk_free_rate_re_runs_cleanly() -> None:
-    app = run_app()
-
-    rate = next(w for w in app.sidebar.number_input if "Risk-free" in w.label)
-    rate.set_value(0.05).run()
-
-    assert not app.exception
-
-
 def test_widening_the_history_window_re_runs_cleanly() -> None:
-    app = run_app()
+    app = run_app("Market")
 
     window = next(w for w in app.sidebar.selectbox if "History" in w.label)
     window.set_value("Everything").run()

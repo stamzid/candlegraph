@@ -126,7 +126,7 @@ see [`.env.example`](.env.example) for the full list.
 | `INGEST_POOLS` | `true` | `false` skips pool-level data (and so transaction counts). |
 | `POOLS_PER_TOKEN` | 3 | Deepest pools to track per token, per side of the pair. 0 freezes the set. |
 | `MIN_EXPECTED_COVERAGE` | 0.80 | Coverage below which `candlegraph report` flags a token. |
-| `RISK_FREE_RATE` | 0.0 | Annual rate for Sharpe ratios and the tangency portfolio. |
+| `RISK_FREE_RATE` | 0.0 | Annual rate as a decimal fraction (0.04 = 4%) for Sharpe ratios and the tangency portfolio. The UI takes percent and converts. |
 | `ANALYTICS_LOOKBACK_DAYS` | 90 | Default window for the analytics commands. |
 | `ROLLING_WINDOW` | 24 | Default rolling lookback, in bars. |
 | `BACKTEST_FEE_BPS` / `BACKTEST_SLIPPAGE_BPS` | 30 / 5 | Per-side cost assumptions. |
@@ -326,13 +326,35 @@ rather than hiding it.
 make ui                 # locally, against the stack's database
 ```
 
-Four tabs: **Prices & volatility** (rolling statistics and Bollinger bands), **Portfolio**
-(weights and the efficient frontier), **Strategies** (signals, equity curve, drawdown), and
-**Forecast** (ARIMA with its confidence interval). The risk-free rate and cost assumptions live
-in the sidebar and feed every tab.
+A trader's terminal rather than a notebook: the sidebar picks one dashboard at a time, every
+dashboard opens with a metric strip, and every chart carries a title that says what to look for.
+
+- **Market** — the whole tape: relative strength (every token rebased to 100), a movers table
+  with 24h/7d/30d changes, a return-correlation heatmap over aligned bars, and a volatility ladder.
+- **Token** — hourly candlesticks with the Bollinger envelope, volume, rolling volatility,
+  the z-score stretch gauge, and the drawdown-from-peak curve.
+- **Risk** — VaR and CVaR at a chosen confidence, horizon and estimator; the return histogram
+  with the VaR cut; the three estimators side by side as a fat-tail check; and the
+  systematic-vs-idiosyncratic split against a benchmark.
+- **Compare** — the A/B price ratio, the rolling correlation regime, and the beta cloud with its
+  fitted slope.
+- **Portfolio** — allocation donut, the risk budget (each asset's share of portfolio volatility),
+  the efficient frontier with the solved portfolio starred, and the allocation's own VaR/CVaR.
+- **Strategy** — equity vs buy-and-hold net of costs, exposure timeline, strategy drawdown, and a
+  trade ledger of every position change.
+- **Forecast** — the ARIMA path with its confidence interval drawn at the horizon.
+- **Agents** — the watchtower: a **Run observer now** button (one on-demand run, written to the
+  agent ledger), the latest findings coloured by severity, ingest cadence, per-token coverage,
+  and the full run history.
+
+**Units are explicit.** Rates are entered in **percent per year** (4.25 means 4.25%; the sidebar
+also shows the real, inflation-adjusted rate beside the nominal one), and trading costs in
+**basis points per side** (100 bps = 1%). The CLI and `.env` take the rate as a decimal fraction
+(`0.04` = 4%) and say so in their help text.
 
 The UI's arithmetic lives in `candlegraph/ui/viewmodels.py`, not in the Streamlit script, so it
-is covered by ordinary unit tests; the script itself is smoke-tested with Streamlit's `AppTest`.
+is covered by ordinary unit tests; the script itself is smoke-tested page by page with
+Streamlit's `AppTest`.
 
 ## Agents
 

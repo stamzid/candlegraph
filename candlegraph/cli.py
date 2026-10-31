@@ -56,7 +56,12 @@ def _parser() -> argparse.ArgumentParser:
     compare.add_argument("symbol_b")
     _add_window(compare)
     compare.add_argument("--window", type=int, default=None, help="rolling-correlation lookback in bars")
-    compare.add_argument("--risk-free-rate", type=float, default=None, help="annual, for the Sharpe ratios")
+    compare.add_argument(
+        "--risk-free-rate",
+        type=float,
+        default=None,
+        help="annual decimal fraction: 0.04 means 4%/yr (the UI takes percent)",
+    )
     compare.add_argument("--tail", type=int, default=10, help="rolling-correlation rows to print")
 
     signals = sub.add_parser("signals", help="generate signals for a token")
@@ -73,7 +78,12 @@ def _parser() -> argparse.ArgumentParser:
     _add_window(bt)
     bt.add_argument("--fee-bps", type=float, default=None)
     bt.add_argument("--slippage-bps", type=float, default=None)
-    bt.add_argument("--risk-free-rate", type=float, default=None)
+    bt.add_argument(
+        "--risk-free-rate",
+        type=float,
+        default=None,
+        help="annual decimal fraction: 0.04 means 4%/yr (the UI takes percent)",
+    )
     _add_strategy_flags(bt)
 
     portfolio = sub.add_parser("portfolio", help="mean-variance optimise across tokens")
@@ -81,7 +91,12 @@ def _parser() -> argparse.ArgumentParser:
         "--symbols", nargs="*", default=None, help="tokens to allocate across (default: all tracked)"
     )
     _add_window(portfolio)
-    portfolio.add_argument("--risk-free-rate", type=float, default=None, help="annual, e.g. 0.04")
+    portfolio.add_argument(
+        "--risk-free-rate",
+        type=float,
+        default=None,
+        help="annual decimal fraction: 0.04 means 4%/yr (the UI takes percent)",
+    )
     portfolio.add_argument(
         "--objective",
         default="max_sharpe",
@@ -111,7 +126,10 @@ def _parser() -> argparse.ArgumentParser:
         help="VaR estimator (default: RISK_VAR_METHOD)",
     )
     risk.add_argument(
-        "--risk-free-rate", type=float, default=None, help="annual, for the Sharpe and Sortino ratios"
+        "--risk-free-rate",
+        type=float,
+        default=None,
+        help="annual decimal fraction: 0.04 means 4%/yr (the UI takes percent)",
     )
 
     forecast = sub.add_parser("forecast", help="ARIMA forecast for a token")
