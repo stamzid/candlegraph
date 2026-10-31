@@ -346,6 +346,16 @@ dashboard opens with a metric strip, and every chart carries a title that says w
 - **Agents** — the watchtower: a **Run observer now** button (one on-demand run, written to the
   agent ledger), the latest findings coloured by severity, ingest cadence, per-token coverage,
   and the full run history.
+- **Data** — what is stored and how to load more: coverage per token, recent ingest runs, and a
+  **backfill** control (7 days to 1 year) that asks for confirmation before it spends network and
+  writes rows. The default first fetch is `LOOKBACK_DAYS` (7); backfills reach further and never
+  delete.
+
+**Defaults a trader expects.** Every single-token page opens on WBTC, Compare opens on WBTC
+against USDT, and the Portfolio opens on the majors with stablecoins left out and a 25% cap per
+token (or the smallest cap the chosen tokens can satisfy). An annualised expected return that
+falls below −100% is shown as −100% and flagged; a VaR or CVaR is never reported above 100%,
+because a long position cannot lose more than everything.
 
 **Units are explicit.** Rates are entered in **percent per year** (4.25 means 4.25%; the sidebar
 also shows the real, inflation-adjusted rate beside the nominal one), and trading costs in
@@ -440,9 +450,10 @@ Next, in order:
 1. **Knowledge graph and signaller** — assets, pools, sources and documents in
    Postgres with pgvector, Tavily for web search, and news attached to prices,
    so a signal can cite *why*. Paper trading only. In progress: the schema
-   (pgvector installed, eight knowledge tables) and the asset sync
-   (`candlegraph knowledge sync-assets`) are in; retrieval and explanation
-   are next. See `docs/knowledge/` and `docs/rollout/ROLLOUT.md`.
+   (pgvector installed, eight knowledge tables), the asset sync
+   (`candlegraph knowledge sync-assets`) and the document pipeline (URL
+   normalisation, `url_hash`, chunking) are in; embeddings, retrieval and
+   explanation are next. See `docs/knowledge/` and `docs/rollout/ROLLOUT.md`.
 2. **Harness** — YAML pipeline specs, an event bus, OpenTelemetry, and the
    continuous aggregates deferred from the TimescaleDB migration.
 3. **Traditional markets** — NASDAQ and NYSE equities alongside crypto, which

@@ -339,3 +339,22 @@ def test_var_on_prices_uses_simple_returns(walk: pd.Series) -> None:
     report = risk_report(walk)
 
     assert report.var == pytest.approx(value_at_risk(simple_returns(walk).dropna()))
+
+
+# --- a loss cannot exceed everything ---------------------------------------------
+
+
+@pytest.mark.parametrize("method", ["historical", "parametric", "cornish_fisher"])
+def test_no_estimator_reports_a_loss_beyond_one_hundred_percent(method: str) -> None:
+    """A parametric sigma scaled by a long horizon would otherwise say 'lose 140%'."""
+    wild = pd.Series(np.random.default_rng(1).normal(0.0, 0.25, 2000), index=hourly_index(2000))
+    config = RiskConfig(confidence=0.99, horizon_bars=168, method=method)  # type: ignore[arg-type]
+
+    assert value_at_risk(wild, config) == 1.0
+    assert conditional_value_at_risk(wild, config) == 1.0
+
+
+def test_the_cap_leaves_ordinary_losses_alone() -> None:
+    returns = normal_returns()
+
+    assert value_at_risk(returns, RiskConfig(confidence=0.99, horizon_bars=24)) < 1.0

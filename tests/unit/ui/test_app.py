@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from candlegraph.ingestion.runner import IngestResult
 from candlegraph.settings import REPO_ROOT
 from candlegraph.storage import set_db
 from tests.conftest import FakeDatabase
@@ -36,7 +37,7 @@ BASE = 1_700_000_000 // (24 * HOUR) * (24 * HOUR)
 # ARIMA refits make the strategy page slow when selected.
 TIMEOUT = 120
 
-PAGES = ("Market", "Token", "Risk", "Compare", "Portfolio", "Strategy", "Forecast", "Agents")
+PAGES = ("Market", "Token", "Risk", "Compare", "Portfolio", "Strategy", "Forecast", "Agents", "Data")
 
 
 def price_rows(symbol: str, n: int, seed: int = 3) -> list[dict[str, Any]]:
@@ -109,10 +110,13 @@ def _clear_streamlit_cache() -> None:
     st.cache_data.clear()
 
 
+SYMBOLS = ("AAVE", "USDT", "WBTC", "WETH")
+
+
 def seeded_db(bars: int = 300) -> FakeDatabase:
     db = FakeDatabase(
-        get_price_history=price_rows("WETH", bars) + price_rows("WBTC", bars, seed=4),
-        coverage_report=[coverage("WETH", bars), coverage("WBTC", bars)],
+        get_price_history=[row for i, s in enumerate(SYMBOLS) for row in price_rows(s, bars, seed=3 + i)],
+        coverage_report=[coverage(s, bars) for s in SYMBOLS],
         get_recent_agent_runs=[agent_run_row()],
         get_recent_runs=[ingest_run_row()],
     )
@@ -280,3 +284,95 @@ def test_widening_the_history_window_re_runs_cleanly() -> None:
     window.set_value("Everything").run()
 
     assert not app.exception
+
+
+# --- defaults a trader expects -----------------------------------------------------
+
+
+@pytest.mark.parametrize("page", ["Token", "Risk", "Strategy", "Forecast"])
+def test_single_token_pages_open_on_wbtc_not_the_alphabet(page: str) -> None:
+    app = run_app(page)
+
+    token = next(w for w in app.main.selectbox if w.label == "Token")
+    assert token.value == "WBTC"
+
+
+def test_compare_opens_on_wbtc_against_usdt() -> None:
+    app = run_app("Compare")
+
+    a = next(w for w in app.main.selectbox if w.label == "Token A")
+    b = next(w for w in app.main.selectbox if w.label == "Token B")
+    assert (a.value, b.value) == ("WBTC", "USDT")
+
+
+def test_the_portfolio_opens_on_the_majors_without_stablecoins_at_a_quarter_cap() -> None:
+    app = run_app("Portfolio")
+
+    tokens = app.main.multiselect[0]
+    assert "USDT" not in tokens.value
+    assert tokens.value[0] == "WBTC"
+    cap = next(w for w in app.main.slider if "Max weight" in w.label)
+    # Three non-stable tokens: 25% cannot sum to one, so the slider opens at the feasible 35%.
+    assert cap.value == pytest.approx(0.35)
+
+
+# --- the data dashboard ------------------------------------------------------------
+
+
+def test_the_data_page_offers_a_backfill_but_does_not_start_one() -> None:
+    app = run_app("Data")
+
+    assert any(b.label.startswith("Backfill") for b in app.main.button)
+    assert not any("Confirm" in b.label for b in app.main.button)
+    assert not app.warning
+
+
+def test_asking_for_a_backfill_shows_a_confirmation_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing hits the network until the user confirms."""
+    called: list[int] = []
+    monkeypatch.setattr(
+        "candlegraph.ui.viewmodels.run_backfill",
+        lambda settings, db, days: called.append(days) or IngestResult(hours_written=1),
+    )
+    app = run_app("Data")
+
+    window = next(w for w in app.main.selectbox if w.label == "Window")
+    window.set_value("30 days").run()
+    next(b for b in app.main.button if b.label.startswith("Backfill")).click().run()
+
+    assert not app.exception
+    assert any("Backfill 30 days" in w.value for w in app.warning)
+    assert any("Confirm" in b.label for b in app.main.button)
+    assert called == [], "the backfill must not start before confirmation"
+
+
+def test_confirming_runs_the_backfill_and_reports_what_landed(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[int] = []
+
+    def fake(settings: Any, db: Any, days: int) -> IngestResult:
+        called.append(days)
+        return IngestResult(hours_written=4200, pool_hours_written=700)
+
+    monkeypatch.setattr("candlegraph.ui.viewmodels.run_backfill", fake)
+    app = run_app("Data")
+    next(b for b in app.main.button if b.label.startswith("Backfill")).click().run()
+    next(b for b in app.main.button if "Confirm" in b.label).click().run()
+
+    assert not app.exception
+    assert called == [90]
+    assert any("4,200 token hours" in m.value for m in app.success)
+
+
+def test_cancelling_a_backfill_runs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[int] = []
+    monkeypatch.setattr(
+        "candlegraph.ui.viewmodels.run_backfill",
+        lambda settings, db, days: called.append(days) or IngestResult(),
+    )
+    app = run_app("Data")
+    next(b for b in app.main.button if b.label.startswith("Backfill")).click().run()
+    next(b for b in app.main.button if b.label == "Cancel").click().run()
+
+    assert not app.exception
+    assert called == []
+    assert not any("Confirm" in b.label for b in app.main.button)

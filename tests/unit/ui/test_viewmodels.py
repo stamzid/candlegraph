@@ -32,8 +32,12 @@ from candlegraph.ui.viewmodels import (
     build_strategy_view,
     build_token_view,
     candle_frame,
+    default_index,
+    default_max_weight,
+    default_portfolio_symbols,
     forecast_frame,
     load_prices,
+    run_backfill,
     run_observer_now,
 )
 from tests.conftest import FakeDatabase, make_settings
@@ -527,3 +531,77 @@ def test_run_observer_now_posts_to_the_ledger_and_returns_the_report(tokens_file
 
     assert report.agent == "observer"
     assert "insert_agent_run" in [label for label, _ in db.executed]
+
+
+# --- sensible defaults ---------------------------------------------------------------
+
+
+def test_the_default_token_is_wbtc_when_stored() -> None:
+    symbols = ["AAVE", "USDT", "WBTC", "WETH"]
+
+    assert symbols[default_index(symbols)] == "WBTC"
+
+
+def test_without_wbtc_the_default_is_the_first_token_that_is_not_excluded() -> None:
+    assert default_index(["AAVE", "LINK"]) == 0
+    assert default_index(["AAVE", "LINK"], exclude="AAVE") == 1
+    assert default_index([]) == 0
+
+
+def test_the_default_benchmark_is_usdt_and_never_the_token_itself() -> None:
+    symbols = ["USDT", "WBTC"]
+
+    assert symbols[default_index(symbols, "USDT", exclude="WBTC")] == "USDT"
+    assert symbols[default_index(symbols, "USDT", exclude="USDT")] == "WBTC"
+
+
+def test_the_default_book_is_majors_first_with_stablecoins_left_out() -> None:
+    symbols = ["AAVE", "DAI", "GNO", "LINK", "SHIB", "UNI", "USDC", "USDT", "WBTC", "WETH"]
+
+    assert default_portfolio_symbols(symbols) == ["WBTC", "WETH", "AAVE", "GNO", "LINK"]
+
+
+def test_a_universe_of_only_stablecoins_still_yields_a_book() -> None:
+    assert default_portfolio_symbols(["DAI", "USDC", "USDT"]) == ["DAI", "USDC", "USDT"]
+
+
+@pytest.mark.parametrize(
+    ("n_assets", "expected"),
+    [(10, 0.25), (5, 0.25), (4, 0.25), (3, 0.35), (2, 0.50), (1, 1.0), (0, 1.0)],
+)
+def test_the_default_cap_is_a_quarter_unless_too_few_tokens_make_that_infeasible(
+    n_assets: int, expected: float
+) -> None:
+    """Two tokens at 25% each cannot sum to one; the slider must open on a feasible value."""
+    assert default_max_weight(n_assets) == pytest.approx(expected)
+
+
+# --- the backfill guard ----------------------------------------------------------------
+
+
+def test_a_backfill_of_zero_days_is_refused(tokens_file: Any) -> None:
+    with pytest.raises(ViewError, match="at least one day"):
+        run_backfill(make_settings(tokens_file=str(tokens_file)), FakeDatabase(), 0)
+
+
+def test_a_backfill_without_an_api_key_is_a_readable_error(tokens_file: Any) -> None:
+    settings = make_settings(tokens_file=str(tokens_file), graph_api_key=None)
+
+    with pytest.raises(ViewError, match="GRAPH_API_KEY"):
+        run_backfill(settings, FakeDatabase(), 30)
+
+
+def test_a_backfill_reaches_the_ingest_runner_as_a_backfill_trigger(
+    tokens_file: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run_ingest(db: Any, registry: Any, settings: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return "result"
+
+    monkeypatch.setattr("candlegraph.ui.viewmodels.run_ingest", fake_run_ingest)
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+
+    assert run_backfill(make_settings(tokens_file=str(tokens_file)), FakeDatabase(), 90) == "result"
+    assert captured == {"trigger": "backfill", "lookback_days": 90}

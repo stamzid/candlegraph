@@ -56,6 +56,16 @@ class RiskError(ValueError):
     """The risk configuration is invalid or the series is too short."""
 
 
+# A long position cannot lose more than everything. The parametric estimators
+# scale a per-bar sigma by the square root of the horizon with nothing to stop
+# them past 100%, so every reported loss is capped here and the cap is tested.
+MAX_LOSS = 1.0
+
+
+def _cap_loss(loss: float) -> float:
+    return min(loss, MAX_LOSS)
+
+
 @dataclass(frozen=True)
 class RiskConfig:
     """Every knob that changes a tail-risk number.
@@ -150,14 +160,14 @@ def value_at_risk(returns: pd.Series, config: RiskConfig | None = None) -> float
             # The empirical tail. Scaled like the parametric one so horizons
             # are comparable across methods; an approximation, and said so.
             quantile = float(np.quantile(values, config.tail))
-            return -quantile * scale
+            return _cap_loss(-quantile * scale)
         case "parametric":
             z = float(stats.norm.ppf(config.tail))
-            return -(mu * config.horizon_bars + z * sigma * scale)
+            return _cap_loss(-(mu * config.horizon_bars + z * sigma * scale))
         case _:
             z = float(stats.norm.ppf(config.tail))
             z_cf = _cornish_fisher_z(z, float(stats.skew(values)), float(stats.kurtosis(values)))
-            return -(mu * config.horizon_bars + z_cf * sigma * scale)
+            return _cap_loss(-(mu * config.horizon_bars + z_cf * sigma * scale))
 
 
 def conditional_value_at_risk(returns: pd.Series, config: RiskConfig | None = None) -> float:
@@ -180,20 +190,20 @@ def conditional_value_at_risk(returns: pd.Series, config: RiskConfig | None = No
         case "historical":
             quantile = float(np.quantile(values, tail))
             breaches = values[values <= quantile]
-            return -float(breaches.mean()) * scale
+            return _cap_loss(-float(breaches.mean()) * scale)
         case "parametric":
             # Closed form for a normal: the density at the quantile over the
             # tail mass, in standard deviations.
             z = float(stats.norm.ppf(tail))
             shortfall_z = float(stats.norm.pdf(z)) / tail
-            return shortfall_z * sigma * scale - mu * config.horizon_bars
+            return _cap_loss(shortfall_z * sigma * scale - mu * config.horizon_bars)
         case _:
             # No closed form: average the Cornish-Fisher quantile over the
             # tail probabilities below `tail`.
             skew, kurt = float(stats.skew(values)), float(stats.kurtosis(values))
             grid = np.linspace(tail / 400.0, tail, 400)
             z_grid = np.array([_cornish_fisher_z(float(stats.norm.ppf(p)), skew, kurt) for p in grid])
-            return -(mu * config.horizon_bars + float(z_grid.mean()) * sigma * scale)
+            return _cap_loss(-(mu * config.horizon_bars + float(z_grid.mean()) * sigma * scale))
 
 
 # --- systematic versus idiosyncratic ---------------------------------------

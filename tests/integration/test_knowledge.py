@@ -8,11 +8,14 @@ database, and `sync-assets` is idempotent against a real `asset` table.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from alembic import command
 from alembic.config import Config
 
 from candlegraph.knowledge.assets import sync_assets
+from candlegraph.knowledge.documents import ChunkConfig, RawDocument, ensure_source, store_document, url_hash
 from candlegraph.knowledge.statements import knowledge_statements_for
 from candlegraph.storage import DatabaseManager
 from candlegraph.tokens import TokenRegistry, load_tokens
@@ -158,3 +161,133 @@ def test_configured_aliases_replace_the_default_set(
     rows = kdb.fetch_all(f'SELECT aliases FROM "{kdb.schema}".asset WHERE id = %(id)s', {"id": WBTC})
 
     assert rows[0]["aliases"] == ["WBTC", "Bitcoin"]
+
+
+# --- documents (step 4) -------------------------------------------------------
+
+
+def _doc(text: str = "First sentence. Second sentence.", **overrides: object) -> RawDocument:
+    fields: dict[str, object] = {
+        "source_id": "manual",
+        "url": "https://www.example.com/post?utm_source=x",
+        "raw_text": text,
+        "title": "A post",
+    }
+    fields.update(overrides)
+    return RawDocument(**fields)  # type: ignore[arg-type]
+
+
+def _documents(db: DatabaseManager) -> list[dict[str, object]]:
+    return db.fetch_all(f'SELECT * FROM "{db.schema}".document ORDER BY id')
+
+
+def _chunks(db: DatabaseManager, document_id: int) -> list[dict[str, object]]:
+    return db.fetch_all(knowledge_statements_for(db.schema).get_chunks, {"document_id": document_id})
+
+
+def test_upserting_the_same_document_twice_stores_it_once(kdb: DatabaseManager) -> None:
+    """The step-4 exit condition: two spellings of one URL are one row."""
+    ensure_source(kdb, "manual", "file")
+
+    first = store_document(kdb, _doc(url="https://www.example.com/post?utm_source=x"))
+    second = store_document(kdb, _doc(url="http://example.com/post/"))
+
+    assert first.document_id == second.document_id
+    rows = _documents(kdb)
+    assert len(rows) == 1
+    assert rows[0]["url_hash"] == url_hash("https://example.com/post")
+
+
+def test_an_unknown_publication_date_stays_null_and_a_known_one_is_kept(kdb: DatabaseManager) -> None:
+    """NULL never becomes now(); a later copy without a date does not erase a known one."""
+    ensure_source(kdb, "manual", "file")
+    when = datetime(2026, 10, 24, 9, 12, tzinfo=UTC)
+
+    store_document(kdb, _doc())
+    assert _documents(kdb)[0]["published_at"] is None
+
+    store_document(kdb, _doc(published_at=when))
+    assert _documents(kdb)[0]["published_at"] == when
+
+    store_document(kdb, _doc())
+    assert _documents(kdb)[0]["published_at"] == when
+
+
+def test_chunks_are_written_with_stable_ordinals(kdb: DatabaseManager) -> None:
+    ensure_source(kdb, "manual", "file")
+    text = "\n\n".join(
+        " ".join(f"Sentence {p}-{s} says something useful." for s in range(8)) for p in range(6)
+    )
+    config = ChunkConfig(target_tokens=60, max_tokens=80, min_tokens=40, overlap_tokens=10)
+
+    stored = store_document(kdb, _doc(text), config)
+
+    rows = _chunks(kdb, stored.document_id)
+    assert stored.chunks_written == len(rows) > 1
+    assert [row["ordinal"] for row in rows] == list(range(len(rows)))
+    assert all(row["embedding"] is None for row in rows), "nothing is embedded yet (step 5)"
+    assert all(row["tsv"] for row in rows), "the generated tsvector column is populated"
+
+
+def test_a_shortened_document_loses_its_tail_chunks(kdb: DatabaseManager) -> None:
+    ensure_source(kdb, "manual", "file")
+    config = ChunkConfig(target_tokens=20, max_tokens=30, min_tokens=10, overlap_tokens=0)
+    long_text = " ".join(f"Sentence number {i} is here." for i in range(20))
+
+    first = store_document(kdb, _doc(long_text), config)
+    assert first.chunks_written > 2
+
+    second = store_document(kdb, _doc("Just one short sentence."), config)
+
+    assert second.document_id == first.document_id
+    assert second.chunks_written == 1
+    assert second.chunks_removed == first.chunks_written - 1
+    assert len(_chunks(kdb, first.document_id)) == 1
+
+
+def test_a_chunk_whose_text_changed_loses_its_embedding(kdb: DatabaseManager) -> None:
+    """A stale vector must never describe new text; unchanged chunks keep theirs."""
+    ensure_source(kdb, "manual", "file")
+    # Each sentence is four tokens (three words and a full stop); a six-token
+    # ceiling forces one chunk per sentence.
+    config = ChunkConfig(target_tokens=5, max_tokens=6, min_tokens=3, overlap_tokens=0)
+    stored = store_document(kdb, _doc("Alpha beta gamma. Delta epsilon zeta."), config)
+    assert stored.chunks_written == 2
+    kdb.execute(
+        f'UPDATE "{kdb.schema}".chunk SET embedding = %(v)s::halfvec, embedding_model = %(m)s '
+        "WHERE document_id = %(id)s",
+        {"v": "[" + ",".join(["0.1"] * 1024) + "]", "m": "test-model", "id": stored.document_id},
+    )
+
+    store_document(kdb, _doc("Alpha beta gamma. Delta epsilon CHANGED."), config)
+
+    rows = _chunks(kdb, stored.document_id)
+    assert rows[0]["embedding"] is not None and rows[0]["embedding_model"] == "test-model"
+    assert rows[1]["embedding"] is None and rows[1]["embedding_model"] is None
+
+
+def test_metadata_is_merged_and_the_title_is_not_erased_by_a_copy_without_one(kdb: DatabaseManager) -> None:
+    ensure_source(kdb, "manual", "file")
+
+    store_document(kdb, _doc(meta={"score": 0.9}))
+    store_document(kdb, _doc(title=None, meta={"query": "WETH unlock"}))
+
+    row = _documents(kdb)[0]
+    assert row["title"] == "A post"
+    assert row["meta"] == {"score": 0.9, "query": "WETH unlock"}
+
+
+def test_a_document_for_an_unregistered_source_is_refused_not_silently_stored(kdb: DatabaseManager) -> None:
+    import psycopg2
+
+    with pytest.raises(psycopg2.errors.ForeignKeyViolation):
+        store_document(kdb, _doc(source_id="nobody"))
+
+
+def test_ensure_source_is_idempotent(kdb: DatabaseManager) -> None:
+    ensure_source(kdb, "tavily", "search", {"depth": "basic"})
+    ensure_source(kdb, "tavily", "search", {"depth": "advanced"})
+
+    rows = kdb.fetch_all(f'SELECT * FROM "{kdb.schema}".source WHERE id = %(id)s', {"id": "tavily"})
+    assert len(rows) == 1
+    assert rows[0]["config"] == {"depth": "basic"}, "the first registration wins; nothing is overwritten"

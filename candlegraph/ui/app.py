@@ -33,6 +33,9 @@ from candlegraph.strategies.backtest import BacktestConfig
 from candlegraph.strategies.bollinger import BollingerConfig
 from candlegraph.strategies.crossover import CrossoverConfig
 from candlegraph.ui.viewmodels import (
+    BACKFILL_CHOICES,
+    DEFAULT_BENCHMARK,
+    MAX_WEIGHT_STEP,
     ViewError,
     available_symbols,
     build_agents_view,
@@ -44,12 +47,16 @@ from candlegraph.ui.viewmodels import (
     build_strategy_view,
     build_token_view,
     candle_frame,
+    default_index,
+    default_max_weight,
+    default_portfolio_symbols,
     forecast_frame,
+    run_backfill,
     run_observer_now,
 )
 
 WINDOW_CHOICES = {"7 days": 7, "30 days": 30, "90 days": 90, "180 days": 180, "Everything": None}
-PAGES = ("Market", "Token", "Risk", "Compare", "Portfolio", "Strategy", "Forecast", "Agents")
+PAGES = ("Market", "Token", "Risk", "Compare", "Portfolio", "Strategy", "Forecast", "Agents", "Data")
 HORIZON_CHOICES = {"1 hour": 1, "4 hours": 4, "1 day": 24, "1 week": 168}
 UP, DOWN = "#00c853", "#ff5252"
 SEVERITY_COLORS = {
@@ -223,7 +230,7 @@ def _market_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -
 
 def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
     left, mid, right = st.columns(3)
-    symbol = left.selectbox("Token", ctx["symbols"], key="token_symbol")
+    symbol = left.selectbox("Token", ctx["symbols"], index=default_index(ctx["symbols"]), key="token_symbol")
     window = int(mid.number_input("Rolling window (bars)", 2, 2000, settings.rolling_window, 1))
     num_std = float(right.number_input("Band width (std)", 0.5, 5.0, 2.0, 0.25))
 
@@ -289,7 +296,7 @@ def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) ->
 
 def _risk_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
     a, b, c, d, e = st.columns(5)
-    symbol = a.selectbox("Token", ctx["symbols"], key="risk_symbol")
+    symbol = a.selectbox("Token", ctx["symbols"], index=default_index(ctx["symbols"]), key="risk_symbol")
     default_benchmark = settings.risk_benchmark if settings.risk_benchmark in ctx["symbols"] else None
     others = ["(none)"] + [s for s in ctx["symbols"] if s != symbol]
     benchmark_pick = b.selectbox(
@@ -387,9 +394,11 @@ def _risk_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> 
 
 def _compare_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
     a, b, c = st.columns(3)
-    symbol_a = a.selectbox("Token A", ctx["symbols"], key="pair_a")
+    symbol_a = a.selectbox("Token A", ctx["symbols"], index=default_index(ctx["symbols"]), key="pair_a")
     others = [s for s in ctx["symbols"] if s != symbol_a] or ctx["symbols"]
-    symbol_b = b.selectbox("Token B", others, key="pair_b")
+    symbol_b = b.selectbox(
+        "Token B", others, index=default_index(others, DEFAULT_BENCHMARK, exclude=symbol_a), key="pair_b"
+    )
     window = int(c.number_input("Rolling window (bars)", 2, 2000, settings.rolling_window * 7, 1))
 
     view = build_pair_view(
@@ -443,10 +452,23 @@ def _compare_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) 
 
 
 def _portfolio_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
-    chosen = st.multiselect("Tokens", ctx["symbols"], default=ctx["symbols"][: min(5, len(ctx["symbols"]))])
+    chosen = st.multiselect(
+        "Tokens",
+        ctx["symbols"],
+        default=default_portfolio_symbols(ctx["symbols"]),
+        help="Majors first, stablecoins left out by default: "
+        "a USD-pegged token swallows any minimum-risk objective.",
+    )
     left, right, third, fourth = st.columns(4)
     objective = left.selectbox("Objective", OBJECTIVES, index=0)
-    max_weight = right.slider("Max weight per token", 0.05, 1.0, 1.0, 0.05)
+    max_weight = right.slider(
+        "Max weight per token",
+        MAX_WEIGHT_STEP,
+        1.0,
+        default_max_weight(len(chosen)),
+        MAX_WEIGHT_STEP,
+        help="Opens at 25% (or the smallest cap the chosen tokens can satisfy).",
+    )
     shrinkage = third.slider(
         "Covariance shrinkage",
         0.0,
@@ -459,7 +481,7 @@ def _portfolio_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]
 
     target = None
     if objective == "target_return":
-        target = st.number_input("Target return (% / yr)", -100.0, 500.0, 20.0, 5.0) / 100.0
+        target = st.number_input("Target return (% / yr)", -99.0, 500.0, 20.0, 5.0) / 100.0
 
     frontier_points = st.slider("Frontier points (0 to skip)", 0, 40, 20, 5)
 
@@ -499,6 +521,11 @@ def _portfolio_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]
 
     if not result.converged:
         st.warning(f"The optimiser did not converge: {result.message}")
+    if result.capped:
+        st.info(
+            "Expected return shown as -100%: the annualised estimate was lower, and a long-only book "
+            "cannot lose more than everything. The window contains a collapsing token."
+        )
 
     left, right = st.columns(2)
     with left:
@@ -604,7 +631,9 @@ def _strategy_config(name: str) -> Any:
 
 def _strategy_page(db: DatabaseManager, ctx: dict[str, Any]) -> None:
     left, right = st.columns(2)
-    symbol = left.selectbox("Token", ctx["symbols"], key="strategy_symbol")
+    symbol = left.selectbox(
+        "Token", ctx["symbols"], index=default_index(ctx["symbols"]), key="strategy_symbol"
+    )
     name = right.selectbox("Strategy", available(), index=1)
 
     config = _strategy_config(name)
@@ -650,7 +679,7 @@ def _strategy_page(db: DatabaseManager, ctx: dict[str, Any]) -> None:
 
 def _forecast_page(db: DatabaseManager, ctx: dict[str, Any]) -> None:
     a, b, c, d = st.columns(4)
-    symbol = a.selectbox("Token", ctx["symbols"], key="forecast_symbol")
+    symbol = a.selectbox("Token", ctx["symbols"], index=default_index(ctx["symbols"]), key="forecast_symbol")
     p = int(b.number_input("p", 0, 5, 1, 1, key="f_p"))
     q = int(c.number_input("q", 0, 5, 1, 1, key="f_q"))
     steps = int(d.number_input("Steps ahead", 1, 168, 24, 1))
@@ -819,6 +848,97 @@ def _agents_page(db: DatabaseManager, settings: Settings) -> None:
         )
 
 
+# --- DATA ---------------------------------------------------------------------
+
+
+def _data_page(db: DatabaseManager, settings: Settings) -> None:
+    st.subheader("Data — what is stored, and loading more of it")
+    st.caption(
+        f"A first-time token is fetched {settings.lookback_days} days back (LOOKBACK_DAYS). "
+        "A backfill reaches further; it rewinds past what is stored and re-writes nothing twice."
+    )
+
+    view = build_agents_view(db)
+    cols = st.columns(3)
+    cols[0].metric("Tokens with history", f"{len(view.coverage):,}")
+    cols[1].metric("Ingest runs on record", f"{len(view.ingest_runs):,}")
+    newest = view.ingest_runs.iloc[0] if not view.ingest_runs.empty else None
+    cols[2].metric(
+        "Last run",
+        f"{newest['status']}" if newest is not None else "—",
+        delta=f"{int(newest['token_hours_written']):,} token hours" if newest is not None else None,
+        delta_color="off",
+    )
+
+    _title("Backfill — load more history", "Pick a window, then confirm. Nothing starts until you do.")
+    left, right = st.columns([1, 2])
+    label = left.selectbox("Window", list(BACKFILL_CHOICES), index=2, key="backfill_window")
+    days = BACKFILL_CHOICES[label]
+
+    if left.button("Backfill…", key="backfill_ask"):
+        st.session_state["backfill_pending"] = days
+
+    pending = st.session_state.get("backfill_pending")
+    if pending is not None:
+        with right:
+            st.warning(
+                f"**Backfill {pending} days for {len(view.coverage) or 'all configured'} tokens?** "
+                f"This calls The Graph for roughly {pending * 24:,} hours per token and per pool, "
+                "takes a few minutes per 90 days, and writes to the database. Stored rows are only "
+                "refreshed, never deleted."
+            )
+            confirm, cancel = st.columns(2)
+            if confirm.button("Confirm backfill", type="primary", key="backfill_confirm"):
+                st.session_state.pop("backfill_pending", None)
+                try:
+                    with st.spinner(f"Backfilling {pending} days…"):
+                        result = run_backfill(settings, db, int(pending))
+                except ViewError as exc:
+                    st.error(str(exc))
+                else:
+                    _symbols.clear()
+                    tone = st.success if result.ok else st.warning
+                    tone(
+                        f"Backfill finished: {result.hours_written:,} token hours and "
+                        f"{result.pool_hours_written:,} pool hours written"
+                        + (f", {len(result.errors)} error(s)" if result.errors else "")
+                        + ". Reload the other dashboards to see the new history."
+                    )
+                    for target, message in result.errors.items():
+                        st.caption(f"{target}: {message}")
+            if cancel.button("Cancel", key="backfill_cancel"):
+                st.session_state.pop("backfill_pending", None)
+                st.rerun()
+
+    left, right = st.columns(2)
+    with left:
+        _title(
+            "Coverage — stored vs expected hours", "100% is not the target: an hour with no swaps has no row."
+        )
+        if view.coverage.empty:
+            st.info("No stored history yet.")
+        else:
+            fig = go.Figure(
+                go.Bar(
+                    x=view.coverage["coverage"],
+                    y=list(view.coverage.index),
+                    orientation="h",
+                    marker_color=[
+                        "#ffab00" if v < settings.min_expected_coverage else UP
+                        for v in view.coverage["coverage"]
+                    ],
+                )
+            )
+            fig.update_layout(xaxis_tickformat=".0%")
+            _plot(fig, height=280)
+    with right:
+        _title("Recent Ingest Runs — newest first")
+        if view.ingest_runs.empty:
+            st.info("No ingest runs recorded yet.")
+        else:
+            st.dataframe(view.ingest_runs, width="stretch")
+
+
 # --- entry point --------------------------------------------------------------
 
 
@@ -859,6 +979,8 @@ def main() -> None:
                 _forecast_page(db, ctx)
             case "Agents":
                 _agents_page(db, settings)
+            case "Data":
+                _data_page(db, settings)
     except ViewError as exc:
         st.info(str(exc))
 

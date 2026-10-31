@@ -1,6 +1,6 @@
 # Rollout: stage 1 — the knowledge graph on pgvector
 
-**Status:** current — 2026-10-30; steps 1–3 done, step 4 next. This directory holds **one
+**Status:** current — 2026-10-31; steps 1–4 done, step 5 next. This directory holds **one
 current rollout at a time**; this document is it, and each working session
 should update the progress table below. When the stage ships, this file
 moves to `docs/rollout/archive/<date>-<slug>.md` and the next rollout
@@ -20,7 +20,7 @@ Status line truthful.
 | 1 | Database image switch to `timescaledb-ha` | S, risky | — | **done** 2026-10-29 |
 | 2 | Knowledge schema migration + statements | M | 1 | **done** 2026-10-30 |
 | 3 | Assets and aliases from `tokens.yaml` | S | 2 | **done** 2026-10-30 |
-| 4 | Documents: normalise, hash, chunk | S | 2 | not started |
+| 4 | Documents: normalise, hash, chunk | S | 2 | **done** 2026-10-31 |
 | 5 | Embeddings: Protocol, local provider, HNSW proven | M | 2, 4 | not started |
 | 6 | Tavily source, budget guard, `source_call` ledger | M | 2 | not started |
 | 7 | Hybrid retrieval with the no-look-ahead bound | M | 3, 4, 5 | not started |
@@ -161,6 +161,31 @@ case folded, two phrasings of one URL hash equal; chunk boundaries never
 mid-sentence; ordinals stable; `published_at` absent stays `NULL`
 (invariant 11's shape). Integration: upserting the same document twice
 stores it once.
+
+**Outcome (2026-10-31).** Done. `candlegraph/knowledge/documents.py`:
+`normalise_url` folds whitespace, a missing scheme, `http`→`https`, scheme
+and host case, a leading `www.`, default ports, credentials, repeated and
+trailing slashes, tracking parameters (`utm_*`, `fbclid`, `gclid`, `ref`,
+…) and the fragment, then sorts what remains; path case and substantive
+query parameters are kept because they select documents; `mailto:` and
+friends are refused while `host:8080/path` is accepted. `url_hash` is
+sha256 of that string. `chunk_text` packs sentences (regex sentence split
+that survives decimals and closing quotes) into chunks of 300–500 "tokens"
+(words + punctuation, a model-free proxy), closing at paragraph ends once
+`min_tokens` is reached, carrying up to 50 tokens of trailing sentences
+into the next chunk and never a whole chunk, never splitting a sentence —
+an oversized sentence is its own chunk. `store_document` upserts on
+`url_hash` (a known `published_at` is kept when the new copy has none,
+`meta` merged, title not erased by `NULL`), upserts chunks on
+`(document_id, ordinal)`, clears the embedding of any chunk whose text
+changed, and removes tail chunks past the new count. `ensure_source`
+registers a source idempotently. 79 unit tests (every folded rule, every
+kept rule, every refusal, chunk boundaries and overlap, determinism, config
+validation, the offline write order) and 8 integration tests (one row for
+two spellings, NULL date stays NULL then is kept once known, stable
+ordinals with the `tsvector` populated, shortened document loses its tail,
+changed text loses its embedding while unchanged keeps it, metadata merge,
+FK refusal for an unknown source, idempotent source registration).
 
 ## Step 5 — Embeddings
 

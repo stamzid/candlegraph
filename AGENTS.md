@@ -93,9 +93,10 @@ candlegraph/
   ui/
     viewmodels.py      Everything the UI computes. Plain Python, fully tested.
     app.py             The Streamlit script: widgets and charts only.
-  knowledge/           Stage 1, growing with docs/rollout/ROLLOUT.md. So far: schema + assets.
+  knowledge/           Stage 1, growing with docs/rollout/ROLLOUT.md. So far: schema, assets, documents.
     statements.py      Every SQL statement for the knowledge tables, built per schema.
     assets.py          tokens.yaml aliases -> asset rows. Pure transform + one upsert.
+    documents.py       URL normalisation -> url_hash, sentence-boundary chunking (pure), document/chunk upserts.
   agents/              LangGraph graphs. Readers and reporters; never writers of market data.
     base.py            Severity, Finding, AgentReport: the vocabulary every graph speaks.
     shell.py           Subprocess runner behind a Protocol, plus secret redaction.
@@ -136,7 +137,7 @@ schema.graphql       Generated. `make sdl`; a test fails if it is stale.
 | `agent_run` | one row per agent graph run | `run_id` | plain |
 | `asset` | one row per knowledge entity (token addresses today) | `id` | plain |
 | `source` | one row per document source (`tavily`, `rss:<feed>`, `manual`) | `id` | plain |
-| `document` | one row per retrieved document | `url_hash` (unique) | plain |
+| `document` | one row per retrieved document | `url_hash` (unique; sha256 of the normalised URL) | plain |
 | `chunk` | one embedded piece of a document | `(document_id, ordinal)` | plain — the ANN index must be global |
 | `mention` | a chunk naming an asset | `(chunk_id, asset_id, method)` | plain |
 | `edge` | a derived, time-bounded relation between assets | `(from_id, to_id, relation, valid_from)` | plain |

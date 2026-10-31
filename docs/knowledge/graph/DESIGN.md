@@ -1,10 +1,11 @@
 # Knowledge graph: schema, retrieval, and how it attaches to what exists
 
-**Status:** in progress — 2026-10-30. The schema (all eight tables, pgvector
-installed, revision `f399ca0770a0`) and the asset sync
-(`candlegraph knowledge sync-assets`, aliases in `config/tokens.yaml`) are
-implemented — rollout steps 2 and 3. Documents, embeddings, Tavily,
-retrieval, and `--explain` are still design only.
+**Status:** in progress — 2026-10-31. The schema (all eight tables, pgvector
+installed, revision `f399ca0770a0`), the asset sync
+(`candlegraph knowledge sync-assets`, aliases in `config/tokens.yaml`) and
+the document pipeline (`knowledge/documents.py`: URL normalisation,
+`url_hash`, chunking, the upserts) are implemented — rollout steps 2–4.
+Embeddings, Tavily, retrieval, and `--explain` are still design only.
 **Area (when built):** `candlegraph/knowledge/`, `alembic/versions/`,
 `candlegraph/cli.py` (`signals --explain`, `knowledge *`),
 `candlegraph/agents/observer/` (one new collect node)
@@ -198,9 +199,16 @@ Decisions inside that schema:
   are config, maintained in `config/tokens.yaml` next to the symbol, and
   loaded into `asset` by a `knowledge sync-assets` command.
 - **`document.url_hash` is the idempotency key.** Searching twice for the
-  same window must not store the same article twice. Normalise the URL
-  (scheme, host case, tracking parameters stripped) and hash it; upsert on
-  the hash. Invariant 4's shape, applied to text.
+  same window must not store the same article twice. Normalise the URL and
+  hash it; upsert on the hash. Invariant 4's shape, applied to text. What
+  the normaliser folds (implemented, step 4): `http`→`https`, scheme and
+  host case, a leading `www.`, default ports, credentials, repeated and
+  trailing slashes, tracking parameters (`utm_*`, click and campaign ids,
+  `ref`), the fragment, and query-parameter order. What it keeps, because
+  on many sites they select different documents: path case and every
+  non-tracking parameter with its value. A re-stored document keeps a
+  known `published_at` when the new copy has none, and a chunk whose text
+  changed loses its embedding so a stale vector never describes new text.
 - **`published_at` is nullable and never defaulted.** Search results often
   lack a date. An unknown date must not become "now", because the
   no-look-ahead rule depends on this column; a chunk with a NULL

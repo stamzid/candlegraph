@@ -99,6 +99,21 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   `docker system prune` or delete volumes by hand to fix a candlegraph
   start-up problem: other projects' databases live on the same daemon, and
   `make reset` deletes exactly one volume and one image.
+- A document is keyed by `url_hash`, which is sha256 of
+  `knowledge.documents.normalise_url(url)` — never of the raw string. If a
+  source hands you a URL, call `store_document` and let it hash; two
+  spellings of one address must land on one row (there is a test for the
+  pair `http://www.x.com/a/?utm_source=m` and `https://x.com/a`). Never
+  default `published_at`: an unknown date is `NULL`, and the no-look-ahead
+  rule reads that column.
+- The UI's units are fixed: rates in **percent per year**, trading costs
+  in **basis points**; the CLI and `.env` take rates as decimal fractions
+  (`0.04` = 4%) and say so in their help. Do not add an input that leaves
+  the unit implicit.
+- Anything in the UI that spends network or writes rows (a backfill, an
+  observer run) is behind an explicit button, and a backfill additionally
+  behind a confirmation step. Keep it that way: Streamlit re-runs the
+  script on every widget change, so an unguarded call runs on every click.
 - Several Claude sessions can run in this repository at once, each in its
   own worktree. Use a unique `COMPOSE_PROJECT_NAME` and host ports, and put
   scratch files under a session-unique path in `/tmp`; two sessions writing

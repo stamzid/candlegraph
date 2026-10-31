@@ -5,8 +5,10 @@ description: Build or extend candlegraph's knowledge layer (stage 1) — the pgv
 
 # Extend the knowledge graph
 
-The layer is **designed, not built**. Read `docs/knowledge/graph/DESIGN.md`
-first and the four companions as you reach them. Every step below exists
+The layer is **partly built**: the schema, the asset sync and the document
+pipeline (rollout steps 1–4) exist; embeddings onwards do not. Read
+`docs/knowledge/graph/DESIGN.md` first and the four companions as you reach
+them. Every step below exists
 because of a decision recorded there; do not reverse one in code without
 updating the document and its Status line.
 
@@ -47,8 +49,11 @@ wins and this summary gets fixed.
 ## 2. Adding a source
 
 A source is a `Source` Protocol implementation in
-`candlegraph/knowledge/sources/`. It returns `RawDocument`s and **never
-writes**; `documents.py` does the upsert on `url_hash`. If it is metered,
+`candlegraph/knowledge/sources/`. It returns `RawDocument`s
+(`knowledge.documents.RawDocument`: source id, URL, text, optional title,
+`published_at` only when the source states it) and **never writes**;
+`documents.store_document` does the upsert on `url_hash` after
+`documents.ensure_source` has registered the source once. If it is metered,
 it reports a cost and the caller runs it through `budget.decide`. Every
 call, including refusals, is a `source_call` row. Tests use
 `httpx.MockTransport` with recorded responses (invariant 2).

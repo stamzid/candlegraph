@@ -258,7 +258,7 @@ Spearman is itself a finding.
 **Beta** of $a$ on $b$ — how much $a$ moves per unit move in $b$:
 
 $$
-\beta_{ab} = \frac{\operatorname{Cov}(\ell^a, \ell^b)}{\operatorname{Var}(\ell^b)}
+\beta_{ab} = \frac{\mathrm{Cov}(\ell^a, \ell^b)}{\mathrm{Var}(\ell^b)}
 $$
 
 A beta of 1.5 means $a$ tends to move 1.5% when $b$ moves 1%. It is the
@@ -353,7 +353,7 @@ over one common set of bars:
 $$
 \hat{\mu} = A\,\bar{\ell}
 \qquad\qquad
-\hat{\Sigma} = A\,\operatorname{Cov}(\ell)\ \ (\text{sample, } n-1)
+\hat{\Sigma} = A\,\mathrm{Cov}(\ell)\ \ (\text{sample, } n-1)
 $$
 
 Sample covariance over a few thousand bars and ten assets is noisy, and an
@@ -361,7 +361,7 @@ optimiser will happily bet the book on that noise. **Shrinkage** pulls the
 matrix part of the way towards its own diagonal:
 
 $$
-\Sigma_\delta = (1-\delta)\,\hat{\Sigma} + \delta\,\operatorname{diag}(\hat{\Sigma}),\qquad \delta\in[0,1]
+\Sigma_\delta = (1-\delta)\,\hat{\Sigma} + \delta\,\mathrm{diag}(\hat{\Sigma}),\qquad \delta\in[0,1]
 $$
 
 At $\delta = 0$ nothing changes; at $\delta = 1$ every covariance is zeroed
@@ -437,6 +437,13 @@ through the backtester, and compared against equal weight — is stage 4's
 "walk-forward evaluation as a command". Until then the honest reading of a
 `portfolio` result is *descriptive*: this is the mix that was efficient in
 hindsight over the window, with the estimation error that implies.
+
+One guard, added 2026-10-31: the annualised expected return $A\,\bar{\ell}$
+is a linear scaling and can fall below $-100\%$ on a collapsing token
+(a steady $-0.05\%$ an hour reads as "$-440\%$ a year"). No long-only book
+can lose more than everything, so the result is reported as $-100\%$ and
+flagged `capped`, in the CLI and the UI alike. A `target_return` at or
+below $-100\%$ is rejected for the same reason.
 
 Three things to expect, none of them bugs: the optimiser loves stablecoins
 (USD-priced assets with near-zero variance dominate any minimum-risk

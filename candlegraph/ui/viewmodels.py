@@ -53,15 +53,70 @@ from candlegraph.analytics.rolling import (
     rolling_summary,
     simple_returns,
 )
+from candlegraph.ingestion.runner import IngestResult, run_ingest
 from candlegraph.settings import Settings
 from candlegraph.storage import DatabaseManager
 from candlegraph.strategies import backtest, run_strategy
 from candlegraph.strategies.backtest import BacktestConfig, BacktestResult
 from candlegraph.strategies.base import StrategyResult
+from candlegraph.tokens import get_token_registry
 
 
 class ViewError(RuntimeError):
     """Something the user needs to fix, phrased for the screen rather than a log."""
+
+
+# --- sensible defaults ---------------------------------------------------------
+
+# What a trader expects to see first. Alphabetical order put AAVE on every
+# screen; the most liquid token is the right opening position.
+DEFAULT_SYMBOL = "WBTC"
+# A dollar: the natural reference for "how did this do", and a stable leg for
+# the relative-value ratio.
+DEFAULT_BENCHMARK = "USDT"
+# USD-pegged assets have near-zero variance and swallow any minimum-risk
+# objective, so a default book leaves them out. They are one click away.
+STABLECOINS = frozenset({"USDC", "USDT", "DAI"})
+# A quarter of the book per token: diversified by default, overridable.
+DEFAULT_MAX_WEIGHT = 0.25
+MAX_WEIGHT_STEP = 0.05
+# The windows the Data dashboard offers for a backfill.
+BACKFILL_CHOICES: dict[str, int] = {"7 days": 7, "30 days": 30, "90 days": 90, "180 days": 180, "1 year": 365}
+
+
+def default_index(options: list[str], preferred: str = DEFAULT_SYMBOL, exclude: str | None = None) -> int:
+    """Position of ``preferred`` in ``options``, or the first option that is not ``exclude``."""
+    if preferred in options and preferred != exclude:
+        return options.index(preferred)
+    for position, option in enumerate(options):
+        if option != exclude:
+            return position
+    return 0
+
+
+def default_portfolio_symbols(symbols: list[str], limit: int = 5) -> list[str]:
+    """The opening book: majors first, stablecoins out, at most ``limit`` names.
+
+    Falls back to whatever is stored when nothing but stablecoins is.
+    """
+    preferred = [s for s in (DEFAULT_SYMBOL, "WETH") if s in symbols]
+    others = [s for s in symbols if s not in preferred and s not in STABLECOINS]
+    chosen = (preferred + others)[:limit]
+    return chosen if len(chosen) >= 2 else symbols[:limit]
+
+
+def default_max_weight(
+    n_assets: int, target: float = DEFAULT_MAX_WEIGHT, step: float = MAX_WEIGHT_STEP
+) -> float:
+    """``target`` unless fewer than ``1/target`` assets make it infeasible; then the feasible floor.
+
+    Two tokens capped at 25% each cannot sum to one; the slider has to open on
+    a value the optimiser can satisfy, rounded up to the slider's own step.
+    """
+    if n_assets <= 0:
+        return 1.0
+    floor = float(np.ceil((1.0 / n_assets) / step - 1e-9) * step)
+    return float(min(1.0, max(target, floor)))
 
 
 # --- shared loading ----------------------------------------------------------
@@ -626,3 +681,22 @@ def run_observer_now(settings: Settings, db: DatabaseManager) -> AgentReport:
     """
     sinks = build_sinks(settings, db=db, names=("ledger",))
     return run_observer(settings, db=db, sinks=sinks)
+
+
+# --- data dashboard ------------------------------------------------------------
+
+
+def run_backfill(settings: Settings, db: DatabaseManager, days: int) -> IngestResult:
+    """One backfill over ``days`` of history, recorded in the ingest ledger.
+
+    The same code path as ``candlegraph backfill --days N``: it rewinds past
+    the stored history (invariant 13), upserts on the natural key so nothing
+    is duplicated, and never deletes. The caller is responsible for having
+    asked the user first — a backfill is minutes of network and thousands of
+    writes, which is why the dashboard confirms before calling this.
+    """
+    if days < 1:
+        raise ViewError("A backfill needs at least one day.")
+    if settings.graph_api_key is None:
+        raise ViewError("GRAPH_API_KEY is not set in this process; the UI cannot reach the subgraph.")
+    return run_ingest(db, get_token_registry(), settings, trigger="backfill", lookback_days=days)

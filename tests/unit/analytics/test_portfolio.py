@@ -307,3 +307,37 @@ def test_the_frame_view_is_sorted_by_weight(two_asset_returns: pd.DataFrame) -> 
     frame = optimise_portfolio(two_asset_returns, PortfolioConfig(objective="min_volatility")).as_frame()
 
     assert list(frame["weight"]) == sorted(frame["weight"], reverse=True)
+
+
+# --- common sense over arithmetic -------------------------------------------------
+
+
+def test_an_expected_return_below_minus_one_hundred_percent_is_capped_and_flagged() -> None:
+    """Linear annualisation of a collapsing token says "-140% a year"; nothing loses more than all."""
+    from tests.unit.analytics.conftest import hourly_index
+
+    n = 500
+    # A steady -0.05% per hour is about -440% a year under linear annualisation.
+    collapsing = pd.DataFrame(
+        {"DOOM": np.full(n, -0.0005), "ALSO": np.full(n, -0.0004) + np.linspace(0, 1e-6, n)},
+        index=hourly_index(n),
+    )
+
+    result = optimise_portfolio(collapsing, PortfolioConfig(objective="equal_weight"))
+
+    assert result.capped is True
+    assert result.expected_return == -1.0
+    assert "capped" in result.message
+    assert "capped at -100%" in format_portfolio(result)
+
+
+def test_a_sane_portfolio_is_not_flagged_as_capped(two_asset_returns: pd.DataFrame) -> None:
+    result = optimise_portfolio(two_asset_returns, PortfolioConfig())
+
+    assert result.capped is False
+    assert "capped" not in format_portfolio(result)
+
+
+def test_a_target_return_at_or_below_minus_one_hundred_percent_is_rejected() -> None:
+    with pytest.raises(PortfolioError, match="not a return"):
+        PortfolioConfig(objective="target_return", target_return=-1.0)

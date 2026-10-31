@@ -35,6 +35,9 @@ OBJECTIVES: tuple[Objective, ...] = (
 # that are noise, not positions.
 WEIGHT_EPSILON = 1e-6
 
+# The floor on a reported annual expected return. See `PortfolioResult.capped`.
+MIN_EXPECTED_RETURN = -1.0
+
 
 class PortfolioError(ValueError):
     """The optimisation cannot be set up or did not converge."""
@@ -79,6 +82,8 @@ class PortfolioConfig:
             raise PortfolioError("max_weight must be positive")
         if self.objective == "target_return" and self.target_return is None:
             raise PortfolioError("objective 'target_return' needs target_return to be set")
+        if self.target_return is not None and self.target_return <= -1.0:
+            raise PortfolioError("a target return at or below -100% is not a return a portfolio can earn")
 
     def bounds_for(self, n_assets: int) -> list[tuple[float, float]]:
         """Per-asset ``(low, high)`` bounds, validated for feasibility."""
@@ -114,6 +119,10 @@ class PortfolioResult:
     converged: bool
     message: str = ""
     diversification: float = 0.0
+    capped: bool = False
+    """True when the annualised expected return fell below -100% and was
+    reported as -100%. Linear annualisation of a collapsing token's mean
+    log return can say "-140% a year"; nothing can lose more than everything."""
 
     def as_frame(self) -> pd.DataFrame:
         """Weights as a one-column frame, largest first."""
@@ -302,6 +311,13 @@ def _result_from(
     cleaned = np.where(np.abs(weights) < WEIGHT_EPSILON, 0.0, weights)
     expected = portfolio_return(cleaned, mu)
     volatility = portfolio_volatility(cleaned, sigma)
+    # Common sense over arithmetic: an annualised mean log return can scale
+    # past -100% on a collapsing asset. A long-only book cannot lose more than
+    # everything, so the report says -100% and flags that it was capped.
+    capped = expected < MIN_EXPECTED_RETURN
+    if capped:
+        expected = MIN_EXPECTED_RETURN
+        message = f"{message}; expected return capped at -100% (annualised estimate was lower)".strip("; ")
     sharpe = (expected - config.risk_free_rate) / volatility if volatility > 1e-12 else 0.0
 
     # Weighted average of individual vols over portfolio vol: 1.0 means no
@@ -320,6 +336,7 @@ def _result_from(
         converged=converged,
         message=message,
         diversification=float(diversification),
+        capped=capped,
     )
 
 
@@ -388,4 +405,6 @@ def format_portfolio(result: PortfolioResult) -> str:
     ]
     if not result.converged:
         lines.append(f"WARNING: optimiser did not converge: {result.message}")
+    if result.capped:
+        lines.append("NOTE: expected return capped at -100%; the annualised estimate was lower")
     return "\n".join(lines)

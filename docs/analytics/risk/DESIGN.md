@@ -67,9 +67,9 @@ the residual is uncorrelated with the benchmark by construction, the
 token's variance splits cleanly in two:
 
 $$
-\underbrace{\operatorname{Var}(r^a)}_{\text{total}}
-= \underbrace{\beta^2\,\operatorname{Var}(r^m)}_{\text{systematic}}
-+ \underbrace{\operatorname{Var}(\varepsilon)}_{\text{idiosyncratic}}
+\underbrace{\mathrm{Var}(r^a)}_{\text{total}}
+= \underbrace{\beta^2\,\mathrm{Var}(r^m)}_{\text{systematic}}
++ \underbrace{\mathrm{Var}(\varepsilon)}_{\text{idiosyncratic}}
 $$
 
 **Systematic** (market, undiversifiable) risk is the part that comes from
@@ -81,7 +81,7 @@ towards zero. The share of total variance that is systematic is $R^2$, the
 squared correlation:
 
 $$
-\text{systematic share} = \frac{\beta^2\operatorname{Var}(r^m)}{\operatorname{Var}(r^a)} = \rho_{am}^2 = R^2
+\text{systematic share} = \frac{\beta^2\mathrm{Var}(r^m)}{\mathrm{Var}(r^a)} = \rho_{am}^2 = R^2
 $$
 
 In plain words: an $R^2$ of 0.7 means seventy percent of this token's
@@ -99,7 +99,7 @@ than any one of them.
 - **Aligned bars only.** The regression uses the hours both the token and
   the benchmark traded, the same rule as `compare` (invariant 19's
   consequence). The report says how many bars survived.
-- **The split is exact.** Systematic variance is $\beta^2 \operatorname{Var}(r^m)$;
+- **The split is exact.** Systematic variance is $\beta^2 \mathrm{Var}(r^m)$;
   idiosyncratic is total minus that, which the Cauchy–Schwarz inequality
   keeps non-negative; so the two shares sum to one by construction and a test
   pins it.
@@ -225,6 +225,11 @@ correlated assets has a smaller VaR than its riskier leg, and a test says so.
 - **Arithmetic returns**, because a loss is a fraction of money, not a log;
   at hourly horizons the two are within rounding. Everything else in the
   package uses log returns for the reasons in the models document.
+- **No loss above 100%.** The parametric estimators scale a per-bar sigma by
+  $\sqrt{h}$ with nothing to stop them past a total loss; a long position
+  cannot lose more than everything, so every reported VaR and CVaR is
+  capped at 100% (tested for all three estimators over a one-week horizon
+  on absurdly volatile data).
 - **Minimum 30 observations** (`min_observations`). A 95% VaR from 20 bars is
   the single worst bar wearing a statistic's name; the function refuses
   rather than guesses (invariant 11's spirit: a number that is not there is
