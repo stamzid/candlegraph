@@ -26,6 +26,7 @@ from candlegraph.ui.viewmodels import (
     build_agents_view,
     build_forecast,
     build_market_view,
+    build_news_view,
     build_pair_view,
     build_portfolio_view,
     build_risk_view,
@@ -38,6 +39,7 @@ from candlegraph.ui.viewmodels import (
     forecast_frame,
     load_prices,
     run_backfill,
+    run_news_fetch_now,
     run_observer_now,
 )
 from tests.conftest import FakeDatabase, make_settings
@@ -605,3 +607,118 @@ def test_a_backfill_reaches_the_ingest_runner_as_a_backfill_trigger(
 
     assert run_backfill(make_settings(tokens_file=str(tokens_file)), FakeDatabase(), 90) == "result"
     assert captured == {"trigger": "backfill", "lookback_days": 90}
+
+
+# --- the news view -------------------------------------------------------------------
+
+
+def source_call_row(status: str = "ok", credits: int = 1) -> dict[str, Any]:
+    return {
+        "called_at": datetime(2026, 11, 1, 14, 0, tzinfo=UTC),
+        "status": status,
+        "credits": credits,
+        "results": 5,
+        "query": "WBTC crypto news",
+        "error": None,
+    }
+
+
+def news_db(**overrides: Any) -> FakeDatabase:
+    reads: dict[str, Any] = {
+        "source_spend": [{"month": 820, "today": 4}],
+        "get_recent_source_calls": [
+            source_call_row("ok"),
+            source_call_row("error"),
+            source_call_row("budget_refused", credits=0),
+            source_call_row("ok"),
+        ],
+        "source_call_daily_stats": [
+            {
+                "day": "2026-11-01",
+                "calls": 4,
+                "credits": 3,
+                "results": 10,
+                "ok": 2,
+                "errors": 1,
+                "rate_limited": 0,
+                "refused": 1,
+            }
+        ],
+        "get_recent_source_documents": [
+            {
+                "id": 1,
+                "title": "A story",
+                "url": "https://x.com/a",
+                "published_at": None,
+                "retrieved_at": datetime(2026, 11, 1, tzinfo=UTC),
+            }
+        ],
+        "count_source_documents": [
+            {"documents": 7, "chunks": 30, "embedded": 20, "undated": 1, "last_retrieved_at": None}
+        ],
+        "count_embedding_backlog": [{"missing": 8, "stale": 2, "total": 30}],
+    }
+    reads.update(overrides)
+    return FakeDatabase(**reads)
+
+
+def test_the_news_view_reads_the_budget_the_ledger_and_the_corpus(tokens_file: Any) -> None:
+    settings = make_settings(
+        tokens_file=str(tokens_file), tavily_monthly_credits=1000, tavily_daily_credits=40
+    )
+
+    view = build_news_view(news_db(), settings, now=datetime(2026, 11, 1, 15, 0, tzinfo=UTC))
+
+    assert (view.spent_month, view.spent_today) == (820, 4)
+    assert view.monthly_usage == pytest.approx(0.82)
+    assert view.level == "warning", "82% of the month is the observer's WARNING"
+    assert view.daily_usage == pytest.approx(0.10)
+    assert view.outcome_counts == {"ok": 2, "error": 1, "budget_refused": 1}
+    assert view.last_call is not None and view.last_call["status"] == "ok"
+    assert view.corpus["documents"] == 7
+    assert view.embedding_pending == 10
+    assert list(view.documents.columns) == ["retrieved_at", "published_at", "title", "url"]
+
+
+def test_an_untouched_ledger_renders_a_calm_empty_view(tokens_file: Any) -> None:
+    view = build_news_view(FakeDatabase(), make_settings(tokens_file=str(tokens_file)))
+
+    assert (view.spent_month, view.spent_today) == (0, 0)
+    assert view.level == "ok"
+    assert view.last_call is None
+    assert view.outcome_counts == {}
+    assert view.calls.empty and view.daily.empty and view.documents.empty
+    assert view.embedding_pending == 0
+
+
+def test_an_exhausted_month_grades_critical(tokens_file: Any) -> None:
+    db = news_db(source_spend=[{"month": 1000, "today": 0}])
+
+    view = build_news_view(db, make_settings(tokens_file=str(tokens_file), tavily_monthly_credits=1000))
+
+    assert view.level == "critical"
+
+
+def test_run_news_fetch_now_turns_a_missing_key_into_a_readable_error(tokens_file: Any) -> None:
+    settings = make_settings(tokens_file=str(tokens_file), tavily_api_key=None)
+
+    with pytest.raises(ViewError, match="TAVILY_API_KEY"):
+        run_news_fetch_now(settings, FakeDatabase())
+
+
+def test_the_agents_view_summarises_the_news_runs() -> None:
+    db = FakeDatabase(
+        get_recent_source_calls=[source_call_row("rate_limited"), source_call_row("ok")],
+    )
+
+    view = build_agents_view(db)
+
+    assert view.news_status == "rate_limited", "the newest call's outcome leads"
+    assert view.news_counts == {"rate_limited": 1, "ok": 1}
+
+
+def test_the_agents_view_without_news_calls_says_none() -> None:
+    view = build_agents_view(FakeDatabase())
+
+    assert view.news_status == "none"
+    assert view.news_counts == {}

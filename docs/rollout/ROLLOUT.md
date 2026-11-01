@@ -1,6 +1,6 @@
 # Rollout: stage 1 — the knowledge graph on pgvector
 
-**Status:** current — 2026-11-01; steps 1–5 done, step 6 next. This directory holds **one
+**Status:** current — 2026-11-01; steps 1–6 done, step 7 next. This directory holds **one
 current rollout at a time**; this document is it, and each working session
 should update the progress table below. When the stage ships, this file
 moves to `docs/rollout/archive/<date>-<slug>.md` and the next rollout
@@ -22,7 +22,7 @@ Status line truthful.
 | 3 | Assets and aliases from `tokens.yaml` | S | 2 | **done** 2026-10-30 |
 | 4 | Documents: normalise, hash, chunk | S | 2 | **done** 2026-10-31 |
 | 5 | Embeddings: Protocol, local provider, HNSW proven | M | 2, 4 | **done** 2026-11-01 |
-| 6 | Tavily source, budget guard, `source_call` ledger | M | 2 | not started |
+| 6 | Tavily source, budget guard, `source_call` ledger | M | 2 | **done** 2026-11-01 |
 | 7 | Hybrid retrieval with the no-look-ahead bound | M | 3, 4, 5 | not started |
 | 8 | `signals --explain`: explain, validate, cache | L | 6, 7 | not started |
 | 9 | Observer: `collect_knowledge` + four findings | S | 6, 8 | not started |
@@ -248,6 +248,33 @@ reserve; client against `httpx.MockTransport` fixtures including a 429
 is a `SecretStr` and never appears in any log or report (reuse the shell
 redaction test pattern). Integration: refusals land as
 `status=budget_refused` with zero credits.
+
+**Outcome (2026-11-01).** Done, plus the operator surface. Pricing
+re-checked: free tier still 1,000 credits/month; costs pinned in
+`SEARCH_COST`. `knowledge/budget.py` (pure `Budget`/`decide`, refusal
+reasons `daily`/`monthly`/`reserve`, the 80%/100% `usage_level` grading);
+`knowledge/sources/base.py` (`Source` Protocol) and `sources/tavily.py`
+(Bearer auth, bounded news search with `include_raw_content`, backoff on
+transport/5xx, **429/432 never retried**, both `published_date` shapes
+parsed, unknown dates stay NULL); `knowledge/news.py` (the pipeline:
+ledger-backed `(asset, UTC day)` cache → guard → search →
+`store_document` → `source_call` row; refusals are rows with zero
+credits; an error continues, a rate limit halts the run); migration
+`35826afa331a` widens the status check to `rate_limited` (downgrade folds
+rows into `error`, round-tripped on a populated table). Settings
+`TAVILY_*` + `KNOWLEDGE_SEARCH_WINDOW_HOURS`; CLI
+`knowledge fetch-news`; `make fetch-news`; a **News** dashboard in the UI
+(budget runway, credit burn vs the daily cap, call outcomes per day, the
+full ledger, fresh documents, a fetch button behind confirmation) and a
+minimal news-health strip on the Agents dashboard. The shell redaction
+gained a `tvly-` pattern. 63 unit tests (budget boundaries at the caps and
+the reserve, the client against recorded `MockTransport` fixtures
+including 429-not-retried and empty content, the pipeline's cache/budget/
+halt behaviour, the key never in an error or report) and 6 integration
+tests (refusal lands as `budget_refused` with zero credits, the cache
+survives processes via the ledger, `rate_limited` accepted and the
+migration round-trips, UTC spend sums). The earlier knowledge round-trip
+test now downgrades to its own revision explicitly instead of `-1`.
 
 ## Step 7 — Hybrid retrieval
 

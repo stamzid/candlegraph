@@ -290,3 +290,50 @@ def test_knowledge_embed_with_a_misconfigured_provider_exits_with_the_message(
 
     with pytest.raises(SystemExit, match="EMBEDDING_PROVIDER"):
         main(["knowledge", "embed"])
+
+
+def test_knowledge_fetch_news_prints_outcomes_and_exits_zero_when_clean(
+    cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from candlegraph.knowledge.news import FetchOutcome, NewsFetchSummary
+
+    captured: dict[str, Any] = {}
+
+    def fake(db: Any, settings: Any, symbols: Any = None) -> NewsFetchSummary:
+        captured["symbols"] = symbols
+        return NewsFetchSummary(
+            day="2026-11-01",
+            outcomes=[
+                FetchOutcome("WBTC", "ok", credits=1, results=5, documents_stored=3, chunks_written=9),
+                FetchOutcome("SHIB", "budget_refused", message="daily cap reached"),
+            ],
+        )
+
+    monkeypatch.setattr("candlegraph.knowledge.news.run_news_fetch", fake)
+
+    assert main(["knowledge", "fetch-news", "--symbol", "WBTC", "--symbol", "SHIB"]) == 0
+
+    out = capsys.readouterr().out
+    assert captured["symbols"] == ["WBTC", "SHIB"]
+    assert "budget_refused" in out and "daily cap reached" in out
+    assert "spent 1 credits, stored 3 documents" in out
+
+
+def test_knowledge_fetch_news_exits_non_zero_on_a_failed_run(
+    cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from candlegraph.knowledge.news import FetchOutcome, NewsFetchSummary
+
+    monkeypatch.setattr(
+        "candlegraph.knowledge.news.run_news_fetch",
+        lambda db, settings, symbols=None: NewsFetchSummary(
+            day="2026-11-01", outcomes=[FetchOutcome("WBTC", "rate_limited", message="HTTP 429")]
+        ),
+    )
+
+    assert main(["knowledge", "fetch-news"]) == 1
+
+
+def test_knowledge_fetch_news_without_a_key_exits_with_the_message(cli_env: FakeDatabase) -> None:
+    with pytest.raises(SystemExit, match="TAVILY_API_KEY"):
+        main(["knowledge", "fetch-news"])

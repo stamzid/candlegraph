@@ -1,6 +1,14 @@
 # Tavily: web search as a metered source
 
-**Status:** proposed — 2026-10-29
+**Status:** implemented — 2026-11-01 (rollout step 6): the client
+(`knowledge/sources/tavily.py`), the pure guard (`knowledge/budget.py`),
+the pipeline that wraps cache, budget and ledger around every call
+(`knowledge/news.py`), `candlegraph knowledge fetch-news`, and the News
+dashboard. The `explain()` wiring in the diagram below is step 8; until
+then the pipeline is driven by the CLI, the UI, and later the scheduler.
+Pricing re-checked 2026-11-01: the free tier is still 1,000 credits a
+month; the per-search costs (basic 1, advanced 2) are pinned in
+`sources/tavily.py::SEARCH_COST` and were not contradicted by the page.
 **Decision:** a typed REST client in `candlegraph/knowledge/sources/tavily.py`
 behind a `Source` Protocol, a pure budget guard over a `source_call` ledger,
 and a cache keyed on `(asset, UTC day)` so that the number of network calls
@@ -143,6 +151,17 @@ The observer's `collect_knowledge` node reads this table and reports
 `source_budget` (OK / WARNING at 80% / CRITICAL at 100%) and
 `source_errors` (a failure streak, same threshold as ingest runs). Nothing
 else in the system reads Tavily's state; the ledger is the one place.
+
+## As built (2026-11-01)
+
+| Piece | Where | Notes |
+|---|---|---|
+| `Source` Protocol | `knowledge/sources/base.py` | `id`, `kind`, `cost`, `search(query, start, end, max_results) -> SearchResult`; a source never writes and never decides |
+| `TavilySource` | `knowledge/sources/tavily.py` | Bearer auth; `topic=news`, `start_date`/`end_date`, `include_raw_content=true`; backoff on transport errors and 5xx up to `TAVILY_MAX_TRIES`; **429/432 raise `TavilyRateLimitError` after zero retries**; empty-content results skipped and counted; `published_date` parsed from both its shapes, unknown stays `NULL` |
+| `Budget` / `decide` | `knowledge/budget.py` | pure, exactly the dataclass above; the most absolute refusal names itself (`monthly` > `reserve` > `daily`); `usage_level` holds the 80%/100% grading the observer and the UI share |
+| the pipeline | `knowledge/news.py` | per token: ledger-backed `(asset, UTC day)` cache → guard → search → `store_document` → `source_call` row. Refusals are rows with 0 credits; an error continues to the next token; a **rate limit halts the run** (the next call would spend budget on the same failure). The query is derived from the symbol and aliases so phrasing cannot cost a second credit |
+| the ledger | `source_call` + statements | `insert_source_call`, `source_spend` (UTC month/day sums), `cached_search_exists`, `source_call_daily_stats`, per-source corpus counts; status gained `rate_limited` (migration `35826afa331a`, downgrade folds rows into `error`) |
+| operator surface | `candlegraph knowledge fetch-news [--symbol S]`, `make fetch-news`; the UI's **News** dashboard (budget runway, burn, outcomes, ledger, fresh documents, a confirmed fetch button) and a news strip on the Agents dashboard | the CLI exits non-zero when a call errored or rate-limited; refusals and cache hits are expected behaviour, exit 0 |
 
 ## Growth path
 

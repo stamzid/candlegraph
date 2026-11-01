@@ -173,6 +173,12 @@ def _parser() -> argparse.ArgumentParser:
     knowledge_sub.add_parser(
         "sync-assets", help="upsert asset rows (addresses, symbols, aliases) from config/tokens.yaml"
     )
+    fetch = knowledge_sub.add_parser(
+        "fetch-news", help="one budgeted Tavily news search per token per UTC day; every call is ledgered"
+    )
+    fetch.add_argument(
+        "--symbol", action="append", default=None, help="only these tokens (repeatable; default: all tracked)"
+    )
     for name, text in (
         ("embed", "embed chunks that have no vector yet (or one from another model)"),
         ("reembed", "same as embed; the name to reach for after changing EMBEDDING_MODEL"),
@@ -773,6 +779,24 @@ def _knowledge(settings: Settings, args: argparse.Namespace) -> int:
             written = sync_assets(get_db(), get_token_registry())
             print(f"synced {written} assets from the token registry")
             return 0
+        case "fetch-news":
+            from candlegraph.knowledge.news import NewsError, run_news_fetch
+
+            try:
+                fetched = run_news_fetch(get_db(), settings, symbols=args.symbol)
+            except NewsError as exc:
+                raise SystemExit(str(exc)) from exc
+            print(f"{'token':<8}{'status':<16}{'credits':>8}{'results':>8}{'docs':>6}{'chunks':>7}  note")
+            for o in fetched.outcomes:
+                print(
+                    f"{o.symbol:<8}{o.status:<16}{o.credits:>8}{o.results:>8}"
+                    f"{o.documents_stored:>6}{o.chunks_written:>7}  {o.message[:60]}"
+                )
+            print(
+                f"spent {fetched.credits_spent} credits, stored {fetched.documents_stored} documents; "
+                "run `candlegraph knowledge embed` to vectorise the new chunks"
+            )
+            return 0 if fetched.ok else 1
         case "embed" | "reembed":
             db = get_db()
             try:

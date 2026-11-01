@@ -6,8 +6,8 @@ description: Build or extend candlegraph's knowledge layer (stage 1) — the pgv
 # Extend the knowledge graph
 
 The layer is **partly built**: the schema, the asset sync, the document
-pipeline and embeddings (rollout steps 1–5) exist; the Tavily source
-onwards does not. Read
+pipeline, embeddings, and the Tavily source with its budget guard and
+ledger (rollout steps 1–6) exist; retrieval onwards does not. Read
 `docs/knowledge/graph/DESIGN.md` first and the four companions as you reach
 them. Every step below exists
 because of a decision recorded there; do not reverse one in code without
@@ -50,14 +50,17 @@ wins and this summary gets fixed.
 ## 2. Adding a source
 
 A source is a `Source` Protocol implementation in
-`candlegraph/knowledge/sources/`. It returns `RawDocument`s
-(`knowledge.documents.RawDocument`: source id, URL, text, optional title,
-`published_at` only when the source states it) and **never writes**;
-`documents.store_document` does the upsert on `url_hash` after
-`documents.ensure_source` has registered the source once. If it is metered,
-it reports a cost and the caller runs it through `budget.decide`. Every
-call, including refusals, is a `source_call` row. Tests use
-`httpx.MockTransport` with recorded responses (invariant 2).
+`candlegraph/knowledge/sources/` — `base.py` has the Protocol, `tavily.py`
+the worked example. It returns `RawDocument`s (source id, URL, text,
+optional title, `published_at` only when the source states it) and **never
+writes, never decides**: run it through `news.fetch_news`, which owns the
+`(asset, UTC day)` cache, the `budget.decide` guard and the `source_call`
+row for every call, refusals included. A metered source states its `cost`
+property; a free one costs 0 but still gets ledger rows, because a rate
+limit is a budget too, and a rate-limited call halts the run rather than
+spending more on the same failure. Tests use `httpx.MockTransport` with
+recorded responses (invariant 2) and a scripted fake source for the
+pipeline (`tests/unit/knowledge/test_news.py` is the pattern).
 
 ## 3. Adding an entity type or alias
 

@@ -14,6 +14,7 @@ needs and raises :class:`ViewError` with a sentence a trader can act on.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -54,6 +55,10 @@ from candlegraph.analytics.rolling import (
     simple_returns,
 )
 from candlegraph.ingestion.runner import IngestResult, run_ingest
+from candlegraph.knowledge.budget import Level, usage_fraction, usage_level
+from candlegraph.knowledge.news import NewsError, NewsFetchSummary, budget_from, run_news_fetch, source_spend
+from candlegraph.knowledge.sources.tavily import SOURCE_ID as TAVILY
+from candlegraph.knowledge.statements import knowledge_statements_for
 from candlegraph.settings import Settings
 from candlegraph.storage import DatabaseManager
 from candlegraph.strategies import backtest, run_strategy
@@ -613,11 +618,27 @@ class AgentsView:
     """Newest first: started_at, status, token and pool rows written, duration."""
     coverage: pd.DataFrame
     """Per token: stored hours, expected hours, and their ratio."""
+    news_calls: pd.DataFrame = field(default_factory=pd.DataFrame)
+    """Recent Tavily calls, newest first — the minimal news-health strip here;
+    the News dashboard carries the full analysis."""
 
     @property
     def status(self) -> str:
         """The latest observer verdict: ``ok``/``info``/``warning``/``critical``/``error``."""
         return str(self.latest["status"]) if self.latest else "none"
+
+    @property
+    def news_status(self) -> str:
+        """The newest news call's outcome, or ``none`` before the first fetch."""
+        return "none" if self.news_calls.empty else str(self.news_calls.iloc[0]["status"])
+
+    @property
+    def news_counts(self) -> dict[str, int]:
+        """Recent call outcomes: the "were the news runs successful" numbers."""
+        if self.news_calls.empty:
+            return {}
+        counts = self.news_calls["status"].value_counts()
+        return {str(k): int(v) for k, v in counts.items()}
 
 
 def _findings_frame(rows: Any) -> pd.DataFrame:
@@ -653,6 +674,16 @@ def build_agents_view(db: DatabaseManager, limit: int = 30) -> AgentsView:
     if not ingest_runs.empty:
         ingest_runs = ingest_runs[[c for c in ingest_columns if c in ingest_runs.columns]]
 
+    news_columns = ["called_at", "status", "credits", "results", "query"]
+    news_calls = pd.DataFrame(
+        db.fetch_all(
+            knowledge_statements_for(db.schema).get_recent_source_calls,
+            {"source_id": "tavily", "limit": limit},
+        )
+    )
+    if not news_calls.empty:
+        news_calls = news_calls[[c for c in news_columns if c in news_calls.columns]]
+
     coverage_rows = db.fetch_all(db.sql.coverage_report, {"start_unix": None})
     coverage = pd.DataFrame(coverage_rows)
     if not coverage.empty:
@@ -668,7 +699,131 @@ def build_agents_view(db: DatabaseManager, limit: int = 30) -> AgentsView:
         findings=_findings_frame(latest.get("findings") if latest else None),
         ingest_runs=ingest_runs,
         coverage=coverage,
+        news_calls=news_calls,
     )
+
+
+# --- news (Tavily) dashboard ---------------------------------------------------
+
+
+@dataclass
+class NewsView:
+    """The metered news source: budget, ledger, and what the credits bought."""
+
+    source_id: str
+    monthly_cap: int
+    daily_cap: int
+    reserve: int
+    spent_month: int
+    spent_today: int
+    calls: pd.DataFrame
+    """Newest first: called_at, status, credits, results, query, error."""
+    daily: pd.DataFrame
+    """One row per UTC day: calls, credits, results, ok/errors/rate_limited/refused."""
+    documents: pd.DataFrame
+    """Newest stored news: retrieved_at, published_at, title, url."""
+    corpus: dict[str, Any]
+    """documents, chunks, embedded, undated, last_retrieved_at for this source."""
+    embedding_pending: int
+    """Chunks still waiting for the configured model's vector."""
+
+    @property
+    def monthly_usage(self) -> float:
+        return usage_fraction(self.spent_month, self.monthly_cap)
+
+    @property
+    def daily_usage(self) -> float:
+        return usage_fraction(self.spent_today, self.daily_cap)
+
+    @property
+    def level(self) -> Level:
+        """The observer's grading of monthly usage: ok / warning at 80% / critical at 100%."""
+        return usage_level(self.monthly_usage)
+
+    @property
+    def last_call(self) -> dict[str, Any] | None:
+        if self.calls.empty:
+            return None
+        return {str(k): v for k, v in self.calls.iloc[0].to_dict().items()}
+
+    @property
+    def outcome_counts(self) -> dict[str, int]:
+        """How the recent calls ended, for the status strip."""
+        if self.calls.empty:
+            return {}
+        counts = self.calls["status"].value_counts()
+        return {str(k): int(v) for k, v in counts.items()}
+
+
+def _one(rows: list[dict[str, Any]], default: dict[str, Any]) -> dict[str, Any]:
+    return rows[0] if rows else default
+
+
+def build_news_view(
+    db: DatabaseManager, settings: Settings, now: datetime | None = None, limit: int = 30
+) -> NewsView:
+    """Everything the News dashboard shows, from the ledger and the corpus."""
+    statements = knowledge_statements_for(db.schema)
+    moment = (now or datetime.now(tz=UTC)).astimezone(UTC)
+    budget = budget_from(settings)
+    month, today = source_spend(db, TAVILY, moment)
+
+    call_columns = ["called_at", "status", "credits", "results", "query", "error"]
+    calls = pd.DataFrame(
+        db.fetch_all(statements.get_recent_source_calls, {"source_id": TAVILY, "limit": limit})
+    )
+    if not calls.empty:
+        calls = calls[[c for c in call_columns if c in calls.columns]]
+
+    daily = pd.DataFrame(
+        db.fetch_all(
+            statements.source_call_daily_stats,
+            {"source_id": TAVILY, "since": moment - timedelta(days=30)},
+        )
+    )
+
+    documents = pd.DataFrame(
+        db.fetch_all(statements.get_recent_source_documents, {"source_id": TAVILY, "limit": limit})
+    )
+    if not documents.empty:
+        documents = documents[["retrieved_at", "published_at", "title", "url"]]
+
+    corpus = _one(
+        db.fetch_all(statements.count_source_documents, {"source_id": TAVILY}),
+        {"documents": 0, "chunks": 0, "embedded": 0, "undated": 0, "last_retrieved_at": None},
+    )
+    backlog = _one(
+        db.fetch_all(statements.count_embedding_backlog, {"model": settings.embedding_model}),
+        {"missing": 0, "stale": 0, "total": 0},
+    )
+
+    return NewsView(
+        source_id=TAVILY,
+        monthly_cap=budget.monthly_credits,
+        daily_cap=budget.daily_credits,
+        reserve=budget.reserve,
+        spent_month=month,
+        spent_today=today,
+        calls=calls,
+        daily=daily,
+        documents=documents,
+        corpus=dict(corpus),
+        embedding_pending=int(backlog["missing"]) + int(backlog["stale"]),
+    )
+
+
+def run_news_fetch_now(
+    settings: Settings, db: DatabaseManager, symbols: list[str] | None = None
+) -> NewsFetchSummary:
+    """One on-demand news fetch, phrased for the screen when it cannot run.
+
+    Every call it makes — including budget refusals — is a ``source_call``
+    row, so the dashboard above reflects it immediately.
+    """
+    try:
+        return run_news_fetch(db, settings, symbols=symbols)
+    except NewsError as exc:
+        raise ViewError(str(exc)) from exc
 
 
 def run_observer_now(settings: Settings, db: DatabaseManager) -> AgentReport:

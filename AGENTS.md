@@ -35,6 +35,7 @@ a target, and never let CI run something that is not one either.
 | Sync assets and aliases from `tokens.yaml` | `make sync-assets` (in the stack) or `candlegraph knowledge sync-assets` |
 | Stack plus the embedding model server | `make up-knowledge` (first start pulls `bge-m3`), `make logs-ollama` |
 | Embed chunks / re-encode after a model change | `make embed` / `make reembed` (or `candlegraph knowledge embed\|reembed`) |
+| Fetch news (one budgeted search per token per UTC day) | `make fetch-news` (or `candlegraph knowledge fetch-news [--symbol S]`) |
 | Rolling mean / volatility | `candlegraph stats WETH --window 24` |
 | Pairwise comparison | `candlegraph compare WETH WBTC` |
 | Signals | `candlegraph signals WETH --strategy bollinger [--store]` |
@@ -95,11 +96,16 @@ candlegraph/
   ui/
     viewmodels.py      Everything the UI computes. Plain Python, fully tested.
     app.py             The Streamlit script: widgets and charts only.
-  knowledge/           Stage 1, growing with docs/rollout/ROLLOUT.md. So far: schema, assets, documents, embeddings.
+  knowledge/           Stage 1, growing with docs/rollout/ROLLOUT.md. So far: schema, assets, documents, embeddings, Tavily.
     statements.py      Every SQL statement for the knowledge tables, built per schema.
     assets.py          tokens.yaml aliases -> asset rows. Pure transform + one upsert.
     documents.py       URL normalisation -> url_hash, sentence-boundary chunking (pure), document/chunk upserts.
     embed.py           Embedder Protocol; Ollama (bge-m3, default), OpenAI, and fake providers; resumable embed loop.
+    budget.py          Pure credit guard: caps, reserve, refusal reasons, the 80%/100% usage grading.
+    news.py            The pipeline around every source call: (asset, UTC day) cache, guard, store, source_call row.
+    sources/
+      base.py          Source Protocol: search(query, window) -> RawDocuments. Never writes, never decides.
+      tavily.py        The metered client: bounded news search, backoff on 5xx, 429/432 never retried.
   agents/              LangGraph graphs. Readers and reporters; never writers of market data.
     base.py            Severity, Finding, AgentReport: the vocabulary every graph speaks.
     shell.py           Subprocess runner behind a Protocol, plus secret redaction.
@@ -145,7 +151,7 @@ schema.graphql       Generated. `make sdl`; a test fails if it is stale.
 | `mention` | a chunk naming an asset | `(chunk_id, asset_id, method)` | plain |
 | `edge` | a derived, time-bounded relation between assets | `(from_id, to_id, relation, valid_from)` | plain |
 | `explanation` | one explained signal | `(strategy, symbol, period_start_unix)` | plain for now |
-| `source_call` | one metered-source call, refusals included | `id` | plain |
+| `source_call` | one metered-source call, refusals included; status `ok`/`error`/`budget_refused`/`rate_limited` | `id` | plain |
 
 The database is **TimescaleDB** (`timescale/timescaledb-ha:pg17.11-ts2.31.0`, pinned
 in compose, in CI, and in the testcontainer), not plain PostgreSQL. The `-ha`

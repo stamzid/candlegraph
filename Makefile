@@ -12,7 +12,7 @@ E2E_URL ?= http://localhost:$${APP_HOST_PORT:-8000}
 .PHONY: help install lock fmt fmt-check lint typecheck test test-unit test-integration \
         cov check up down reset logs logs-worker ps migrate revision e2e sdl clean \
         ingest backfill report runs ui logs-ui observe janitor agent-runs logs-agents sync-assets \
-        up-knowledge logs-ollama embed reembed
+        up-knowledge logs-ollama embed reembed fetch-news
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -110,6 +110,9 @@ up-knowledge: ## Start the stack plus the ollama embedding service (pulls the mo
 
 logs-ollama: ## Follow the embedding service log
 	$(COMPOSE) --profile knowledge logs -f ollama
+
+fetch-news: ## One budgeted news search per token per UTC day, inside the stack
+	$(COMPOSE) exec worker python -m candlegraph knowledge fetch-news $(ARGS)
 
 embed: ## Embed chunks that have no vector yet, inside the stack
 	$(COMPOSE) exec worker python -m candlegraph knowledge embed $(ARGS)

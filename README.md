@@ -134,6 +134,8 @@ see [`.env.example`](.env.example) for the full list.
 | `RISK_BENCHMARK` | `WETH` | Market proxy for the systematic/idiosyncratic split; empty disables it. |
 | `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` | `ollama` / `bge-m3` | Local embeddings by default; `openai` (`text-embedding-3-large`, needs `OPENAI_API_KEY`) or `fake` for development. One active model; changing it is `make reembed`. |
 | `OLLAMA_URL` | `http://ollama:11434` | The `ollama` compose service, started by `make up-knowledge`. |
+| `TAVILY_API_KEY` | unset | **Required for `fetch-news`.** Free tier ~1,000 credits/month; without it the news pipeline refuses and everything else still works. |
+| `TAVILY_MONTHLY_CREDITS` / `TAVILY_DAILY_CREDITS` / `TAVILY_RESERVE_CREDITS` | 1000 / 40 / 50 | The budget guard's caps: the plan, a daily smoothing cap, and a reserve kept for manual searches. |
 | `RISK_FREE_RATE_SOURCE` / `INFLATION_RATE` | `constant` / 0.0 | Where the risk-free rate comes from (a Tavily source is planned), and the inflation rate for the real rate printed beside it. |
 | `UI_HOST`, `UI_PORT` | `0.0.0.0`, 8501 | Streamlit UI. |
 | `DATA_POLL_INTERVAL` | 300 | Seconds between ingest runs. |
@@ -214,6 +216,7 @@ a failing one always is.
 | `agent-runs [--limit N] [--agent X] [--show]` | Recent reports from the agent ledger |
 | `knowledge sync-assets` | Load `asset` rows (addresses, symbols, aliases) from `config/tokens.yaml` |
 | `knowledge embed` / `knowledge reembed [--batch-size N] [--limit N]` | Embed chunks without a vector (or from another model) with the configured `EMBEDDING_MODEL`; resumable |
+| `knowledge fetch-news [--symbol S]` | One budgeted Tavily news search per token per UTC day; cached days cost nothing, refusals are ledgered |
 
 ## Data quality
 
@@ -348,7 +351,12 @@ dashboard opens with a metric strip, and every chart carries a title that says w
 - **Forecast** — the ARIMA path with its confidence interval drawn at the horizon.
 - **Agents** — the watchtower: a **Run observer now** button (one on-demand run, written to the
   agent ledger), the latest findings coloured by severity, ingest cadence, per-token coverage,
-  and the full run history.
+  the full run history, and a news-health strip (did the recent Tavily runs succeed, fail, or get
+  refused by the budget).
+- **News** — the metered Tavily pipeline in detail: credit runway for the month and the day,
+  credit burn against the daily cap, call outcomes per day (ok / refused / rate-limited / error),
+  the full `source_call` ledger, the freshest stored articles, and a **Fetch news** button behind
+  a confirmation that states the cost before a credit is spent.
 - **Data** — what is stored and how to load more: coverage per token, recent ingest runs, and a
   **backfill** control (7 days to 1 year) that asks for confirmation before it spends network and
   writes rows. The default first fetch is `LOOKBACK_DAYS` (7); backfills reach further and never
@@ -455,9 +463,11 @@ Next, in order:
    so a signal can cite *why*. Paper trading only. In progress: the schema
    (pgvector installed, eight knowledge tables), the asset sync
    (`candlegraph knowledge sync-assets`), the document pipeline (URL
-   normalisation, `url_hash`, chunking) and embeddings (`bge-m3` served by
-   an optional `ollama` compose service, `make up-knowledge && make embed`)
-   are in; Tavily, retrieval and explanation are next. See `docs/knowledge/` and `docs/rollout/ROLLOUT.md`.
+   normalisation, `url_hash`, chunking), embeddings (`bge-m3` served by an
+   optional `ollama` compose service, `make up-knowledge && make embed`)
+   and the Tavily news source (`make fetch-news`: one budgeted search per
+   token per UTC day, every call ledgered) are in; retrieval and
+   explanation are next. See `docs/knowledge/` and `docs/rollout/ROLLOUT.md`.
 2. **Harness** — YAML pipeline specs, an event bus, OpenTelemetry, and the
    continuous aggregates deferred from the TimescaleDB migration.
 3. **Traditional markets** — NASDAQ and NYSE equities alongside crypto, which

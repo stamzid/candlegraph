@@ -4,9 +4,11 @@
 installed, revision `f399ca0770a0`), the asset sync
 (`candlegraph knowledge sync-assets`, aliases in `config/tokens.yaml`) and
 the document pipeline (`knowledge/documents.py`: URL normalisation,
-`url_hash`, chunking, the upserts) and embeddings (`knowledge/embed.py`,
-`bge-m3` via the `ollama` service) are implemented — rollout steps 2–5.
-Tavily, retrieval, and `--explain` are still design only.
+`url_hash`, chunking, the upserts), embeddings (`knowledge/embed.py`,
+`bge-m3` via the `ollama` service) and the Tavily source with its budget
+guard and `source_call` ledger (`knowledge/sources/`, `budget.py`,
+`news.py`) are implemented — rollout steps 2–6. Retrieval and `--explain`
+are still design only.
 **Area (when built):** `candlegraph/knowledge/`, `alembic/versions/`,
 `candlegraph/cli.py` (`signals --explain`, `knowledge *`),
 `candlegraph/agents/observer/` (one new collect node)

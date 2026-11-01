@@ -73,6 +73,14 @@ class KnowledgeStatements:
     update_chunk_embeddings_template: str
     count_embedding_backlog: sql.Composed
     similar_chunks: sql.Composed
+    # the source_call ledger (step 6)
+    insert_source_call: sql.Composed
+    source_spend: sql.Composed
+    cached_search_exists: sql.Composed
+    get_recent_source_calls: sql.Composed
+    source_call_daily_stats: sql.Composed
+    count_source_documents: sql.Composed
+    get_recent_source_documents: sql.Composed
 
 
 @lru_cache(maxsize=4)
@@ -206,6 +214,95 @@ def knowledge_statements_for(schema: str) -> KnowledgeStatements:
         """
     ).format(ns=ns)
 
+    # --- the source_call ledger (step 6) -------------------------------------
+
+    # One row per external call, refusals included, in the ingest_run mould.
+    # This is the budget guard's input and the observer's evidence; nothing
+    # else in the system reads a source's state.
+    insert_source_call = sql.SQL(
+        """
+        INSERT INTO {ns}.source_call (source_id, called_at, query, params, credits, results, status, error)
+        VALUES (%(source_id)s, %(called_at)s, %(query)s, %(params)s, %(credits)s, %(results)s,
+                %(status)s, %(error)s)
+        RETURNING id
+        """
+    ).format(ns=ns)
+
+    # Credits spent this month and today. The caller computes the UTC
+    # boundaries so a test can own the clock; refusals carry zero credits
+    # and so do not need filtering out.
+    source_spend = sql.SQL(
+        """
+        SELECT
+            COALESCE(SUM(credits) FILTER (WHERE called_at >= %(month_start)s), 0) AS month,
+            COALESCE(SUM(credits) FILTER (WHERE called_at >= %(day_start)s), 0) AS today
+        FROM {ns}.source_call
+        WHERE source_id = %(source_id)s
+        """
+    ).format(ns=ns)
+
+    # The (asset, UTC day) cache: has a successful search for this intent
+    # already run? In the database, not in memory, so it survives restarts
+    # and is shared by every process.
+    cached_search_exists = sql.SQL(
+        """
+        SELECT COUNT(*) AS hits FROM {ns}.source_call
+        WHERE source_id = %(source_id)s AND status = 'ok' AND params->>'cache_key' = %(cache_key)s
+        """
+    ).format(ns=ns)
+
+    get_recent_source_calls = sql.SQL(
+        """
+        SELECT * FROM {ns}.source_call
+        WHERE (%(source_id)s::text IS NULL OR source_id = %(source_id)s)
+        ORDER BY called_at DESC
+        LIMIT %(limit)s
+        """
+    ).format(ns=ns)
+
+    # The News dashboard's burn-down: one row per UTC day in the window.
+    source_call_daily_stats = sql.SQL(
+        """
+        SELECT
+            (called_at AT TIME ZONE 'UTC')::date AS day,
+            COUNT(*) AS calls,
+            COALESCE(SUM(credits), 0) AS credits,
+            COALESCE(SUM(results), 0) AS results,
+            COUNT(*) FILTER (WHERE status = 'ok') AS ok,
+            COUNT(*) FILTER (WHERE status = 'error') AS errors,
+            COUNT(*) FILTER (WHERE status = 'rate_limited') AS rate_limited,
+            COUNT(*) FILTER (WHERE status = 'budget_refused') AS refused
+        FROM {ns}.source_call
+        WHERE source_id = %(source_id)s AND called_at >= %(since)s
+        GROUP BY 1
+        ORDER BY 1
+        """
+    ).format(ns=ns)
+
+    count_source_documents = sql.SQL(
+        """
+        SELECT
+            COUNT(DISTINCT d.id) AS documents,
+            COUNT(c.id) AS chunks,
+            COUNT(c.embedding) AS embedded,
+            COUNT(DISTINCT d.id) FILTER (WHERE d.published_at IS NULL) AS undated,
+            MAX(d.retrieved_at) AS last_retrieved_at
+        FROM {ns}.document d
+        LEFT JOIN {ns}.chunk c ON c.document_id = d.id
+        WHERE d.source_id = %(source_id)s
+        """
+    ).format(ns=ns)
+
+    get_recent_source_documents = sql.SQL(
+        """
+        SELECT id, title, url, published_at, retrieved_at
+        FROM {ns}.document
+        WHERE source_id = %(source_id)s
+        ORDER BY retrieved_at DESC
+        LIMIT %(limit)s
+        """
+    ).format(ns=ns)
+
     return KnowledgeStatements(
         upsert_asset=upsert_asset,
         upsert_asset_template=_ASSET_TEMPLATE,
@@ -222,4 +319,11 @@ def knowledge_statements_for(schema: str) -> KnowledgeStatements:
         update_chunk_embeddings_template=_EMBEDDING_TEMPLATE,
         count_embedding_backlog=count_embedding_backlog,
         similar_chunks=similar_chunks,
+        insert_source_call=insert_source_call,
+        source_spend=source_spend,
+        cached_search_exists=cached_search_exists,
+        get_recent_source_calls=get_recent_source_calls,
+        source_call_daily_stats=source_call_daily_stats,
+        count_source_documents=count_source_documents,
+        get_recent_source_documents=get_recent_source_documents,
     )

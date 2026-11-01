@@ -34,6 +34,8 @@ _SECRET_PATTERNS = (
     ),
     # postgresql://user:password@host
     re.compile(r"(?i)((?:postgres(?:ql)?|https?)://[^:/\s]+:)[^@\s]+(@)"),
+    # A bare Tavily key ("tvly-...") pasted without any KEY= prefix.
+    re.compile(r"(tvly-)[A-Za-z0-9._\-]{4,}"),
 )
 
 

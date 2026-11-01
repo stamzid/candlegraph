@@ -1,8 +1,10 @@
 """The knowledge layer: entities, documents, and what cites them (stage 1).
 
 Grows step by step with ``docs/rollout/ROLLOUT.md``. So far: the schema
-(``statements.py``), the asset sync (``assets.py``), and documents — URL
-normalisation, ``url_hash``, chunking, the upserts (``documents.py``).
+(``statements.py``), the asset sync (``assets.py``), documents
+(``documents.py``), embeddings (``embed.py``), and the metered Tavily news
+source with its budget guard and ledger (``sources/``, ``budget.py``,
+``news.py``).
 """
 
 from candlegraph.knowledge.assets import asset_rows, sync_assets

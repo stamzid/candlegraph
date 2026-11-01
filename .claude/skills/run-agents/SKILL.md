@@ -18,7 +18,9 @@ make up
 make observe                                   # one run, report printed
 make observe ARGS="--strict"                   # exit 1 at WARNING or worse
 # or in the UI: the Agents dashboard has a "Run observer now" button that
-# runs once and writes the report to the agent ledger.
+# runs once and writes the report to the agent ledger. The same dashboard
+# shows whether the recent news (Tavily) runs succeeded; the News dashboard
+# has the full ledger and the credit budget.
 make agent-runs                                # every report, newest first
 make agent-runs ARGS="--agent observer --show" # the newest report in full
 make logs-agents                               # scheduled runs as they happen

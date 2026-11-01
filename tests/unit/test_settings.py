@@ -178,3 +178,17 @@ def test_embedding_defaults_follow_the_design_decision() -> None:
     assert settings.embedding_truncate is False
     assert settings.ollama_url == "http://ollama:11434"
     assert settings.openai_api_key is None
+
+
+def test_tavily_defaults_follow_the_design_document() -> None:
+    """docs/knowledge/tavily/DESIGN.md: scarce credits, smoothed by a daily cap."""
+    settings = Settings(_env_file=None)
+
+    assert settings.tavily_api_key is None
+    assert settings.tavily_monthly_credits == 1000
+    assert settings.tavily_daily_credits == 40
+    assert settings.tavily_reserve_credits == 50
+    assert settings.tavily_search_depth == "basic"
+    assert settings.tavily_max_results == 8
+    assert settings.tavily_max_tries == 3
+    assert settings.knowledge_search_window_hours == 24

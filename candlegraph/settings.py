@@ -124,6 +124,23 @@ class Settings(BaseSettings):
     ollama_url: str = "http://ollama:11434"
     openai_api_key: SecretStr | None = None
 
+    # --- Knowledge: Tavily and the news budget -------------------------------
+    # The only knowledge-layer secret; .env only, never logged (invariant 20).
+    tavily_api_key: SecretStr | None = None
+    # Credits, not requests. The guard refuses before the provider would;
+    # refusals are source_call rows. See docs/knowledge/tavily/DESIGN.md.
+    tavily_monthly_credits: int = Field(default=1000, ge=1)
+    tavily_daily_credits: int = Field(default=40, ge=1)
+    # Held back for an operator's manual search; the pipeline never spends it.
+    tavily_reserve_credits: int = Field(default=50, ge=0)
+    # basic costs 1 credit, advanced 2; our query is narrow, basic is the default.
+    tavily_search_depth: str = "basic"
+    tavily_max_results: int = Field(default=8, ge=1, le=20)
+    tavily_timeout_seconds: float = Field(default=30.0, gt=0)
+    tavily_max_tries: int = Field(default=3, ge=1)
+    # How far before the bar a news search looks.
+    knowledge_search_window_hours: int = Field(default=24, ge=1)
+
     # --- Agents ------------------------------------------------------------
     # Where agent reports go: a comma-separated subset of
     # log, ledger, file, webhook, github.

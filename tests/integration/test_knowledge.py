@@ -17,10 +17,14 @@ from alembic.config import Config
 from candlegraph.knowledge.assets import sync_assets
 from candlegraph.knowledge.documents import ChunkConfig, RawDocument, ensure_source, store_document, url_hash
 from candlegraph.knowledge.embed import HashEmbedder, embed_pending, embedding_backlog, to_vector_literal
+from candlegraph.knowledge.news import fetch_news, source_spend
+from candlegraph.knowledge.sources.base import SearchResult
+from candlegraph.knowledge.sources.tavily import TavilyRateLimitError
 from candlegraph.knowledge.statements import knowledge_statements_for
+from candlegraph.settings import Settings
 from candlegraph.storage import DatabaseManager
-from candlegraph.tokens import TokenRegistry, load_tokens
-from tests.conftest import TOKENS_YAML, WBTC
+from candlegraph.tokens import Token, TokenRegistry, load_tokens
+from tests.conftest import SHIB, TOKENS_YAML, WBTC, make_settings
 from tests.integration.conftest import _env
 from tests.integration.test_timescale import (
     BASE,
@@ -106,7 +110,9 @@ def test_the_knowledge_migration_round_trips_on_a_populated_database(
     config = Config("alembic.ini")
 
     with _env(DATABASE_URL=migrated_dsn, DB_SCHEMA=kdb.schema):
-        command.downgrade(config, "-1")
+        # To just below the knowledge schema — "-1" would only undo whatever
+        # sits at head (the rate_limited constraint, since step 6).
+        command.downgrade(config, "e4b9c7a05f13")
 
         rows = kdb.fetch_all(
             "SELECT tablename FROM pg_tables WHERE schemaname = %(schema)s", {"schema": kdb.schema}
@@ -385,3 +391,140 @@ def test_a_similarity_query_uses_the_hnsw_index_and_finds_the_chunk_itself(kdb: 
     )
     text = "\n".join(str(row["QUERY PLAN"]) for row in plan)
     assert "ix_chunk_embedding_hnsw" in text, text
+
+
+# --- the source_call ledger (step 6) --------------------------------------------
+
+
+class OneShotSource:
+    """A Source that returns one scripted answer and counts its calls."""
+
+    def __init__(self, action: object) -> None:
+        self.action = action
+        self.calls = 0
+
+    id = "tavily"
+    kind = "search"
+    cost = 1
+
+    def search(self, query: str, *, start: datetime, end: datetime, max_results: int) -> SearchResult:
+        self.calls += 1
+        if isinstance(self.action, Exception):
+            raise self.action
+        assert isinstance(self.action, SearchResult)
+        return self.action
+
+
+NEWS_NOW = datetime(2026, 11, 1, 14, 0, tzinfo=UTC)
+WBTC_TOKEN = Token(address=WBTC, symbol="WBTC", name="Wrapped BTC", aliases=("WBTC", "Bitcoin"))
+
+
+def news_settings(**overrides: object) -> Settings:
+    defaults: dict[str, object] = {
+        "tavily_monthly_credits": 100,
+        "tavily_daily_credits": 10,
+        "tavily_reserve_credits": 5,
+    }
+    defaults.update(overrides)
+    return make_settings(**defaults)
+
+
+def _calls(kdb: DatabaseManager) -> list[dict[str, object]]:
+    return kdb.fetch_all(f'SELECT * FROM "{kdb.schema}".source_call ORDER BY id')
+
+
+def test_a_successful_fetch_lands_documents_and_one_ok_ledger_row(kdb: DatabaseManager) -> None:
+    raw = RawDocument(source_id="tavily", url="https://x.com/story", raw_text="One. Two.", title="T")
+    source = OneShotSource(SearchResult([raw], credits=1, results=2, skipped=1, params={"q": "x"}))
+
+    summary = fetch_news(kdb, news_settings(), source, [WBTC_TOKEN], now=NEWS_NOW)
+
+    assert summary.outcomes[0].status == "ok"
+    (row,) = _calls(kdb)
+    assert row["status"] == "ok" and row["credits"] == 1 and row["results"] == 2
+    assert row["params"]["cache_key"] == "WBTC:2026-11-01"
+    assert len(_documents(kdb)) == 1
+
+
+def test_one_search_per_asset_and_day_survives_processes_via_the_ledger(kdb: DatabaseManager) -> None:
+    """The cache is in the database: a second run — any process — finds the first."""
+    source = OneShotSource(SearchResult([], credits=1, results=0))
+
+    fetch_news(kdb, news_settings(), source, [WBTC_TOKEN], now=NEWS_NOW)
+    second = fetch_news(kdb, news_settings(), source, [WBTC_TOKEN], now=NEWS_NOW.replace(hour=22))
+
+    assert source.calls == 1
+    assert second.outcomes[0].status == "cached"
+    assert len(_calls(kdb)) == 1
+
+
+def test_a_refusal_lands_as_budget_refused_with_zero_credits(kdb: DatabaseManager) -> None:
+    """The step-6 exit condition, against the real schema."""
+    source = OneShotSource(SearchResult([], credits=1, results=0))
+    exhausted = news_settings(tavily_monthly_credits=10, tavily_daily_credits=10, tavily_reserve_credits=0)
+    ensure_source(kdb, "tavily", "search")
+    kdb.execute(
+        f'INSERT INTO "{kdb.schema}".source_call (source_id, called_at, credits, status) '
+        "VALUES ('tavily', %(at)s, 10, 'ok')",
+        {"at": NEWS_NOW.replace(day=1, hour=0)},
+    )
+
+    summary = fetch_news(kdb, exhausted, source, [WBTC_TOKEN], now=NEWS_NOW)
+
+    assert source.calls == 0
+    assert summary.outcomes[0].status == "budget_refused"
+    refusal = _calls(kdb)[-1]
+    assert refusal["status"] == "budget_refused"
+    assert refusal["credits"] == 0
+    assert "monthly" in str(refusal["error"])
+
+
+def test_the_widened_constraint_accepts_a_rate_limited_row(kdb: DatabaseManager) -> None:
+    source = OneShotSource(TavilyRateLimitError("Tavily returned HTTP 429: rate or plan limit"))
+
+    summary = fetch_news(kdb, news_settings(), source, [WBTC_TOKEN], now=NEWS_NOW)
+
+    assert summary.outcomes[0].status == "rate_limited"
+    (row,) = _calls(kdb)
+    assert row["status"] == "rate_limited"
+    assert "429" in str(row["error"])
+
+
+def test_spend_is_summed_from_the_ledger_in_utc_month_and_day(kdb: DatabaseManager) -> None:
+    ensure_source(kdb, "tavily", "search")
+    insert = (
+        f'INSERT INTO "{kdb.schema}".source_call (source_id, called_at, credits, status) '
+        "VALUES ('tavily', %(at)s, %(credits)s, 'ok')"
+    )
+    kdb.execute(insert, {"at": datetime(2026, 10, 31, 23, 0, tzinfo=UTC), "credits": 7})  # last month
+    kdb.execute(insert, {"at": datetime(2026, 11, 1, 1, 0, tzinfo=UTC), "credits": 3})  # today
+    kdb.execute(insert, {"at": NEWS_NOW, "credits": 2})  # today
+
+    month, today = source_spend(kdb, "tavily", NEWS_NOW)
+
+    assert (month, today) == (5, 5)
+
+
+def test_the_rate_limited_migration_round_trips_folding_rows_into_error(
+    kdb: DatabaseManager, migrated_dsn: str
+) -> None:
+    """The downgrade must work on a populated table: rate_limited becomes error."""
+    fetch_news(
+        kdb, news_settings(), OneShotSource(TavilyRateLimitError("HTTP 429")), [WBTC_TOKEN], now=NEWS_NOW
+    )
+    config = Config("alembic.ini")
+
+    with _env(DATABASE_URL=migrated_dsn, DB_SCHEMA=kdb.schema):
+        command.downgrade(config, "f399ca0770a0")
+        (row,) = _calls(kdb)
+        assert row["status"] == "error", "the old constraint cannot hold rate_limited"
+        command.upgrade(config, "head")
+
+    fetch_news(
+        kdb,
+        news_settings(),
+        OneShotSource(TavilyRateLimitError("HTTP 429")),
+        [Token(address=SHIB, symbol="SHIB")],
+        now=NEWS_NOW,
+    )
+    assert _calls(kdb)[-1]["status"] == "rate_limited"

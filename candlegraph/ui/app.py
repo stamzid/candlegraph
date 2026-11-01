@@ -41,6 +41,7 @@ from candlegraph.ui.viewmodels import (
     build_agents_view,
     build_forecast,
     build_market_view,
+    build_news_view,
     build_pair_view,
     build_portfolio_view,
     build_risk_view,
@@ -52,11 +53,12 @@ from candlegraph.ui.viewmodels import (
     default_portfolio_symbols,
     forecast_frame,
     run_backfill,
+    run_news_fetch_now,
     run_observer_now,
 )
 
 WINDOW_CHOICES = {"7 days": 7, "30 days": 30, "90 days": 90, "180 days": 180, "Everything": None}
-PAGES = ("Market", "Token", "Risk", "Compare", "Portfolio", "Strategy", "Forecast", "Agents", "Data")
+PAGES = ("Market", "Token", "Risk", "Compare", "Portfolio", "Strategy", "Forecast", "Agents", "News", "Data")
 HORIZON_CHOICES = {"1 hour": 1, "4 hours": 4, "1 day": 24, "1 week": 168}
 UP, DOWN = "#00c853", "#ff5252"
 SEVERITY_COLORS = {
@@ -771,6 +773,24 @@ def _agents_page(db: DatabaseManager, settings: Settings) -> None:
         help="Low coverage on a thin token is the market, not a fault.",
     )
 
+    counts = view.news_counts
+    failed = counts.get("error", 0) + counts.get("rate_limited", 0)
+    news_cols = st.columns(4)
+    news_cols[0].metric(
+        "News source (Tavily)",
+        view.news_status.upper(),
+        help="The newest news call's outcome. The News dashboard has the full ledger and the budget.",
+    )
+    news_cols[1].metric("News runs ok", f"{counts.get('ok', 0)}", help="Of the recent ledgered calls.")
+    news_cols[2].metric(
+        "News runs failed",
+        f"{failed}",
+        delta=f"-{failed}" if failed else None,
+        delta_color="inverse",
+        help="Errors plus rate limits. Budget refusals are expected behaviour and counted separately.",
+    )
+    news_cols[3].metric("Budget refusals", f"{counts.get('budget_refused', 0)}")
+
     _title(
         "Findings — latest observer report",
         "Severity is computed from the numbers; the prose is only a summary.",
@@ -846,6 +866,179 @@ def _agents_page(db: DatabaseManager, settings: Settings) -> None:
             ),
             width="stretch",
         )
+
+
+# --- NEWS (Tavily) --------------------------------------------------------------
+
+
+def _news_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+    st.subheader("News — the metered Tavily pipeline: budget, ledger, harvest")
+    view = build_news_view(db, settings)
+
+    last = view.last_call
+    cols = st.columns(6)
+    cols[0].metric(
+        "Month",
+        f"{view.spent_month} / {view.monthly_cap}",
+        delta=f"{view.monthly_usage:.0%} used · {view.level.upper()}",
+        delta_color="off",
+        help="Credits this UTC month against TAVILY_MONTHLY_CREDITS. "
+        "WARNING at 80%, CRITICAL at 100% — the observer's own grading.",
+    )
+    cols[1].metric(
+        "Today",
+        f"{view.spent_today} / {view.daily_cap}",
+        help="The daily cap smooths the month; a runaway loop hits this first.",
+    )
+    cols[2].metric(
+        "Reserve",
+        f"{view.reserve}",
+        help="Held back for manual searches; the pipeline treats it as already spent.",
+    )
+    cols[3].metric(
+        "Documents",
+        f"{int(view.corpus['documents']):,}",
+        help=f"{int(view.corpus['chunks']):,} chunks, {int(view.corpus['embedded']):,} embedded.",
+    )
+    cols[4].metric(
+        "Undated",
+        f"{int(view.corpus['undated']):,}",
+        help="Documents without a publication date: stored, shown, "
+        "but never fed to a strategy (no look-ahead).",
+    )
+    cols[5].metric(
+        "Last call",
+        str(last["status"]).upper() if last else "—",
+        help="Every call is a ledger row, refusals included.",
+    )
+
+    st.progress(min(view.monthly_usage, 1.0), text=f"Credit Runway — month ({view.monthly_usage:.0%})")
+    st.progress(min(view.daily_usage, 1.0), text=f"Credit Runway — today ({view.daily_usage:.0%})")
+    if view.level != "ok":
+        st.warning(
+            f"Budget at {view.monthly_usage:.0%} of the month — "
+            f"the observer grades this {view.level.upper()}. "
+            "New searches will be refused at the reserve; explanations fall back to stored documents."
+        )
+    if view.embedding_pending:
+        st.info(
+            f"{view.embedding_pending} chunks await embedding — run `make embed` so retrieval can see them."
+        )
+
+    _title(
+        "Fetch news now — one budgeted search per token per UTC day",
+        "Cached days cost nothing; the guard refuses before the provider would.",
+    )
+    left, right = st.columns([1, 2])
+    chosen = left.multiselect("Tokens (empty = all tracked)", ctx["symbols"], default=[], key="news_symbols")
+    if left.button("Fetch news…", key="news_ask"):
+        st.session_state["news_pending"] = chosen or None
+    if "news_pending" in st.session_state:
+        pending = st.session_state["news_pending"]
+        with right:
+            count = len(pending) if pending else len(ctx["symbols"])
+            st.warning(
+                f"**Search Tavily for {count} token(s)?** Costs up to {count} credit(s) "
+                f"({view.spent_month}/{view.monthly_cap} already spent this month); tokens already "
+                "searched today are served from cache and cost nothing."
+            )
+            confirm, cancel = st.columns(2)
+            if confirm.button("Confirm fetch", type="primary", key="news_confirm"):
+                st.session_state.pop("news_pending", None)
+                try:
+                    with st.spinner("Searching…"):
+                        summary = run_news_fetch_now(settings, db, pending)
+                except ViewError as exc:
+                    st.error(str(exc))
+                else:
+                    tone = st.success if summary.ok else st.error
+                    tone(
+                        f"Spent {summary.credits_spent} credit(s), stored {summary.documents_stored} "
+                        f"document(s); {len(summary.failed)} failure(s)."
+                    )
+                    outcome_frame = pd.DataFrame([vars(o) for o in summary.outcomes]).set_index("symbol")
+                    st.dataframe(
+                        outcome_frame.style.map(
+                            lambda v: f"color: {_news_color(str(v))}; font-weight: bold", subset=["status"]
+                        ),
+                        width="stretch",
+                    )
+            if cancel.button("Cancel", key="news_cancel"):
+                st.session_state.pop("news_pending", None)
+                st.rerun()
+
+    left, right = st.columns(2)
+    with left:
+        _title("Credit Burn — spend per UTC day vs the daily cap")
+        if view.daily.empty:
+            st.info("No calls ledgered yet.")
+        else:
+            burn = go.Figure(
+                go.Bar(x=view.daily["day"], y=view.daily["credits"], marker_color="#2962ff", name="credits")
+            )
+            burn.add_hline(
+                y=view.daily_cap, line_color="#ffab00", line_dash="dash", annotation_text="daily cap"
+            )
+            _plot(burn, height=260)
+    with right:
+        _title(
+            "Call Outcomes — did the news runs succeed?",
+            "Refusals are the guard working; errors and rate limits are the provider or us.",
+        )
+        if view.daily.empty:
+            st.info("No calls ledgered yet.")
+        else:
+            outcomes = go.Figure(
+                [
+                    go.Bar(name="ok", x=view.daily["day"], y=view.daily["ok"], marker_color=UP),
+                    go.Bar(
+                        name="refused", x=view.daily["day"], y=view.daily["refused"], marker_color="#ffab00"
+                    ),
+                    go.Bar(
+                        name="rate limited",
+                        x=view.daily["day"],
+                        y=view.daily["rate_limited"],
+                        marker_color=DOWN,
+                    ),
+                    go.Bar(name="error", x=view.daily["day"], y=view.daily["errors"], marker_color="#b71c1c"),
+                ]
+            )
+            outcomes.update_layout(barmode="stack")
+            _plot(outcomes, height=260)
+
+    if not view.daily.empty:
+        _title("Harvest — raw results per day", "Zero results on a liquid token is a finding in itself.")
+        _plot(
+            go.Figure(go.Bar(x=view.daily["day"], y=view.daily["results"], marker_color="#607d8b")),
+            height=180,
+        )
+
+    _title("The Ledger — every call, refusals included, newest first")
+    if view.calls.empty:
+        st.info("No source calls yet. Press “Fetch news…” above (needs TAVILY_API_KEY in .env).")
+    else:
+        st.dataframe(
+            view.calls.style.map(
+                lambda v: f"color: {_news_color(str(v))}; font-weight: bold", subset=["status"]
+            ),
+            width="stretch",
+        )
+
+    _title("Fresh Copy — newest stored news", "An unknown publication date stays blank, never “now”.")
+    if view.documents.empty:
+        st.info("No news documents stored yet.")
+    else:
+        st.dataframe(view.documents, width="stretch")
+
+
+def _news_color(status: str) -> str:
+    return {
+        "ok": UP,
+        "cached": "#2962ff",
+        "budget_refused": "#ffab00",
+        "rate_limited": DOWN,
+        "error": "#b71c1c",
+    }.get(status, "#90a4ae")
 
 
 # --- DATA ---------------------------------------------------------------------
@@ -979,6 +1172,8 @@ def main() -> None:
                 _forecast_page(db, ctx)
             case "Agents":
                 _agents_page(db, settings)
+            case "News":
+                _news_page(db, settings, ctx)
             case "Data":
                 _data_page(db, settings)
     except ViewError as exc:

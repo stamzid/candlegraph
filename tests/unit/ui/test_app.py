@@ -37,7 +37,7 @@ BASE = 1_700_000_000 // (24 * HOUR) * (24 * HOUR)
 # ARIMA refits make the strategy page slow when selected.
 TIMEOUT = 120
 
-PAGES = ("Market", "Token", "Risk", "Compare", "Portfolio", "Strategy", "Forecast", "Agents", "Data")
+PAGES = ("Market", "Token", "Risk", "Compare", "Portfolio", "Strategy", "Forecast", "Agents", "News", "Data")
 
 
 def price_rows(symbol: str, n: int, seed: int = 3) -> list[dict[str, Any]]:
@@ -90,6 +90,17 @@ def agent_run_row() -> dict[str, Any]:
     }
 
 
+def source_call_row(status: str = "ok") -> dict[str, Any]:
+    return {
+        "called_at": datetime(2026, 11, 1, 14, 0, tzinfo=UTC),
+        "status": status,
+        "credits": 1,
+        "results": 5,
+        "query": "WBTC Wrapped BTC Bitcoin crypto news",
+        "error": None,
+    }
+
+
 def ingest_run_row() -> dict[str, Any]:
     return {
         "run_id": "i-1",
@@ -119,6 +130,24 @@ def seeded_db(bars: int = 300) -> FakeDatabase:
         coverage_report=[coverage(s, bars) for s in SYMBOLS],
         get_recent_agent_runs=[agent_run_row()],
         get_recent_runs=[ingest_run_row()],
+        get_recent_source_calls=[source_call_row()],
+        source_spend=[{"month": 12, "today": 2}],
+        source_call_daily_stats=[
+            {
+                "day": "2026-11-01",
+                "calls": 3,
+                "credits": 3,
+                "results": 14,
+                "ok": 2,
+                "errors": 1,
+                "rate_limited": 0,
+                "refused": 0,
+            }
+        ],
+        count_source_documents=[
+            {"documents": 9, "chunks": 40, "embedded": 30, "undated": 2, "last_retrieved_at": None}
+        ],
+        count_embedding_backlog=[{"missing": 10, "stale": 0, "total": 40}],
     )
     set_db(db)
     return db
@@ -376,3 +405,86 @@ def test_cancelling_a_backfill_runs_nothing(monkeypatch: pytest.MonkeyPatch) -> 
     assert not app.exception
     assert called == []
     assert not any("Confirm" in b.label for b in app.main.button)
+
+
+# --- the news dashboard --------------------------------------------------------------
+
+
+def test_the_agents_page_says_whether_the_news_runs_succeeded() -> None:
+    app = run_app("Agents")
+
+    labels = {m.label for m in app.main.metric}
+    assert "News source (Tavily)" in labels
+    assert "News runs failed" in labels
+    source = next(m for m in app.main.metric if m.label == "News source (Tavily)")
+    assert source.value == "OK"
+
+
+def test_the_news_page_shows_the_budget_the_ledger_and_the_harvest() -> None:
+    app = run_app("News")
+
+    assert not app.exception
+    labels = {m.label for m in app.main.metric}
+    assert {"Month", "Today", "Reserve", "Documents", "Last call"} <= labels
+    month = next(m for m in app.main.metric if m.label == "Month")
+    assert month.value == "12 / 1000"
+    assert any("await embedding" in i.value for i in app.info)
+
+
+def test_a_news_fetch_needs_confirmation_before_any_credit_is_spent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[Any] = []
+    monkeypatch.setattr(
+        "candlegraph.ui.viewmodels.run_news_fetch",
+        lambda db, settings, symbols=None: called.append(symbols),
+    )
+    app = run_app("News")
+
+    next(b for b in app.main.button if b.label.startswith("Fetch news")).click().run()
+
+    assert not app.exception
+    assert any("Search Tavily" in w.value for w in app.warning)
+    assert any("Confirm fetch" in b.label for b in app.main.button)
+    assert called == [], "nothing is spent before the user confirms"
+
+
+def test_confirming_a_news_fetch_runs_it_and_reports_the_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from candlegraph.knowledge.news import FetchOutcome, NewsFetchSummary
+
+    called: list[Any] = []
+
+    def fake(db: Any, settings: Any, symbols: Any = None) -> NewsFetchSummary:
+        called.append(symbols)
+        return NewsFetchSummary(
+            day="2026-11-01",
+            outcomes=[FetchOutcome("WBTC", "ok", credits=1, results=5, documents_stored=3, chunks_written=9)],
+        )
+
+    monkeypatch.setattr("candlegraph.ui.viewmodels.run_news_fetch", fake)
+    app = run_app("News")
+    next(b for b in app.main.button if b.label.startswith("Fetch news")).click().run()
+    next(b for b in app.main.button if "Confirm fetch" in b.label).click().run()
+
+    assert not app.exception
+    assert called == [None]
+    assert any("Spent 1 credit" in m.value for m in app.success)
+
+
+def test_a_news_fetch_without_a_key_is_an_error_box_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from candlegraph.knowledge.news import NewsError
+
+    def refuse(db: Any, settings: Any, symbols: Any = None) -> Any:
+        raise NewsError("TAVILY_API_KEY is not set")
+
+    monkeypatch.setattr("candlegraph.ui.viewmodels.run_news_fetch", refuse)
+    app = run_app("News")
+    next(b for b in app.main.button if b.label.startswith("Fetch news")).click().run()
+    next(b for b in app.main.button if "Confirm fetch" in b.label).click().run()
+
+    assert not app.exception
+    assert any("TAVILY_API_KEY" in e.value for e in app.error)
