@@ -87,7 +87,7 @@ def test_every_compose_probe_is_fast_at_start_and_slow_afterwards() -> None:
         services = yaml.safe_load(handle)["services"]
 
     probed = {name: svc["healthcheck"] for name, svc in services.items() if "healthcheck" in svc}
-    assert set(probed) == {"postgres", "candlegraph", "ui"}
+    assert set(probed) == {"postgres", "candlegraph", "ui", "ollama"}
 
     for name, check in probed.items():
         assert seconds(check["interval"]) >= STEADY_STATE_SECONDS, f"{name} probes too often at steady state"

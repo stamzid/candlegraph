@@ -105,6 +105,25 @@ class Settings(BaseSettings):
     # Benchmark for the systematic/idiosyncratic split; empty disables it.
     risk_benchmark: str | None = "WETH"
 
+    # --- Knowledge: embeddings ----------------------------------------------
+    # Which provider turns text into vectors: ollama (local, the default),
+    # openai (hosted), or fake (deterministic, for development and tests).
+    # One active model per deployment; changing it is a re-embed.
+    # See docs/knowledge/embeddings/DESIGN.md.
+    embedding_provider: str = "ollama"
+    embedding_model: str = "bge-m3"
+    # Fixed by the chunk.embedding column type (halfvec(1024)); a migration
+    # to change. The provider must produce exactly this many dimensions.
+    embedding_dimensions: int = Field(default=1024, ge=1)
+    # Allow a Matryoshka model's longer vector to be truncated to the column
+    # width. Meaningless for other models, so off by default.
+    embedding_truncate: bool = False
+    embedding_batch_size: int = Field(default=32, ge=1)
+    embedding_timeout_seconds: float = Field(default=120.0, gt=0)
+    # The `ollama` compose service (profile `knowledge`).
+    ollama_url: str = "http://ollama:11434"
+    openai_api_key: SecretStr | None = None
+
     # --- Agents ------------------------------------------------------------
     # Where agent reports go: a comma-separated subset of
     # log, ledger, file, webhook, github.

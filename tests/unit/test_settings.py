@@ -166,3 +166,15 @@ def test_risk_defaults_are_the_documented_ones() -> None:
 def test_out_of_range_risk_values_are_rejected(field: str, value: float) -> None:
     with pytest.raises(ValidationError):
         make_settings(**{field: value})
+
+
+def test_embedding_defaults_follow_the_design_decision() -> None:
+    """docs/knowledge/embeddings/DESIGN.md: local bge-m3 via Ollama, 1024 fixed."""
+    settings = Settings(_env_file=None)
+
+    assert settings.embedding_provider == "ollama"
+    assert settings.embedding_model == "bge-m3"
+    assert settings.embedding_dimensions == 1024
+    assert settings.embedding_truncate is False
+    assert settings.ollama_url == "http://ollama:11434"
+    assert settings.openai_api_key is None

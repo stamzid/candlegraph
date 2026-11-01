@@ -132,6 +132,8 @@ see [`.env.example`](.env.example) for the full list.
 | `BACKTEST_FEE_BPS` / `BACKTEST_SLIPPAGE_BPS` | 30 / 5 | Per-side cost assumptions. |
 | `RISK_CONFIDENCE` / `RISK_HORIZON_BARS` / `RISK_VAR_METHOD` | 0.95 / 24 / `historical` | Value-at-Risk confidence, horizon in bars, and estimator (`historical`, `parametric`, `cornish_fisher`). |
 | `RISK_BENCHMARK` | `WETH` | Market proxy for the systematic/idiosyncratic split; empty disables it. |
+| `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` | `ollama` / `bge-m3` | Local embeddings by default; `openai` (`text-embedding-3-large`, needs `OPENAI_API_KEY`) or `fake` for development. One active model; changing it is `make reembed`. |
+| `OLLAMA_URL` | `http://ollama:11434` | The `ollama` compose service, started by `make up-knowledge`. |
 | `RISK_FREE_RATE_SOURCE` / `INFLATION_RATE` | `constant` / 0.0 | Where the risk-free rate comes from (a Tavily source is planned), and the inflation rate for the real rate printed beside it. |
 | `UI_HOST`, `UI_PORT` | `0.0.0.0`, 8501 | Streamlit UI. |
 | `DATA_POLL_INTERVAL` | 300 | Seconds between ingest runs. |
@@ -211,6 +213,7 @@ a failing one always is.
 | `agents` | Run the agents on their schedule until stopped |
 | `agent-runs [--limit N] [--agent X] [--show]` | Recent reports from the agent ledger |
 | `knowledge sync-assets` | Load `asset` rows (addresses, symbols, aliases) from `config/tokens.yaml` |
+| `knowledge embed` / `knowledge reembed [--batch-size N] [--limit N]` | Embed chunks without a vector (or from another model) with the configured `EMBEDDING_MODEL`; resumable |
 
 ## Data quality
 
@@ -451,9 +454,10 @@ Next, in order:
    Postgres with pgvector, Tavily for web search, and news attached to prices,
    so a signal can cite *why*. Paper trading only. In progress: the schema
    (pgvector installed, eight knowledge tables), the asset sync
-   (`candlegraph knowledge sync-assets`) and the document pipeline (URL
-   normalisation, `url_hash`, chunking) are in; embeddings, retrieval and
-   explanation are next. See `docs/knowledge/` and `docs/rollout/ROLLOUT.md`.
+   (`candlegraph knowledge sync-assets`), the document pipeline (URL
+   normalisation, `url_hash`, chunking) and embeddings (`bge-m3` served by
+   an optional `ollama` compose service, `make up-knowledge && make embed`)
+   are in; Tavily, retrieval and explanation are next. See `docs/knowledge/` and `docs/rollout/ROLLOUT.md`.
 2. **Harness** — YAML pipeline specs, an event bus, OpenTelemetry, and the
    continuous aggregates deferred from the TimescaleDB migration.
 3. **Traditional markets** — NASDAQ and NYSE equities alongside crypto, which

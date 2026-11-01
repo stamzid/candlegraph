@@ -1,6 +1,6 @@
 # Rollout: stage 1 — the knowledge graph on pgvector
 
-**Status:** current — 2026-10-31; steps 1–4 done, step 5 next. This directory holds **one
+**Status:** current — 2026-11-01; steps 1–5 done, step 6 next. This directory holds **one
 current rollout at a time**; this document is it, and each working session
 should update the progress table below. When the stage ships, this file
 moves to `docs/rollout/archive/<date>-<slug>.md` and the next rollout
@@ -21,7 +21,7 @@ Status line truthful.
 | 2 | Knowledge schema migration + statements | M | 1 | **done** 2026-10-30 |
 | 3 | Assets and aliases from `tokens.yaml` | S | 2 | **done** 2026-10-30 |
 | 4 | Documents: normalise, hash, chunk | S | 2 | **done** 2026-10-31 |
-| 5 | Embeddings: Protocol, local provider, HNSW proven | M | 2, 4 | not started |
+| 5 | Embeddings: Protocol, local provider, HNSW proven | M | 2, 4 | **done** 2026-11-01 |
 | 6 | Tavily source, budget guard, `source_call` ledger | M | 2 | not started |
 | 7 | Hybrid retrieval with the no-look-ahead bound | M | 3, 4, 5 | not started |
 | 8 | `signals --explain`: explain, validate, cache | L | 6, 7 | not started |
@@ -204,6 +204,34 @@ model download — invariant 2); integration proves `EXPLAIN` on a
 similarity query shows the HNSW index, and `reembed` skips rows already
 stamped with the configured model. `.env.example` gains the
 `EMBEDDING_*` block.
+
+**Outcome (2026-11-01).** Done, tests first. `knowledge/embed.py`: the
+`Embedder` Protocol; `OllamaEmbedder` (default, `bge-m3` at
+`OLLAMA_URL`, family prefixes for nomic/e5/mxbai and none for bge/Qwen,
+width check with opt-in Matryoshka truncation); `OpenAIEmbedder`
+(`text-embedding-3-large`, `dimensions=1024`); `HashEmbedder` (the
+deterministic fake, `EMBEDDING_PROVIDER=fake`); `embed_pending`
+(batched, resumable, refuses a provider of the wrong width before touching
+a row, stops rather than loops on a zero-row write); `embedding_backlog`.
+Statements: `get_chunks_to_embed`, `update_chunk_embeddings`
+(`VALUES … ::halfvec`, model stamped), `count_embedding_backlog`,
+`similar_chunks`. Settings `EMBEDDING_PROVIDER/MODEL/DIMENSIONS/TRUNCATE/
+BATCH_SIZE/TIMEOUT_SECONDS`, `OLLAMA_URL`, `OPENAI_API_KEY`. CLI
+`knowledge embed` and `knowledge reembed`; Makefile `embed`, `reembed`,
+`up-knowledge`, `logs-ollama`. Compose: `ollama/ollama:0.40.13` behind the
+`knowledge` profile, model pulled once into a named volume, healthy only
+once `ollama show <model>` succeeds (15-minute `start_period` for the cold
+pull, then the invariant-25 cadence); compose tests extended. **No schema
+change**: `chunk.embedding halfvec(1024)` and `chunk.embedding_model` from
+step 2 are the whole write surface. 38 unit tests on a `MockTransport`
+Ollama/OpenAI and the fake; 5 integration tests — vectors land as 1024-wide
+`halfvec` with the model stamped, a second run embeds nothing, a model
+change marks every row stale and re-embeds it, a changed chunk rejoins the
+backlog, and `EXPLAIN` on the similarity query shows
+`ix_chunk_embedding_hnsw` (with `enable_seqscan` off for the transaction;
+the table is too small for the planner to choose it by cost). Not built:
+the evaluation set (`knowledge eval`) — recorded in the embeddings
+document as still proposed.
 
 ## Step 6 — Tavily, the budget, and the ledger
 

@@ -42,6 +42,10 @@ CHUNK_COLUMNS = ("document_id", "ordinal", "text", "token_count")
 
 _CHUNK_TEMPLATE = "(%(document_id)s,%(ordinal)s,%(text)s,%(token_count)s)"
 
+# --- embeddings (step 5) ---------------------------------------------------------
+
+_EMBEDDING_TEMPLATE = "(%(id)s,%(embedding)s,%(model)s)"
+
 
 def _excluded(names: tuple[str, ...], *, key: tuple[str, ...]) -> str:
     return ",\n            ".join(f"{n} = EXCLUDED.{n}" for n in names if n not in key)
@@ -63,6 +67,12 @@ class KnowledgeStatements:
     upsert_chunks_template: str
     delete_stale_chunks: sql.Composed
     get_chunks: sql.Composed
+    # embeddings (step 5)
+    get_chunks_to_embed: sql.Composed
+    update_chunk_embeddings: sql.Composed
+    update_chunk_embeddings_template: str
+    count_embedding_backlog: sql.Composed
+    similar_chunks: sql.Composed
 
 
 @lru_cache(maxsize=4)
@@ -147,6 +157,55 @@ def knowledge_statements_for(schema: str) -> KnowledgeStatements:
         "SELECT * FROM {ns}.chunk WHERE document_id = %(document_id)s ORDER BY ordinal"
     ).format(ns=ns)
 
+    # --- embeddings --------------------------------------------------------
+
+    # The backlog for one model: never embedded, or embedded by another.
+    # Ordered by id so a resumed run continues where the last one stopped.
+    get_chunks_to_embed = sql.SQL(
+        """
+        SELECT id, text FROM {ns}.chunk
+        WHERE embedding IS NULL OR embedding_model IS DISTINCT FROM %(model)s
+        ORDER BY id
+        LIMIT %(limit)s
+        """
+    ).format(ns=ns)
+
+    # One statement per batch. The vector arrives as pgvector's text form
+    # and is cast to the column type; the model name is stamped beside it
+    # because vectors from two models are not comparable.
+    update_chunk_embeddings = sql.SQL(
+        """
+        UPDATE {ns}.chunk AS c
+        SET embedding = v.embedding::halfvec, embedding_model = v.model
+        FROM (VALUES %s) AS v(id, embedding, model)
+        WHERE c.id = v.id
+        RETURNING c.id
+        """
+    ).format(ns=ns)
+
+    count_embedding_backlog = sql.SQL(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE embedding IS NULL) AS missing,
+            COUNT(*) FILTER (WHERE embedding IS NOT NULL
+                               AND embedding_model IS DISTINCT FROM %(model)s) AS stale,
+            COUNT(*) AS total
+        FROM {ns}.chunk
+        """
+    ).format(ns=ns)
+
+    # Cosine distance, nearest first, over the active model's vectors only.
+    # ORDER BY <=> ... LIMIT is the shape the HNSW index answers.
+    similar_chunks = sql.SQL(
+        """
+        SELECT id, document_id, ordinal, text, embedding <=> %(query)s::halfvec AS distance
+        FROM {ns}.chunk
+        WHERE embedding_model = %(model)s
+        ORDER BY embedding <=> %(query)s::halfvec
+        LIMIT %(limit)s
+        """
+    ).format(ns=ns)
+
     return KnowledgeStatements(
         upsert_asset=upsert_asset,
         upsert_asset_template=_ASSET_TEMPLATE,
@@ -158,4 +217,9 @@ def knowledge_statements_for(schema: str) -> KnowledgeStatements:
         upsert_chunks_template=_CHUNK_TEMPLATE,
         delete_stale_chunks=delete_stale_chunks,
         get_chunks=get_chunks,
+        get_chunks_to_embed=get_chunks_to_embed,
+        update_chunk_embeddings=update_chunk_embeddings,
+        update_chunk_embeddings_template=_EMBEDDING_TEMPLATE,
+        count_embedding_backlog=count_embedding_backlog,
+        similar_chunks=similar_chunks,
     )

@@ -3,7 +3,8 @@
 # COMPOSE_PROJECT_NAME, and the published ports below, if you need two at once.
 #
 # Five services: the database, the API, the ingest worker, the UI, and the
-# agents. The API and the worker are separate processes so a long backfill
+# agents — plus `ollama`, the embedding model server, behind the `knowledge`
+# profile so the default stack stays small. The API and the worker are separate processes so a long backfill
 # cannot compete with query traffic, and so either can be restarted or scaled
 # without the other. The agents only read and post reports.
 
@@ -171,5 +172,43 @@ services:
       candlegraph:
         condition: service_healthy
 
+  ollama:
+    # The local embedding model server (docs/knowledge/embeddings/DESIGN.md).
+    # Behind a profile: `make up` does not pull a gigabyte of weights for a
+    # stack that is only ingesting; `make up-knowledge` does. Pinned exactly,
+    # like every other image here. The app containers reach it as
+    # http://ollama:11434 (OLLAMA_URL); the host port is for local runs.
+    profiles: ["knowledge"]
+    image: ollama/ollama:0.40.13
+    entrypoint: ["/bin/sh", "-c"]
+    # Serve, wait until the API answers, pull the configured model once
+    # (a no-op when the volume already has it), then stay in the foreground.
+    command:
+      - >-
+        ollama serve & pid=$$!;
+        until ollama list >/dev/null 2>&1; do sleep 1; done;
+        ollama pull "${EMBEDDING_MODEL:-bge-m3}";
+        wait $$pid
+    environment:
+      # Keep the model resident between batches instead of reloading it.
+      OLLAMA_KEEP_ALIVE: "24h"
+    ports:
+      - "${OLLAMA_HOST_PORT:-11434}:11434"
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      # Healthy means "the model is pulled", not merely "the server is up":
+      # `depends_on` and `--wait` should hold until an embed call can succeed.
+      # start_period covers a cold pull on a slow link; afterwards the usual
+      # once-every-three-minutes cadence (invariant 25).
+      test: ["CMD-SHELL", "ollama show \"${EMBEDDING_MODEL:-bge-m3}\" >/dev/null 2>&1"]
+      interval: 180s
+      timeout: 15s
+      retries: 3
+      start_period: 900s
+      start_interval: 5s
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  ollama:

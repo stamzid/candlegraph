@@ -173,6 +173,18 @@ def _parser() -> argparse.ArgumentParser:
     knowledge_sub.add_parser(
         "sync-assets", help="upsert asset rows (addresses, symbols, aliases) from config/tokens.yaml"
     )
+    for name, text in (
+        ("embed", "embed chunks that have no vector yet (or one from another model)"),
+        ("reembed", "same as embed; the name to reach for after changing EMBEDDING_MODEL"),
+    ):
+        embed = knowledge_sub.add_parser(name, help=text)
+        embed.add_argument(
+            "--batch-size",
+            type=int,
+            default=None,
+            help="texts per model call (default: EMBEDDING_BATCH_SIZE)",
+        )
+        embed.add_argument("--limit", type=int, default=None, help="stop after about this many chunks")
 
     return parser
 
@@ -750,8 +762,9 @@ def _agent_runs(args: argparse.Namespace) -> int:
     return 0
 
 
-def _knowledge(args: argparse.Namespace) -> int:
+def _knowledge(settings: Settings, args: argparse.Namespace) -> int:
     from candlegraph.knowledge.assets import sync_assets
+    from candlegraph.knowledge.embed import EmbeddingError, build_embedder, embed_pending, embedding_backlog
     from candlegraph.storage import get_db
     from candlegraph.tokens import get_token_registry
 
@@ -759,6 +772,30 @@ def _knowledge(args: argparse.Namespace) -> int:
         case "sync-assets":
             written = sync_assets(get_db(), get_token_registry())
             print(f"synced {written} assets from the token registry")
+            return 0
+        case "embed" | "reembed":
+            db = get_db()
+            try:
+                embedder = build_embedder(settings)
+                before = embedding_backlog(db, embedder.name)
+                print(
+                    f"{embedder.name} ({settings.embedding_provider}): "
+                    f"{before.pending} of {before.total} chunks to embed "
+                    f"({before.missing} missing, {before.stale} from another model)"
+                )
+                summary = embed_pending(
+                    db,
+                    embedder,
+                    batch_size=args.batch_size or settings.embedding_batch_size,
+                    limit=args.limit,
+                    dimensions=settings.embedding_dimensions,
+                )
+            except EmbeddingError as exc:
+                raise SystemExit(str(exc)) from exc
+            print(
+                f"embedded {summary.embedded} chunks in {summary.batches} batches; "
+                f"{summary.remaining} remaining"
+            )
             return 0
         case _:  # pragma: no cover - argparse rejects anything else
             raise SystemExit(f"unknown knowledge command {args.knowledge_command!r}")
@@ -810,6 +847,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         case "agent-runs":
             return _agent_runs(args)
         case "knowledge":
-            return _knowledge(args)
+            return _knowledge(settings, args)
         case _:  # pragma: no cover - argparse rejects anything else
             raise SystemExit(f"unknown command {args.command!r}")

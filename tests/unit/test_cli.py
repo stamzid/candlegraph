@@ -245,3 +245,48 @@ def test_knowledge_without_a_subcommand_is_an_error(cli_env: FakeDatabase) -> No
         main(["knowledge"])
 
     assert exc.value.code != 0
+
+
+def test_knowledge_embed_reports_the_backlog_and_what_it_embedded(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    monkeypatch.setattr(
+        "candlegraph.cli.get_settings",
+        lambda: make_settings(tokens_file=str(tokens_file), embedding_provider="fake"),
+    )
+    set_db(FakeDatabase(count_embedding_backlog=[{"missing": 0, "stale": 0, "total": 7}]))
+
+    assert main(["knowledge", "embed"]) == 0
+
+    out = capsys.readouterr().out
+    assert "fake-hash (fake): 0 of 7 chunks to embed" in out
+    assert "embedded 0 chunks in 0 batches; 0 remaining" in out
+
+
+def test_knowledge_reembed_is_the_same_command_under_the_name_the_rollout_uses(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    monkeypatch.setattr(
+        "candlegraph.cli.get_settings",
+        lambda: make_settings(tokens_file=str(tokens_file), embedding_provider="fake"),
+    )
+    set_db(FakeDatabase(count_embedding_backlog=[{"missing": 0, "stale": 0, "total": 0}]))
+
+    assert main(["knowledge", "reembed", "--batch-size", "4", "--limit", "8"]) == 0
+    assert "embedded 0 chunks" in capsys.readouterr().out
+
+
+def test_knowledge_embed_with_a_misconfigured_provider_exits_with_the_message(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    monkeypatch.setattr(
+        "candlegraph.cli.get_settings",
+        lambda: make_settings(tokens_file=str(tokens_file), embedding_provider="voyage"),
+    )
+    set_db(FakeDatabase())
+
+    with pytest.raises(SystemExit, match="EMBEDDING_PROVIDER"):
+        main(["knowledge", "embed"])

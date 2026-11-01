@@ -5,8 +5,9 @@ description: Build or extend candlegraph's knowledge layer (stage 1) — the pgv
 
 # Extend the knowledge graph
 
-The layer is **partly built**: the schema, the asset sync and the document
-pipeline (rollout steps 1–4) exist; embeddings onwards do not. Read
+The layer is **partly built**: the schema, the asset sync, the document
+pipeline and embeddings (rollout steps 1–5) exist; the Tavily source
+onwards does not. Read
 `docs/knowledge/graph/DESIGN.md` first and the four companions as you reach
 them. Every step below exists
 because of a decision recorded there; do not reverse one in code without
@@ -70,11 +71,17 @@ a model.
 ## 4. Changing the embedding model
 
 Read `docs/knowledge/embeddings/DESIGN.md`. The column is 1024 dimensions;
-a model must produce 1024 or support truncation to it. Change
-`EMBEDDING_MODEL`, then run `candlegraph knowledge reembed` (resumable; it
-skips rows already stamped with the new name). The observer reports rows
-embedded with any other model as a backlog until it finishes. Record the
-evaluation-set result in the document when you measure it.
+a model must produce 1024 or support truncation to it
+(`EMBEDDING_TRUNCATE=true`, Matryoshka models only). Change
+`EMBEDDING_MODEL` (the `ollama` service pulls whatever the variable names
+on its next start), then `make reembed` (resumable; it skips rows already
+stamped with the new name, and `make embed` prints the backlog first). If
+the new family needs a query/document prefix, add it to
+`embed._FAMILY_PREFIXES` with a test — bge-m3 and Qwen3 need none, nomic
+and e5 do. The observer reports rows embedded with any other model as a
+backlog until it finishes (step 9). Record the evaluation-set result in the
+document when you measure it. To develop without a model server, set
+`EMBEDDING_PROVIDER=fake`.
 
 ## 5. The rules that do not bend
 

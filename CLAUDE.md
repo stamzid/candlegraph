@@ -19,8 +19,9 @@ reconstructing the steps:
   tell a real finding from an expected one.
 - `add-agent` — add a new LangGraph graph that follows the framework.
 - `release-check` — the full pre-merge gate.
-- `extend-knowledge-graph` — stage 1 is designed, not built: the order to
-  build it in, and how to add a source, an entity, or a retriever to it.
+- `extend-knowledge-graph` — stage 1, partly built (schema, assets,
+  documents, embeddings): the order to build the rest in, and how to add a
+  source, an entity, or a retriever to it.
 
 `docs/` holds the design documents, arranged the same way — one directory per
 topic, with a `DESIGN.md` inside and a flowchart in most of them:
@@ -32,8 +33,10 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
 - `docs/agents/framework/`, `.../observer/`, `.../janitor/` — read before
   touching `candlegraph/agents/`.
 - `docs/knowledge/` — the stage 1 design (graph, vector store, embeddings,
-  Tavily, MCP). Status is *proposed*; the code does not exist yet. Read
-  before starting any of it, and keep the Status lines truthful as it lands.
+  Tavily, MCP) plus `sources/`, a survey of free text and fundamentals
+  APIs for later stages. Each document's Status line says whether it
+  describes code or an idea; read before starting any of it, and keep the
+  Status lines truthful as it lands.
 - `docs/rollout/ROLLOUT.md` — **the current rollout plan.** When the user
   refers to "the rollout", "the plan", or "step N", this is the document:
   find the step, read its "Read first" pointers, do it, and update the
@@ -106,6 +109,14 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   pair `http://www.x.com/a/?utm_source=m` and `https://x.com/a`). Never
   default `published_at`: an unknown date is `NULL`, and the no-look-ahead
   rule reads that column.
+- Embeddings: one active model per deployment, stamped on every
+  `chunk.embedding_model`. Never write a vector without the stamp, never
+  compare vectors from two models, and never widen the column to fit a
+  model — pick a 1024-dimension model or set `EMBEDDING_TRUNCATE` for a
+  Matryoshka one. Tests use `EMBEDDING_PROVIDER=fake` (`HashEmbedder`);
+  nothing in the test suite downloads a model. The Ollama service is
+  behind the `knowledge` compose profile: `make up` does not start it,
+  `make up-knowledge` does, and the first start pulls ~1.2 GB.
 - The UI's units are fixed: rates in **percent per year**, trading costs
   in **basis points**; the CLI and `.env` take rates as decimal fractions
   (`0.04` = 4%) and say so in their help. Do not add an input that leaves

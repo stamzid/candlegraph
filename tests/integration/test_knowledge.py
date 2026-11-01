@@ -16,6 +16,7 @@ from alembic.config import Config
 
 from candlegraph.knowledge.assets import sync_assets
 from candlegraph.knowledge.documents import ChunkConfig, RawDocument, ensure_source, store_document, url_hash
+from candlegraph.knowledge.embed import HashEmbedder, embed_pending, embedding_backlog, to_vector_literal
 from candlegraph.knowledge.statements import knowledge_statements_for
 from candlegraph.storage import DatabaseManager
 from candlegraph.tokens import TokenRegistry, load_tokens
@@ -291,3 +292,96 @@ def test_ensure_source_is_idempotent(kdb: DatabaseManager) -> None:
     rows = kdb.fetch_all(f'SELECT * FROM "{kdb.schema}".source WHERE id = %(id)s', {"id": "tavily"})
     assert len(rows) == 1
     assert rows[0]["config"] == {"depth": "basic"}, "the first registration wins; nothing is overwritten"
+
+
+# --- embeddings (step 5) -------------------------------------------------------
+
+
+def _seed_corpus(kdb: DatabaseManager, sentences: int = 12) -> int:
+    ensure_source(kdb, "manual", "file")
+    config = ChunkConfig(target_tokens=6, max_tokens=8, min_tokens=3, overlap_tokens=0)
+    text = " ".join(f"Token {i} did something notable." for i in range(sentences))
+    return store_document(kdb, _doc(text), config).document_id
+
+
+def test_embeddings_land_as_halfvec_1024_with_the_model_stamped(kdb: DatabaseManager) -> None:
+    document_id = _seed_corpus(kdb)
+
+    summary = embed_pending(kdb, HashEmbedder(), batch_size=5)
+
+    rows = _chunks(kdb, document_id)
+    assert summary.embedded == len(rows) > 1
+    assert summary.batches == -(-len(rows) // 5)
+    assert all(row["embedding_model"] == "fake-hash" for row in rows)
+    dims = kdb.fetch_all(
+        f'SELECT vector_dims(embedding) AS n FROM "{kdb.schema}".chunk WHERE id = %(id)s',
+        {"id": rows[0]["id"]},
+    )
+    assert int(dims[0]["n"]) == 1024
+
+
+def test_reembed_skips_rows_already_stamped_with_the_configured_model(kdb: DatabaseManager) -> None:
+    """Resumable by construction: a second run finds nothing to do."""
+    _seed_corpus(kdb)
+    embed_pending(kdb, HashEmbedder())
+
+    again = embed_pending(kdb, HashEmbedder())
+
+    assert again.embedded == 0
+    assert again.remaining == 0
+    assert embedding_backlog(kdb, "fake-hash").pending == 0
+
+
+def test_changing_the_model_puts_every_row_on_the_backlog_and_reembeds_it(kdb: DatabaseManager) -> None:
+    document_id = _seed_corpus(kdb)
+    embed_pending(kdb, HashEmbedder(name="fake-hash-v1"))
+
+    backlog = embedding_backlog(kdb, "fake-hash-v2")
+    assert backlog.stale == len(_chunks(kdb, document_id)) and backlog.missing == 0
+
+    summary = embed_pending(kdb, HashEmbedder(name="fake-hash-v2"))
+
+    assert summary.embedded == backlog.stale
+    assert {row["embedding_model"] for row in _chunks(kdb, document_id)} == {"fake-hash-v2"}
+
+
+def test_a_chunk_whose_text_changed_rejoins_the_backlog(kdb: DatabaseManager) -> None:
+    ensure_source(kdb, "manual", "file")
+    config = ChunkConfig(target_tokens=5, max_tokens=6, min_tokens=3, overlap_tokens=0)
+    store_document(kdb, _doc("Alpha beta gamma. Delta epsilon zeta."), config)
+    embed_pending(kdb, HashEmbedder())
+    assert embedding_backlog(kdb, "fake-hash").pending == 0
+
+    store_document(kdb, _doc("Alpha beta gamma. Delta epsilon CHANGED."), config)
+
+    assert embedding_backlog(kdb, "fake-hash").missing == 1
+
+
+def test_a_similarity_query_uses_the_hnsw_index_and_finds_the_chunk_itself(kdb: DatabaseManager) -> None:
+    """The reason `chunk` is a plain table: one global ANN index, and the planner picks it."""
+    document_id = _seed_corpus(kdb, sentences=20)
+    embedder = HashEmbedder()
+    embed_pending(kdb, embedder)
+    rows = _chunks(kdb, document_id)
+    target = rows[3]
+    query = to_vector_literal(embedder.embed([str(target["text"])], kind="query")[0])
+    statements = knowledge_statements_for(kdb.schema)
+
+    nearest = kdb.fetch_all(statements.similar_chunks, {"query": query, "model": "fake-hash", "limit": 3})
+
+    assert nearest[0]["id"] == target["id"]
+    assert float(nearest[0]["distance"]) == pytest.approx(0.0, abs=1e-3)
+
+    # A tiny table seq-scans by cost; turn that off (for this transaction
+    # only) to see that the index answers the ORDER BY <=> ... LIMIT shape.
+    plan = kdb.fetch_all(
+        f"""
+        SET LOCAL enable_seqscan = off;
+        EXPLAIN SELECT id FROM "{kdb.schema}".chunk
+        WHERE embedding_model = 'fake-hash'
+        ORDER BY embedding <=> '{query}'::halfvec
+        LIMIT 3
+        """
+    )
+    text = "\n".join(str(row["QUERY PLAN"]) for row in plan)
+    assert "ix_chunk_embedding_hnsw" in text, text

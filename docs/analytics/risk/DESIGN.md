@@ -356,6 +356,15 @@ Until it exists, `RISK_FREE_RATE_SOURCE=tavily` is refused with a message
 naming the one source that does (tested), so a configuration that expects
 live rates fails at the command line rather than silently using zero.
 
+**Revisit (2026-11-01).** The source survey in
+[`../../knowledge/sources/DESIGN.md`](../../knowledge/sources/DESIGN.md)
+compared this plan with FRED and recommends **FRED primary, Tavily
+fallback, constant last**: a FRED key is free, the series (`DTB3`,
+`CPIAUCSL`) are canonical, and FRED's real-time API answers "as the market
+knew it at this bar" directly, which rule 2 above needs and a web search
+cannot give. The `RateProvider` seam is unchanged either way; the order of
+providers is the decision to take when the step is built.
+
 ## 6. Reading the numbers honestly
 
 - Hourly crypto returns are **fat-tailed and negatively skewed**. Expect the

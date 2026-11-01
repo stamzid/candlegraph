@@ -130,3 +130,15 @@ def test_a_failed_migration_still_stops_the_container(tmp_path: Path) -> None:
 
     assert result.returncode == 7
     assert "handed-off" not in result.stdout
+
+
+def test_the_embedding_service_is_optional_pinned_and_healthy_only_once_the_model_is_pulled() -> None:
+    """`make up` must not download a gigabyte of weights for a stack that only
+    ingests; `make up-knowledge` opts in. Health means an embed call can succeed."""
+    ollama = compose()["services"]["ollama"]
+
+    assert ollama["profiles"] == ["knowledge"]
+    assert ollama["image"].startswith("ollama/ollama:") and "latest" not in ollama["image"]
+    assert "ollama show" in " ".join(ollama["healthcheck"]["test"])
+    assert "ollama pull" in " ".join(ollama["command"])
+    assert "ollama:/root/.ollama" in ollama["volumes"], "model weights must survive a recreate"

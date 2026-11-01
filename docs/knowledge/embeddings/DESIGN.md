@@ -1,6 +1,10 @@
 # Embedding models: what to compare, what to pick, and reuse in the harness
 
-**Status:** proposed — 2026-10-29
+**Status:** implemented — 2026-11-01 (rollout step 5): `candlegraph/knowledge/embed.py`
+holds the Protocol, the Ollama provider (`bge-m3`, the default), the OpenAI
+provider, the deterministic fake, and the resumable `embed_pending` loop;
+the `ollama` compose service runs behind the `knowledge` profile. The
+evaluation set in the last section is still to be built.
 **Decision:** an `Embedder` Protocol with pluggable providers; **1024
 dimensions fixed**; default provider is local and free (`BAAI/bge-m3`, with
 `Qwen3-Embedding-0.6B` as the quality step up); OpenAI
@@ -119,13 +123,34 @@ flowchart TD
   and is resumable (it skips rows already stamped with the new name).
   The observer reports rows whose model is not the configured one.
 
+## As built
+
+| Piece | Where | Notes |
+|---|---|---|
+| `Embedder` Protocol | `knowledge/embed.py` | `name`, `dimensions`, `embed(texts, kind=document\|query)` exactly as above |
+| `OllamaEmbedder` | same | `POST {OLLAMA_URL}/api/embed`; model-family prefixes applied by `prefixes_for` (nomic, e5, mxbai; **none for bge-m3 and Qwen3**); a vector of the wrong width is refused unless `EMBEDDING_TRUNCATE=true` (Matryoshka models only), and then truncated and renormalised |
+| `OpenAIEmbedder` | same | `POST /v1/embeddings` with `dimensions=1024`; results re-ordered by `index`; the key never appears in an error |
+| `HashEmbedder` | same | sha256-seeded unit vectors; `EMBEDDING_PROVIDER=fake`; the unit tier and the integration tier run on it so no test downloads a model |
+| `embed_pending` | same | batches of `EMBEDDING_BATCH_SIZE`; the query selects `embedding IS NULL OR embedding_model IS DISTINCT FROM <model>`, so a run is resumable and a model change is a re-embed; a batch that writes zero rows raises instead of looping |
+| `embedding_backlog` | same | `missing` (never embedded, or text changed) and `stale` (another model) — what the observer's `embedding_backlog` finding will read in step 9 |
+| `similar_chunks` | `knowledge/statements.py` | cosine `<=>` over the active model's rows, `ORDER BY … LIMIT`, the shape the HNSW index answers; proven with `EXPLAIN` in the integration tier |
+| CLI | `candlegraph knowledge embed` / `reembed` | print the backlog, embed, print what remains; `make embed` / `make reembed` inside the stack |
+| Service | `docker-compose.yaml` → `ollama` | `ollama/ollama:0.40.13`, profile `knowledge`, pulls `${EMBEDDING_MODEL}` once into the `ollama` volume, healthy only when `ollama show <model>` succeeds; `make up-knowledge` |
+
+Two consequences for operators: the default stack (`make up`) does not
+start Ollama and `make embed` will fail with a message naming
+`OLLAMA_URL` and `make up-knowledge`; and the first `make up-knowledge`
+downloads about 1.2 GB of weights, which the 15-minute `start_period`
+on the health check is sized for.
+
 ## Chunking
 
 Chunking is a pure function in `documents.py` and is tested as one.
 Target 300–500 tokens with a 50-token overlap, split on paragraph then
-sentence boundaries, never mid-sentence. Token counts come from the
-embedder's own tokenizer when available, otherwise a character
-approximation stored as such. Each chunk stores its `ordinal`, so a
+sentence boundaries, never mid-sentence. Token counts are words plus
+punctuation marks (`documents.count_tokens`), a model-free proxy chosen so
+the unit tier needs no tokenizer download; it runs a little under the
+subword count, which errs on the side of smaller chunks. Each chunk stores its `ordinal`, so a
 citation can quote the chunk and link to the document at that position.
 
 ## Reuse in the harness (stage 2) and the agents (stage 5)
@@ -165,3 +190,9 @@ from public benchmarks and should be treated as a prior, not a result.
   matters.
 - **Fine-tuning.** No labelled data yet. The evaluation set above is the
   first step toward knowing whether it would help.
+- **In-process `sentence-transformers` as the default** (considered again
+  when building). It would put PyTorch and the weights into the app image
+  — gigabytes on every container, including the API and the UI that never
+  embed anything. Ollama keeps the model a service with its own volume and
+  health check. The Protocol leaves room for an in-process provider if a
+  deployment ever needs one without Docker.
