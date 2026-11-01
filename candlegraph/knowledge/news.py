@@ -28,8 +28,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
+from candlegraph.knowledge.assets import sync_assets
 from candlegraph.knowledge.budget import Budget, decide
 from candlegraph.knowledge.documents import ensure_source, store_document
+from candlegraph.knowledge.mentions import alias_dictionary, link_mentions
 from candlegraph.knowledge.sources.base import Source
 from candlegraph.knowledge.sources.tavily import TavilyError, TavilyRateLimitError, TavilySource
 from candlegraph.knowledge.statements import knowledge_statements_for
@@ -79,6 +81,7 @@ class FetchOutcome:
     results: int = 0
     documents_stored: int = 0
     chunks_written: int = 0
+    mentions_linked: int = 0
     message: str = ""
 
 
@@ -185,6 +188,12 @@ def fetch_news(
     budget = budget_from(settings)
     statements = knowledge_statements_for(db.schema)
     ensure_source(db, source.id, source.kind)
+    # Mentions are foreign keys into `asset`; make sure every token this run
+    # may link to has its row, and build the alias dictionary once.
+    registry = TokenRegistry(tokens=tuple(tokens))
+    if tokens:
+        sync_assets(db, registry)
+    aliases = alias_dictionary(registry)
 
     summary_day = moment.date().isoformat()
     outcomes: list[FetchOutcome] = []
@@ -257,11 +266,12 @@ def fetch_news(
             outcomes.append(FetchOutcome(token.symbol, "error", credits=source.cost, message=str(exc)))
             continue
 
-        stored = chunks = 0
+        stored = chunks = linked = 0
         for document in result.documents:
             written = store_document(db, document, retrieved_at=moment)
             stored += 1
             chunks += written.chunks_written
+            linked += link_mentions(db, written.document_id, aliases)
         _record(
             db,
             source.id,
@@ -280,6 +290,7 @@ def fetch_news(
                 results=result.results,
                 documents_stored=stored,
                 chunks_written=chunks,
+                mentions_linked=linked,
             )
         )
         service_logger.info(

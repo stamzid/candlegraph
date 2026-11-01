@@ -46,6 +46,69 @@ _CHUNK_TEMPLATE = "(%(document_id)s,%(ordinal)s,%(text)s,%(token_count)s)"
 
 _EMBEDDING_TEMPLATE = "(%(id)s,%(embedding)s,%(model)s)"
 
+# --- mentions and retrieval (step 7) -------------------------------------------------
+
+_MENTION_TEMPLATE = "(%(chunk_id)s,%(asset_id)s,%(method)s,%(confidence)s)"
+
+# The time bound every retrieval leg carries. `published_at <= bar` is the
+# no-look-ahead rule; an undated document is excluded unless display mode
+# asks for it; strategy mode also requires the text to have been *fetched*
+# by the bar. The asset filter joins the alias mentions.
+_RETRIEVAL_FILTER = """
+          d.id = c.document_id
+          AND (d.published_at <= %(bar)s OR (%(include_undated)s AND d.published_at IS NULL))
+          AND (NOT %(strategy)s OR d.retrieved_at <= %(bar)s)
+          AND (%(asset_id)s::text IS NULL OR EXISTS (
+                SELECT 1 FROM {ns}.mention m WHERE m.chunk_id = c.id AND m.asset_id = %(asset_id)s))
+"""
+
+# Each leg is an inner ORDER BY ... LIMIT (the shape its index answers) and
+# an outer ROW_NUMBER, so ranking never forces a scan of every filtered row.
+_DENSE_LEG = (
+    """
+    dense AS (
+        SELECT id, ROW_NUMBER() OVER (ORDER BY distance, id) AS rnk
+        FROM (
+            SELECT c.id, c.embedding <=> %(query_vector)s::halfvec AS distance
+            FROM {ns}.chunk c JOIN {ns}.document d ON d.id = c.document_id
+            WHERE c.embedding_model = %(model)s AND
+"""
+    + _RETRIEVAL_FILTER
+    + """
+            ORDER BY c.embedding <=> %(query_vector)s::halfvec, c.id
+            LIMIT %(candidates)s
+        ) nearest
+    )"""
+)
+
+_LEXICAL_LEG = (
+    """
+    lexical AS (
+        SELECT id, ROW_NUMBER() OVER (ORDER BY rank DESC, id) AS rnk
+        FROM (
+            SELECT c.id, ts_rank_cd(c.tsv, websearch_to_tsquery('english', %(tsquery)s)) AS rank
+            FROM {ns}.chunk c JOIN {ns}.document d ON d.id = c.document_id
+            WHERE %(tsquery)s <> ''
+              AND c.tsv @@ websearch_to_tsquery('english', %(tsquery)s) AND
+"""
+    + _RETRIEVAL_FILTER
+    + """
+            ORDER BY rank DESC, c.id
+            LIMIT %(candidates)s
+        ) matched
+    )"""
+)
+
+_RESULT_SELECT = """
+    SELECT c.id, c.document_id, c.ordinal, c.text, d.url, d.title, d.published_at, d.retrieved_at,
+           f.score, f.dense_rank, f.lexical_rank
+    FROM fused f
+    JOIN {ns}.chunk c ON c.id = f.id
+    JOIN {ns}.document d ON d.id = c.document_id
+    ORDER BY f.score DESC, c.id
+    LIMIT %(top_k)s
+"""
+
 
 def _excluded(names: tuple[str, ...], *, key: tuple[str, ...]) -> str:
     return ",\n            ".join(f"{n} = EXCLUDED.{n}" for n in names if n not in key)
@@ -81,6 +144,12 @@ class KnowledgeStatements:
     source_call_daily_stats: sql.Composed
     count_source_documents: sql.Composed
     get_recent_source_documents: sql.Composed
+    # mentions and retrieval (step 7)
+    upsert_mentions: sql.Composed
+    upsert_mentions_template: str
+    get_documents_without_mentions: sql.Composed
+    hybrid_search: sql.Composed
+    lexical_search: sql.Composed
 
 
 @lru_cache(maxsize=4)
@@ -303,6 +372,59 @@ def knowledge_statements_for(schema: str) -> KnowledgeStatements:
         """
     ).format(ns=ns)
 
+    # --- mentions and retrieval (step 7) ----------------------------------------
+
+    # Alias matches are exact and cheap; the primary key makes a re-link a no-op.
+    upsert_mentions = sql.SQL(
+        """
+        INSERT INTO {ns}.mention (chunk_id, asset_id, method, confidence)
+        VALUES %s
+        ON CONFLICT (chunk_id, asset_id, method) DO NOTHING
+        RETURNING chunk_id
+        """
+    ).format(ns=ns)
+
+    get_documents_without_mentions = sql.SQL(
+        """
+        SELECT d.id FROM {ns}.document d
+        WHERE EXISTS (SELECT 1 FROM {ns}.chunk c WHERE c.document_id = d.id)
+          AND NOT EXISTS (
+            SELECT 1 FROM {ns}.mention m JOIN {ns}.chunk c ON c.id = m.chunk_id WHERE c.document_id = d.id)
+        ORDER BY d.id
+        LIMIT %(limit)s
+        """
+    ).format(ns=ns)
+
+    # Reciprocal rank fusion of the two legs: 1/(k + rank) per leg a chunk
+    # appeared in, summed. A chunk both legs found outranks one found by one.
+    hybrid_search = sql.SQL(
+        "WITH"
+        + _DENSE_LEG
+        + ","
+        + _LEXICAL_LEG
+        + """,
+    fused AS (
+        SELECT COALESCE(dn.id, lx.id) AS id, dn.rnk AS dense_rank, lx.rnk AS lexical_rank,
+               COALESCE(1.0 / (%(rrf_k)s + dn.rnk), 0) + COALESCE(1.0 / (%(rrf_k)s + lx.rnk), 0) AS score
+        FROM dense dn FULL OUTER JOIN lexical lx ON dn.id = lx.id
+    )"""
+        + _RESULT_SELECT
+    ).format(ns=ns)
+
+    # The lexical leg alone: when no embedder is available the explanation
+    # still has a retrieval, and the result says which legs ran.
+    lexical_search = sql.SQL(
+        "WITH"
+        + _LEXICAL_LEG
+        + """,
+    fused AS (
+        SELECT lx.id, NULL::bigint AS dense_rank, lx.rnk AS lexical_rank,
+               1.0 / (%(rrf_k)s + lx.rnk) AS score
+        FROM lexical lx
+    )"""
+        + _RESULT_SELECT
+    ).format(ns=ns)
+
     return KnowledgeStatements(
         upsert_asset=upsert_asset,
         upsert_asset_template=_ASSET_TEMPLATE,
@@ -326,4 +448,9 @@ def knowledge_statements_for(schema: str) -> KnowledgeStatements:
         source_call_daily_stats=source_call_daily_stats,
         count_source_documents=count_source_documents,
         get_recent_source_documents=get_recent_source_documents,
+        upsert_mentions=upsert_mentions,
+        upsert_mentions_template=_MENTION_TEMPLATE,
+        get_documents_without_mentions=get_documents_without_mentions,
+        hybrid_search=hybrid_search,
+        lexical_search=lexical_search,
     )

@@ -1,6 +1,6 @@
 # Rollout: stage 1 — the knowledge graph on pgvector
 
-**Status:** current — 2026-11-01; steps 1–6 done, step 7 next. This directory holds **one
+**Status:** current — 2026-11-01; steps 1–7 done, step 8 next. This directory holds **one
 current rollout at a time**; this document is it, and each working session
 should update the progress table below. When the stage ships, this file
 moves to `docs/rollout/archive/<date>-<slug>.md` and the next rollout
@@ -23,7 +23,7 @@ Status line truthful.
 | 4 | Documents: normalise, hash, chunk | S | 2 | **done** 2026-10-31 |
 | 5 | Embeddings: Protocol, local provider, HNSW proven | M | 2, 4 | **done** 2026-11-01 |
 | 6 | Tavily source, budget guard, `source_call` ledger | M | 2 | **done** 2026-11-01 |
-| 7 | Hybrid retrieval with the no-look-ahead bound | M | 3, 4, 5 | not started |
+| 7 | Hybrid retrieval with the no-look-ahead bound | M | 3, 4, 5 | **done** 2026-11-01 |
 | 8 | `signals --explain`: explain, validate, cache | L | 6, 7 | not started |
 | 9 | Observer: `collect_knowledge` + four findings | S | 6, 8 | not started |
 | 10 | MCP server (optional extra) + stage closeout | M | 8 | not started |
@@ -286,6 +286,38 @@ similarity is deterministic: the lexical leg finds an exact ticker the
 dense leg misses and vice versa; **the no-look-ahead test** — append a
 document published after the bar, retrieval for that bar is unchanged.
 This is the invariant-17 analogue and the test the whole stage leans on.
+
+**Outcome (2026-11-01).** Done, plus the entity linking the asset filter
+needs. `knowledge/retrieve.py`: `RetrievalConfig` (top-k, per-leg
+candidates, RRF `k=60`, `display`/`strategy` mode, undated handling),
+`retrieve()` returning `RetrievedChunk`s with provenance and the legs that
+found each, a `Reranker` Protocol with a no-op default, and
+`format_results`. One SQL statement (`hybrid_search`) with each leg as an
+index-shaped `ORDER BY … LIMIT` subquery — HNSW cosine over the active
+model's vectors, GIN `tsvector` via `websearch_to_tsquery` — fused by
+`1/(k+rank)` per leg; every leg carries `published_at <= bar`, undated
+excluded unless display mode asks (then flagged), `retrieved_at <= bar` in
+strategy mode, and an asset filter over `mention`. `lexical_search` runs the
+lexical leg alone when no embedder is reachable and the result says so.
+`knowledge/mentions.py`: alias linking as a pure whole-word, case-insensitive
+match (`find_mentions`), `link_mentions` (idempotent on the PK) and a
+`link_unlinked_documents` backfill; `news.fetch_news` syncs assets and links
+mentions as documents land. Settings `RETRIEVAL_BACKEND` (only `postgres`;
+`ragflow` refused with a pointer to its evaluation), `RETRIEVAL_TOP_K`,
+`RETRIEVAL_CANDIDATES`; CLI `knowledge search` and `knowledge
+link-mentions`; `make search`, `make link-mentions`. No schema change. 45
+unit tests (RRF, the lexical query, config validation, statement/parameter
+plumbing, the lexical fallback, the reranker seam, alias boundaries, the
+backend guard, CLI) and 9 integration tests on a seeded corpus with the fake
+embedder: the lexical leg finds the ticker the dense leg misses and vice
+versa; a chunk both legs find is scored by RRF and ranks first; **appending a
+document published after the bar leaves the bar's results unchanged** while
+the next day sees it; undated excluded by default and flagged on request;
+strategy mode refuses text fetched after the bar; the asset filter drops an
+unlinked chunk the dense leg found; lexical-only answers; linking is
+idempotent and the pipeline links what it stores. RAGFlow was evaluated as a
+second backend and recorded in `docs/knowledge/ragflow/DESIGN.md`: free, not
+more optimal for this corpus, revisit triggers listed.
 
 ## Step 8 — `signals --explain`
 

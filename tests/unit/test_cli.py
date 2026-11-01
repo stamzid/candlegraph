@@ -337,3 +337,77 @@ def test_knowledge_fetch_news_exits_non_zero_on_a_failed_run(
 def test_knowledge_fetch_news_without_a_key_exits_with_the_message(cli_env: FakeDatabase) -> None:
     with pytest.raises(SystemExit, match="TAVILY_API_KEY"):
         main(["knowledge", "fetch-news"])
+
+
+def test_knowledge_search_runs_a_lexical_retrieval_bounded_at_the_bar(
+    cli_env: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli_env.reads["lexical_search"] = [
+        {
+            "id": 1,
+            "document_id": 1,
+            "ordinal": 0,
+            "text": "WBTC slipped on ETF outflows.",
+            "url": "https://x.com/a",
+            "title": "Outflows",
+            "published_at": datetime(2026, 10, 24, 9, 0, tzinfo=UTC),
+            "retrieved_at": datetime(2026, 10, 24, 14, 0, tzinfo=UTC),
+            "score": 1 / 61,
+            "dense_rank": None,
+            "lexical_rank": 1,
+        }
+    ]
+
+    assert (
+        main(
+            [
+                "knowledge",
+                "search",
+                "outflows",
+                "--symbol",
+                "WBTC",
+                "--at",
+                "2026-10-24T14:00:00+00:00",
+                "--lexical-only",
+            ]
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "1 chunks as of 2026-10-24 14:00 UTC (display; lexical only)" in out
+    assert "https://x.com/a" in out
+    ((_, params),) = [(name, p) for name, p in cli_env.fetches if name == "lexical_search"]
+    assert params["asset_id"] == "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+    assert params["tsquery"] == '"WBTC"'
+
+
+def test_knowledge_search_refuses_an_untracked_symbol(cli_env: FakeDatabase) -> None:
+    with pytest.raises(SystemExit, match="tracked: WBTC, SHIB"):
+        main(["knowledge", "search", "q", "--symbol", "DOGE", "--lexical-only"])
+
+
+def test_knowledge_search_refuses_an_unbuilt_backend_with_the_evaluation(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    monkeypatch.setattr(
+        "candlegraph.cli.get_settings",
+        lambda: make_settings(tokens_file=str(tokens_file), retrieval_backend="ragflow"),
+    )
+    set_db(FakeDatabase())
+
+    with pytest.raises(SystemExit, match=r"ragflow/DESIGN\.md"):
+        main(["knowledge", "search", "q", "--lexical-only"])
+
+
+def test_knowledge_link_mentions_backfills_and_reports(
+    cli_env: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli_env.reads["get_documents_without_mentions"] = [{"id": 1}]
+    cli_env.reads["get_chunks"] = [{"id": 5, "text": "WBTC moved"}]
+
+    assert main(["knowledge", "link-mentions"]) == 0
+
+    assert "linked 1 documents, 1 new mentions" in capsys.readouterr().out
+    assert [label for label, _ in cli_env.upserts] == ["upsert_asset", "upsert_mentions"]

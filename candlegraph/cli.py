@@ -179,6 +179,28 @@ def _parser() -> argparse.ArgumentParser:
     fetch.add_argument(
         "--symbol", action="append", default=None, help="only these tokens (repeatable; default: all tracked)"
     )
+    search = knowledge_sub.add_parser(
+        "search", help="hybrid retrieval over stored news as of a bar: dense + lexical, fused, no look-ahead"
+    )
+    search.add_argument("query", help="what to look for, in words")
+    search.add_argument("--symbol", default=None, help="restrict to chunks mentioning this token")
+    search.add_argument("--at", default=None, help="the bar, ISO 8601 UTC (default: now)")
+    search.add_argument(
+        "--top-k", type=int, default=None, help="results to return (default: RETRIEVAL_TOP_K)"
+    )
+    search.add_argument("--lexical-only", action="store_true", help="skip the embedder; tsvector leg alone")
+    search.add_argument(
+        "--mode",
+        choices=["display", "strategy"],
+        default="display",
+        help="strategy also requires retrieved_at <= bar and never returns undated text",
+    )
+    search.add_argument(
+        "--include-undated", action="store_true", help="display mode: show undated chunks, flagged"
+    )
+    knowledge_sub.add_parser(
+        "link-mentions", help="link stored chunks to the assets their aliases name (backfill; idempotent)"
+    )
     for name, text in (
         ("embed", "embed chunks that have no vector yet (or one from another model)"),
         ("reembed", "same as embed; the name to reach for after changing EMBEDDING_MODEL"),
@@ -797,6 +819,65 @@ def _knowledge(settings: Settings, args: argparse.Namespace) -> int:
                 "run `candlegraph knowledge embed` to vectorise the new chunks"
             )
             return 0 if fetched.ok else 1
+        case "search":
+            from datetime import UTC, datetime
+
+            from candlegraph.knowledge.embed import EmbeddingError, build_embedder
+            from candlegraph.knowledge.retrieve import (
+                RetrievalConfig,
+                RetrievalError,
+                check_backend,
+                format_results,
+                retrieve,
+            )
+
+            top_k = args.top_k or settings.retrieval_top_k
+            try:
+                check_backend(settings.retrieval_backend)
+                config = RetrievalConfig(
+                    top_k=top_k,
+                    candidates=max(settings.retrieval_candidates, top_k),
+                    mode=args.mode,
+                    include_undated=args.include_undated,
+                )
+            except RetrievalError as exc:
+                raise SystemExit(str(exc)) from exc
+            bar = datetime.fromisoformat(args.at).astimezone(UTC) if args.at else datetime.now(tz=UTC)
+            asset_id = None
+            terms: list[str] = []
+            if args.symbol:
+                registry = get_token_registry()
+                token = registry.by_symbol(args.symbol)
+                if token is None:
+                    raise SystemExit(f"unknown token {args.symbol!r}; tracked: {', '.join(registry.symbols)}")
+                asset_id = token.address
+                terms = list(token.aliases) or [token.symbol]
+            embedder = None
+            if not args.lexical_only:
+                try:
+                    embedder = build_embedder(settings)
+                except EmbeddingError as exc:
+                    print(f"no embedder: {exc}; lexical only")
+            result = retrieve(
+                get_db(),
+                args.query,
+                bar=bar,
+                embedder=embedder,
+                terms=terms,
+                asset_id=asset_id,
+                config=config,
+            )
+            print(format_results(result))
+            return 0
+        case "link-mentions":
+            from candlegraph.knowledge.mentions import alias_dictionary, link_unlinked_documents
+
+            registry = get_token_registry()
+            db = get_db()
+            sync_assets(db, registry)
+            documents, mentions = link_unlinked_documents(db, alias_dictionary(registry))
+            print(f"linked {documents} documents, {mentions} new mentions")
+            return 0
         case "embed" | "reembed":
             db = get_db()
             try:

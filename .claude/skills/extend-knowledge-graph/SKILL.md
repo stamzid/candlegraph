@@ -6,8 +6,9 @@ description: Build or extend candlegraph's knowledge layer (stage 1) — the pgv
 # Extend the knowledge graph
 
 The layer is **partly built**: the schema, the asset sync, the document
-pipeline, embeddings, and the Tavily source with its budget guard and
-ledger (rollout steps 1–6) exist; retrieval onwards does not. Read
+pipeline, embeddings, the Tavily source with its budget guard and ledger,
+alias entity linking and hybrid retrieval (rollout steps 1–7) exist;
+`--explain` onwards does not. Read
 `docs/knowledge/graph/DESIGN.md` first and the four companions as you reach
 them. Every step below exists
 because of a decision recorded there; do not reverse one in code without
@@ -70,6 +71,21 @@ entity (an index, an exchange) is a row in `asset` with a new `kind` value
 and a line in the graph document's schema table; it is not a new table.
 Edges are derived from stored data (`pool`, `pairwise`), never asserted by
 a model.
+
+## 3b. Retrieval and its bound
+
+Every retrieval goes through `retrieve.retrieve(db, query, bar=…)`. The
+bar is not optional: `published_at <= bar` is the no-look-ahead rule, and
+the integration test that appends a later document and asserts the bar is
+unchanged is the one the stage leans on — never weaken it. Use
+`mode="strategy"` for anything a backtest may read (adds
+`retrieved_at <= bar`, never returns undated text); `display` may show
+undated chunks only when asked, flagged. Pass `terms=` (aliases, a ticker)
+for the lexical leg and `asset_id=` to filter by alias mentions — the
+filter only works for documents that have been linked, which the news
+pipeline does as it stores and `make link-mentions` backfills. A second
+backend is a `RETRIEVAL_BACKEND` value and the same `retrieve()` signature;
+`docs/knowledge/ragflow/DESIGN.md` records why RAGFlow is not one yet.
 
 ## 4. Changing the embedding model
 

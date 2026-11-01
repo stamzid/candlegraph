@@ -117,6 +117,12 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   nothing in the test suite downloads a model. The Ollama service is
   behind the `knowledge` compose profile: `make up` does not start it,
   `make up-knowledge` does, and the first start pulls ~1.2 GB.
+- Retrieval always takes the bar it is explaining and never returns text
+  published after it; `mode="strategy"` is the only thing a backtest may
+  read. The asset filter joins alias `mention` rows, so a document that
+  was never linked is invisible to it — `make link-mentions` backfills.
+  `RETRIEVAL_BACKEND=ragflow` is refused on purpose; the evaluation is in
+  `docs/knowledge/ragflow/DESIGN.md` and lists what would change the call.
 - The UI's units are fixed: rates in **percent per year**, trading costs
   in **basis points**; the CLI and `.env` take rates as decimal fractions
   (`0.04` = 4%) and say so in their help. Do not add an input that leaves

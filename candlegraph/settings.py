@@ -141,6 +141,15 @@ class Settings(BaseSettings):
     # How far before the bar a news search looks.
     knowledge_search_window_hours: int = Field(default=24, ge=1)
 
+    # --- Knowledge: retrieval -------------------------------------------------
+    # Which engine answers "what was said about this asset before this bar".
+    # `postgres` is the hybrid pgvector + tsvector retrieval in knowledge/retrieve.py.
+    # `ragflow` is evaluated and not built — docs/knowledge/ragflow/DESIGN.md.
+    retrieval_backend: str = "postgres"
+    # Fused chunks an explanation gets, and candidates each leg contributes.
+    retrieval_top_k: int = Field(default=8, ge=1)
+    retrieval_candidates: int = Field(default=40, ge=1)
+
     # --- Agents ------------------------------------------------------------
     # Where agent reports go: a comma-separated subset of
     # log, ledger, file, webhook, github.

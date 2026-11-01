@@ -7,8 +7,11 @@ the document pipeline (`knowledge/documents.py`: URL normalisation,
 `url_hash`, chunking, the upserts), embeddings (`knowledge/embed.py`,
 `bge-m3` via the `ollama` service) and the Tavily source with its budget
 guard and `source_call` ledger (`knowledge/sources/`, `budget.py`,
-`news.py`) are implemented — rollout steps 2–6. Retrieval and `--explain`
-are still design only.
+`news.py`), alias entity linking (`knowledge/mentions.py`) and hybrid
+retrieval with the no-look-ahead bound (`knowledge/retrieve.py`) are
+implemented — rollout steps 2–7. `--explain` is still design only. RAGFlow
+as an alternative retrieval backend was evaluated and declined for now
+(`../ragflow/DESIGN.md`).
 **Area (when built):** `candlegraph/knowledge/`, `alembic/versions/`,
 `candlegraph/cli.py` (`signals --explain`, `knowledge *`),
 `candlegraph/agents/observer/` (one new collect node)

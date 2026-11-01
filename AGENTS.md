@@ -36,6 +36,8 @@ a target, and never let CI run something that is not one either.
 | Stack plus the embedding model server | `make up-knowledge` (first start pulls `bge-m3`), `make logs-ollama` |
 | Embed chunks / re-encode after a model change | `make embed` / `make reembed` (or `candlegraph knowledge embed\|reembed`) |
 | Fetch news (one budgeted search per token per UTC day) | `make fetch-news` (or `candlegraph knowledge fetch-news [--symbol S]`) |
+| Hybrid retrieval as of a bar | `make search ARGS='"WBTC unlock" --symbol WBTC'` (or `candlegraph knowledge search`) |
+| Link stored chunks to the assets they name | `make link-mentions` (idempotent backfill; the news pipeline links as it stores) |
 | Rolling mean / volatility | `candlegraph stats WETH --window 24` |
 | Pairwise comparison | `candlegraph compare WETH WBTC` |
 | Signals | `candlegraph signals WETH --strategy bollinger [--store]` |
@@ -96,13 +98,15 @@ candlegraph/
   ui/
     viewmodels.py      Everything the UI computes. Plain Python, fully tested.
     app.py             The Streamlit script: widgets and charts only.
-  knowledge/           Stage 1, growing with docs/rollout/ROLLOUT.md. So far: schema, assets, documents, embeddings, Tavily.
+  knowledge/           Stage 1, growing with docs/rollout/ROLLOUT.md. So far: schema, assets, documents, embeddings, Tavily, retrieval.
     statements.py      Every SQL statement for the knowledge tables, built per schema.
     assets.py          tokens.yaml aliases -> asset rows. Pure transform + one upsert.
     documents.py       URL normalisation -> url_hash, sentence-boundary chunking (pure), document/chunk upserts.
     embed.py           Embedder Protocol; Ollama (bge-m3, default), OpenAI, and fake providers; resumable embed loop.
     budget.py          Pure credit guard: caps, reserve, refusal reasons, the 80%/100% usage grading.
-    news.py            The pipeline around every source call: (asset, UTC day) cache, guard, store, source_call row.
+    news.py            The pipeline around every source call: (asset, UTC day) cache, guard, store, link, source_call row.
+    mentions.py        Alias entity linking: whole-word, case-insensitive; mention rows the asset filter joins.
+    retrieve.py        Hybrid retrieval: ANN + tsvector legs, reciprocal rank fusion, published_at <= bar. Read-only.
     sources/
       base.py          Source Protocol: search(query, window) -> RawDocuments. Never writes, never decides.
       tavily.py        The metered client: bounded news search, backoff on 5xx, 429/432 never retried.
@@ -125,7 +129,7 @@ docs/<area>/<topic>/DESIGN.md   Design documents. Why, not how; `docs/README.md`
   analytics/         The statistics and models with their equations; risk management and the rate seam.
   rollout/ROLLOUT.md The one current rollout plan: ordered steps and a progress table.
   agents/            The agent framework, the observer, and the janitor.
-  knowledge/         Stage 1: schema, vector store, embeddings (implemented); Tavily, MCP, sources (proposed).
+  knowledge/         Stage 1: schema, vector store, embeddings, Tavily (implemented); MCP (proposed); sources, ragflow (surveys).
   incidents/<date>-<slug>/POSTMORTEM.md   What went down, why, and what changed so it cannot again.
 tests/unit/          Offline. No database, no network. Mirrors the package layout.
 tests/integration/   Throwaway TimescaleDB (testcontainers, or TEST_DATABASE_URL).
@@ -148,7 +152,7 @@ schema.graphql       Generated. `make sdl`; a test fails if it is stale.
 | `source` | one row per document source (`tavily`, `rss:<feed>`, `manual`) | `id` | plain |
 | `document` | one row per retrieved document | `url_hash` (unique; sha256 of the normalised URL) | plain |
 | `chunk` | one embedded piece of a document; `embedding halfvec(1024)` + `embedding_model`, one active model | `(document_id, ordinal)` | plain — the ANN index must be global |
-| `mention` | a chunk naming an asset | `(chunk_id, asset_id, method)` | plain |
+| `mention` | a chunk naming an asset; `alias` method, confidence 1.0, written as documents land | `(chunk_id, asset_id, method)` | plain |
 | `edge` | a derived, time-bounded relation between assets | `(from_id, to_id, relation, valid_from)` | plain |
 | `explanation` | one explained signal | `(strategy, symbol, period_start_unix)` | plain for now |
 | `source_call` | one metered-source call, refusals included; status `ok`/`error`/`budget_refused`/`rate_limited` | `id` | plain |

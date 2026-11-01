@@ -192,3 +192,11 @@ def test_tavily_defaults_follow_the_design_document() -> None:
     assert settings.tavily_max_results == 8
     assert settings.tavily_max_tries == 3
     assert settings.knowledge_search_window_hours == 24
+
+
+def test_retrieval_defaults_name_the_built_backend() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.retrieval_backend == "postgres"
+    assert settings.retrieval_top_k == 8
+    assert settings.retrieval_candidates == 40

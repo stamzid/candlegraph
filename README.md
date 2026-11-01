@@ -136,6 +136,7 @@ see [`.env.example`](.env.example) for the full list.
 | `OLLAMA_URL` | `http://ollama:11434` | The `ollama` compose service, started by `make up-knowledge`. |
 | `TAVILY_API_KEY` | unset | **Required for `fetch-news`.** Free tier ~1,000 credits/month; without it the news pipeline refuses and everything else still works. |
 | `TAVILY_MONTHLY_CREDITS` / `TAVILY_DAILY_CREDITS` / `TAVILY_RESERVE_CREDITS` | 1000 / 40 / 50 | The budget guard's caps: the plan, a daily smoothing cap, and a reserve kept for manual searches. |
+| `RETRIEVAL_BACKEND` / `RETRIEVAL_TOP_K` / `RETRIEVAL_CANDIDATES` | `postgres` / 8 / 40 | The hybrid pgvector + `tsvector` retrieval; `ragflow` is refused with a pointer to its evaluation. |
 | `RISK_FREE_RATE_SOURCE` / `INFLATION_RATE` | `constant` / 0.0 | Where the risk-free rate comes from (a Tavily source is planned), and the inflation rate for the real rate printed beside it. |
 | `UI_HOST`, `UI_PORT` | `0.0.0.0`, 8501 | Streamlit UI. |
 | `DATA_POLL_INTERVAL` | 300 | Seconds between ingest runs. |
@@ -217,6 +218,8 @@ a failing one always is.
 | `knowledge sync-assets` | Load `asset` rows (addresses, symbols, aliases) from `config/tokens.yaml` |
 | `knowledge embed` / `knowledge reembed [--batch-size N] [--limit N]` | Embed chunks without a vector (or from another model) with the configured `EMBEDDING_MODEL`; resumable |
 | `knowledge fetch-news [--symbol S]` | One budgeted Tavily news search per token per UTC day; cached days cost nothing, refusals are ledgered |
+| `knowledge search QUERY [--symbol S] [--at ISO] [--mode display\|strategy] [--lexical-only]` | Hybrid retrieval over stored news as of a bar: dense + lexical legs fused by reciprocal rank, nothing published after the bar |
+| `knowledge link-mentions` | Link stored chunks to the assets their aliases name (idempotent backfill) |
 
 ## Data quality
 
@@ -465,9 +468,12 @@ Next, in order:
    (`candlegraph knowledge sync-assets`), the document pipeline (URL
    normalisation, `url_hash`, chunking), embeddings (`bge-m3` served by an
    optional `ollama` compose service, `make up-knowledge && make embed`)
-   and the Tavily news source (`make fetch-news`: one budgeted search per
-   token per UTC day, every call ledgered) are in; retrieval and
-   explanation are next. See `docs/knowledge/` and `docs/rollout/ROLLOUT.md`.
+   the Tavily news source (`make fetch-news`: one budgeted search per
+   token per UTC day, every call ledgered) and hybrid retrieval
+   (`make search`: pgvector + `tsvector` legs fused by reciprocal rank,
+   bounded by `published_at <= bar`) are in; `--explain` is next. RAGFlow
+   was evaluated as a second retrieval backend and declined for now
+   (`docs/knowledge/ragflow/DESIGN.md`). See `docs/knowledge/` and `docs/rollout/ROLLOUT.md`.
 2. **Harness** — YAML pipeline specs, an event bus, OpenTelemetry, and the
    continuous aggregates deferred from the TimescaleDB migration.
 3. **Traditional markets** — NASDAQ and NYSE equities alongside crypto, which

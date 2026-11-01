@@ -301,3 +301,19 @@ def test_run_news_fetch_refuses_an_untracked_symbol() -> None:
             symbols=["DOGE"],
             registry=registry,
         )
+
+
+# --- entity linking rides along with storage -----------------------------------------
+
+
+def test_a_fetch_syncs_assets_and_links_mentions_for_the_documents_it_stores() -> None:
+    db = NewsDatabase()
+    db.reads["get_chunks"] = [{"id": 1, "text": "WBTC and Bitcoin both moved."}]
+    source = FakeSource([SearchResult([document()], 1, 1)])
+
+    summary = fetch_news(db, settings(), source, TOKENS[:1], now=NOW)
+
+    labels = [label for label, _ in db.upserts]
+    assert "upsert_asset" in labels, "mention rows are foreign keys into asset; the sync runs first"
+    assert "upsert_mentions" in labels
+    assert summary.outcomes[0].mentions_linked == 1

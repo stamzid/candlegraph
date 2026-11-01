@@ -17,7 +17,9 @@ from alembic.config import Config
 from candlegraph.knowledge.assets import sync_assets
 from candlegraph.knowledge.documents import ChunkConfig, RawDocument, ensure_source, store_document, url_hash
 from candlegraph.knowledge.embed import HashEmbedder, embed_pending, embedding_backlog, to_vector_literal
+from candlegraph.knowledge.mentions import link_mentions, link_unlinked_documents
 from candlegraph.knowledge.news import fetch_news, source_spend
+from candlegraph.knowledge.retrieve import RetrievalConfig, retrieve, rrf_score
 from candlegraph.knowledge.sources.base import SearchResult
 from candlegraph.knowledge.sources.tavily import TavilyRateLimitError
 from candlegraph.knowledge.statements import knowledge_statements_for
@@ -528,3 +530,220 @@ def test_the_rate_limited_migration_round_trips_folding_rows_into_error(
         now=NEWS_NOW,
     )
     assert _calls(kdb)[-1]["status"] == "rate_limited"
+
+
+# --- hybrid retrieval (step 7) ---------------------------------------------------
+
+
+BAR = datetime(2026, 10, 24, 14, 0, tzinfo=UTC)
+BEFORE = datetime(2026, 10, 24, 9, 12, tzinfo=UTC)
+FETCHED = datetime(2026, 10, 24, 14, 3, tzinfo=UTC)
+ALIASES = {WBTC: ("WBTC", "Bitcoin"), SHIB: ("SHIB",)}
+TICKER_TEXT = "WBTC slipped as Bitcoin ETF outflows continued for a fourth day."
+TRANSFER_TEXT = "A large transfer moved to an exchange overnight."
+
+
+def _seed_doc(
+    kdb: DatabaseManager,
+    url: str,
+    text: str,
+    published_at: datetime | None = BEFORE,
+    retrieved_at: datetime = FETCHED,
+) -> int:
+    ensure_source(kdb, "manual", "file")
+    stored = store_document(
+        kdb,
+        RawDocument(
+            source_id="manual",
+            url=url,
+            raw_text=text,
+            title=url.rsplit("/", 1)[-1],
+            published_at=published_at,
+        ),
+        retrieved_at=retrieved_at,
+    )
+    return stored.document_id
+
+
+def _seed_news_corpus(kdb: DatabaseManager) -> dict[str, int]:
+    """Two dated documents before the bar, embedded and alias-linked."""
+    sync_assets(kdb, registry_from_tokens())
+    ids = {
+        "ticker": _seed_doc(kdb, "https://news.example/ticker", TICKER_TEXT),
+        "transfer": _seed_doc(kdb, "https://news.example/transfer", TRANSFER_TEXT),
+    }
+    embed_pending(kdb, HashEmbedder())
+    for document_id in ids.values():
+        link_mentions(kdb, document_id, ALIASES)
+    return ids
+
+
+def registry_from_tokens() -> TokenRegistry:
+    return TokenRegistry(
+        tokens=(
+            Token(address=WBTC, symbol="WBTC", name="Wrapped BTC", aliases=("WBTC", "Bitcoin")),
+            Token(address=SHIB, symbol="SHIB", name="SHIBA INU"),
+        )
+    )
+
+
+def _chunk_ids(kdb: DatabaseManager, document_id: int) -> set[int]:
+    return {int(r["id"]) for r in _chunks(kdb, document_id)}
+
+
+def test_the_lexical_leg_finds_the_ticker_the_dense_leg_misses_and_vice_versa(kdb: DatabaseManager) -> None:
+    """The reason for two legs, proven on a corpus where each leg is blind to one document."""
+    ids = _seed_news_corpus(kdb)
+
+    # The dense query is the transfer sentence verbatim (distance 0 for its chunk);
+    # the lexical term is the ticker the transfer sentence never says. One
+    # candidate per leg makes each leg's blind spot visible; the fused list
+    # is their union.
+    result = retrieve(
+        kdb,
+        TRANSFER_TEXT,
+        bar=BAR,
+        embedder=HashEmbedder(),
+        terms=["WBTC"],
+        config=RetrievalConfig(top_k=2, candidates=1),
+    )
+
+    by_doc = {c.document_id: c for c in result.chunks}
+    assert by_doc[ids["transfer"]].legs == "dense"
+    assert by_doc[ids["ticker"]].legs == "lexical"
+    assert result.dense_used
+
+
+def test_a_chunk_both_legs_find_is_scored_by_reciprocal_rank_fusion(kdb: DatabaseManager) -> None:
+    ids = _seed_news_corpus(kdb)
+
+    result = retrieve(kdb, TICKER_TEXT, bar=BAR, embedder=HashEmbedder(), terms=["WBTC", "Bitcoin"])
+
+    top = result.chunks[0]
+    assert top.document_id == ids["ticker"]
+    assert top.legs == "both"
+    assert top.score == pytest.approx(rrf_score(top.dense_rank, top.lexical_rank), rel=1e-6)
+    assert all(top.score > other.score for other in result.chunks[1:])
+
+
+def test_appending_a_document_published_after_the_bar_does_not_change_the_bar(kdb: DatabaseManager) -> None:
+    """The invariant-17 analogue and the test the whole stage leans on."""
+    _seed_news_corpus(kdb)
+    query = retrieve(kdb, TICKER_TEXT, bar=BAR, embedder=HashEmbedder(), terms=["WBTC"])
+    before = [(c.chunk_id, round(c.score, 9)) for c in query.chunks]
+
+    later = _seed_doc(
+        kdb,
+        "https://news.example/later",
+        "WBTC surged after the bar on fresh Bitcoin ETF inflows.",
+        published_at=datetime(2026, 10, 25, 9, 0, tzinfo=UTC),
+        retrieved_at=datetime(2026, 10, 25, 9, 5, tzinfo=UTC),
+    )
+    embed_pending(kdb, HashEmbedder())
+    link_mentions(kdb, later, ALIASES)
+
+    after = retrieve(kdb, TICKER_TEXT, bar=BAR, embedder=HashEmbedder(), terms=["WBTC"])
+
+    assert [(c.chunk_id, round(c.score, 9)) for c in after.chunks] == before
+    assert later not in {c.document_id for c in after.chunks}
+    # And the same document is visible to a bar after its publication.
+    next_day = retrieve(
+        kdb,
+        TICKER_TEXT,
+        bar=datetime(2026, 10, 25, 12, 0, tzinfo=UTC),
+        embedder=HashEmbedder(),
+        terms=["WBTC"],
+    )
+    assert later in {c.document_id for c in next_day.chunks}
+
+
+def test_an_undated_document_is_excluded_by_default_and_flagged_when_asked_for(kdb: DatabaseManager) -> None:
+    _seed_news_corpus(kdb)
+    undated = _seed_doc(kdb, "https://news.example/undated", "WBTC rumour with no date.", published_at=None)
+    embed_pending(kdb, HashEmbedder())
+
+    strict = retrieve(kdb, "WBTC rumour", bar=BAR, embedder=HashEmbedder(), terms=["WBTC"])
+    assert undated not in {c.document_id for c in strict.chunks}
+
+    shown = retrieve(
+        kdb,
+        "WBTC rumour",
+        bar=BAR,
+        embedder=HashEmbedder(),
+        terms=["WBTC"],
+        config=RetrievalConfig(include_undated=True),
+    )
+    flagged = next(c for c in shown.chunks if c.document_id == undated)
+    assert flagged.undated is True
+
+
+def test_strategy_mode_refuses_text_that_was_fetched_after_the_bar(kdb: DatabaseManager) -> None:
+    """Published yesterday, retrieved today: a strategy running yesterday could not have read it."""
+    _seed_news_corpus(kdb)
+    late_fetch = _seed_doc(
+        kdb,
+        "https://news.example/late-fetch",
+        "WBTC commentary published early, fetched late.",
+        published_at=BEFORE,
+        retrieved_at=datetime(2026, 10, 25, 8, 0, tzinfo=UTC),
+    )
+    embed_pending(kdb, HashEmbedder())
+
+    display = retrieve(kdb, "WBTC commentary", bar=BAR, embedder=HashEmbedder(), terms=["WBTC"])
+    strategy = retrieve(
+        kdb,
+        "WBTC commentary",
+        bar=BAR,
+        embedder=HashEmbedder(),
+        terms=["WBTC"],
+        config=RetrievalConfig(mode="strategy"),
+    )
+
+    assert late_fetch in {c.document_id for c in display.chunks}
+    assert late_fetch not in {c.document_id for c in strategy.chunks}
+
+
+def test_the_asset_filter_keeps_only_chunks_the_alias_linker_tied_to_the_asset(kdb: DatabaseManager) -> None:
+    ids = _seed_news_corpus(kdb)
+
+    unfiltered = retrieve(kdb, TRANSFER_TEXT, bar=BAR, embedder=HashEmbedder(), terms=["WBTC"])
+    filtered = retrieve(kdb, TRANSFER_TEXT, bar=BAR, embedder=HashEmbedder(), terms=["WBTC"], asset_id=WBTC)
+
+    assert ids["transfer"] in {c.document_id for c in unfiltered.chunks}, "dense finds it without the filter"
+    assert {c.document_id for c in filtered.chunks} == {ids["ticker"]}, (
+        "it names no asset, so the filter drops it"
+    )
+
+
+def test_without_an_embedder_the_lexical_leg_still_answers(kdb: DatabaseManager) -> None:
+    ids = _seed_news_corpus(kdb)
+
+    result = retrieve(kdb, "outflows", bar=BAR, terms=["Bitcoin"])
+
+    assert result.dense_used is False
+    assert {c.document_id for c in result.chunks} == {ids["ticker"]}
+    assert result.chunks[0].legs == "lexical"
+
+
+def test_link_mentions_is_idempotent_and_the_backfill_finds_unlinked_documents(kdb: DatabaseManager) -> None:
+    sync_assets(kdb, registry_from_tokens())
+    document_id = _seed_doc(kdb, "https://news.example/link", TICKER_TEXT)
+
+    documents, written = link_unlinked_documents(kdb, ALIASES)
+    assert (documents, written) == (1, len(_chunk_ids(kdb, document_id)))
+
+    assert link_mentions(kdb, document_id, ALIASES) == 0, "a repeat writes nothing"
+    rows = kdb.fetch_all(f'SELECT asset_id, method, confidence FROM "{kdb.schema}".mention')
+    assert {r["asset_id"] for r in rows} == {WBTC}
+    assert all(r["method"] == "alias" and float(r["confidence"]) == 1.0 for r in rows)
+
+
+def test_fetch_news_links_the_documents_it_stores(kdb: DatabaseManager) -> None:
+    raw = RawDocument(source_id="tavily", url="https://x.com/story", raw_text=TICKER_TEXT, title="T")
+    source = OneShotSource(SearchResult([raw], credits=1, results=1))
+
+    summary = fetch_news(kdb, news_settings(), source, [WBTC_TOKEN], now=NEWS_NOW)
+
+    assert summary.outcomes[0].mentions_linked >= 1
+    rows = kdb.fetch_all(f'SELECT DISTINCT asset_id FROM "{kdb.schema}".mention')
+    assert {r["asset_id"] for r in rows} == {WBTC}
