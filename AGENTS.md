@@ -41,6 +41,7 @@ a target, and never let CI run something that is not one either.
 | Rolling mean / volatility | `candlegraph stats WETH --window 24` |
 | Pairwise comparison | `candlegraph compare WETH WBTC` |
 | Signals | `candlegraph signals WETH --strategy bollinger [--store]` |
+| Explain a signal with cited news (no LLM key needed) | `make explain ARGS='WETH --strategy bollinger'` (or `candlegraph signals WETH --explain [--at ISO] [--reference S] [--no-search]`) |
 | Backtest | `candlegraph backtest WETH --strategy all` |
 | Portfolio | `candlegraph portfolio --risk-free-rate 0.04 --objective max_sharpe` |
 | ARIMA forecast | `candlegraph forecast WETH --auto-order` |
@@ -98,7 +99,7 @@ candlegraph/
   ui/
     viewmodels.py      Everything the UI computes. Plain Python, fully tested.
     app.py             The Streamlit script: widgets and charts only.
-  knowledge/           Stage 1, growing with docs/rollout/ROLLOUT.md. So far: schema, assets, documents, embeddings, Tavily, retrieval.
+  knowledge/           Stage 1, growing with docs/rollout/ROLLOUT.md. So far: schema, assets, documents, embeddings, Tavily, retrieval, explain.
     statements.py      Every SQL statement for the knowledge tables, built per schema.
     assets.py          tokens.yaml aliases -> asset rows. Pure transform + one upsert.
     documents.py       URL normalisation -> url_hash, sentence-boundary chunking (pure), document/chunk upserts.
@@ -107,6 +108,8 @@ candlegraph/
     news.py            The pipeline around every source call: (asset, UTC day) cache, guard, store, link, source_call row.
     mentions.py        Alias entity linking: whole-word, case-insensitive; mention rows the asset filter joins.
     retrieve.py        Hybrid retrieval: ANN + tsvector legs, reciprocal rank fusion, published_at <= bar. Read-only.
+    explain.py         `signals --explain`: news for the (asset, day) via news.py, retrieval as of the bar, the pure numeric context, the narrator (template first), the explanation upsert.
+    validate.py        Pure: rationale + retrieved ids -> accepted rationale; a sentence citing an unknown id is stripped and flagged.
     sources/
       base.py          Source Protocol: search(query, window) -> RawDocuments. Never writes, never decides.
       tavily.py        The metered client: bounded news search, backoff on 5xx, 429/432 never retried.

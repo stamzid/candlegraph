@@ -14,6 +14,8 @@ docker compose exec -T worker python -m candlegraph stats WETH --window 168
 docker compose exec -T worker python -m candlegraph compare WETH WBTC --window 168
 docker compose exec -T worker python -m candlegraph forecast WETH --auto-order
 docker compose exec -T worker python -m candlegraph signals WETH --strategy bollinger --store
+# Explain the latest bar with cited news (no LLM key needed; one Tavily search per token per day at most)
+make explain ARGS='WETH --strategy bollinger'
 docker compose exec -T worker python -m candlegraph backtest WETH --strategy all
 docker compose exec -T worker python -m candlegraph portfolio --risk-free-rate 0.04 --max-weight 0.4
 docker compose exec -T worker python -m candlegraph risk WETH --benchmark WBTC --confidence 0.99

@@ -166,6 +166,7 @@ def fetch_news(
     source: Source,
     tokens: list[Token] | None = None,
     now: datetime | None = None,
+    bar: datetime | None = None,
 ) -> NewsFetchSummary:
     """One pass over ``tokens``: cache, budget, search, store, ledger.
 
@@ -174,8 +175,16 @@ def fetch_news(
         settings: Budget caps and the search window width.
         source: The metered source; tests hand in a fake.
         tokens: Defaults to the configured registry.
-        now: The bar the window ends at; defaults to the current hour. The
-            window is ``[now - KNOWLEDGE_SEARCH_WINDOW_HOURS, now]``.
+        now: The clock: ``called_at`` on the ledger row, ``retrieved_at`` on
+            every document, and the month and day the spend is summed over.
+            Defaults to the current time.
+        bar: The moment being explained. The cache key is its UTC day and
+            the search window is ``[bar - KNOWLEDGE_SEARCH_WINDOW_HOURS, bar]``.
+            Defaults to ``now``. Kept separate from ``now`` on purpose: an
+            explanation of last Tuesday's bar searches last Tuesday's news,
+            but the credit it spends is spent *today* and must be summed
+            into this month's budget, and the documents it stores were
+            fetched today, which is what ``retrieved_at <= bar`` reads.
 
     Returns:
         A summary with one outcome per token. Never raises for a failing
@@ -184,6 +193,7 @@ def fetch_news(
         same failure.
     """
     moment = (now or datetime.now(tz=UTC)).astimezone(UTC)
+    window_end = bar.astimezone(UTC) if bar is not None else moment
     tokens = list(tokens) if tokens is not None else list(get_token_registry())
     budget = budget_from(settings)
     statements = knowledge_statements_for(db.schema)
@@ -195,7 +205,7 @@ def fetch_news(
         sync_assets(db, registry)
     aliases = alias_dictionary(registry)
 
-    summary_day = moment.date().isoformat()
+    summary_day = window_end.date().isoformat()
     outcomes: list[FetchOutcome] = []
     halted = False
     for token in tokens:
@@ -208,7 +218,7 @@ def fetch_news(
             continue
 
         query = news_query(token)
-        key = cache_key(token.symbol, moment)
+        key = cache_key(token.symbol, window_end)
         (cached,) = db.fetch_all(statements.cached_search_exists, {"source_id": source.id, "cache_key": key})
         if int(cached["hits"]) > 0:
             outcomes.append(FetchOutcome(token.symbol, "cached", message="already searched today"))
@@ -233,9 +243,11 @@ def fetch_news(
             )
             continue
 
-        start = moment - timedelta(hours=settings.knowledge_search_window_hours)
+        start = window_end - timedelta(hours=settings.knowledge_search_window_hours)
         try:
-            result = source.search(query, start=start, end=moment, max_results=settings.tavily_max_results)
+            result = source.search(
+                query, start=start, end=window_end, max_results=settings.tavily_max_results
+            )
         except TavilyRateLimitError as exc:
             _record(
                 db,

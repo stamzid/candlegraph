@@ -1,6 +1,6 @@
 # Rollout: stage 1 — the knowledge graph on pgvector
 
-**Status:** current — 2026-11-01; steps 1–7 done, step 8 next. This directory holds **one
+**Status:** current — 2026-11-04; steps 1–8 done, step 9 next. This directory holds **one
 current rollout at a time**; this document is it, and each working session
 should update the progress table below. When the stage ships, this file
 moves to `docs/rollout/archive/<date>-<slug>.md` and the next rollout
@@ -24,7 +24,7 @@ Status line truthful.
 | 5 | Embeddings: Protocol, local provider, HNSW proven | M | 2, 4 | **done** 2026-11-01 |
 | 6 | Tavily source, budget guard, `source_call` ledger | M | 2 | **done** 2026-11-01 |
 | 7 | Hybrid retrieval with the no-look-ahead bound | M | 3, 4, 5 | **done** 2026-11-01 |
-| 8 | `signals --explain`: explain, validate, cache | L | 6, 7 | not started |
+| 8 | `signals --explain`: explain, validate, cache | L | 6, 7 | **done** 2026-11-04 |
 | 9 | Observer: `collect_knowledge` + four findings | S | 6, 8 | not started |
 | 10 | MCP server (optional extra) + stage closeout | M | 8 | not started |
 
@@ -333,6 +333,50 @@ network call (assert on `source_call`); with the budget exhausted,
 `explain` serves from cache and says so. README and AGENTS.md command
 tables gain the flag; `make sdl` only if GraphQL grew (it should not —
 this is CLI-first).
+
+**Outcome (2026-11-04).** Done, template-first. `knowledge/validate.py`
+(pure): `[n]`, `[n][m]` and `[n, m]` markers parsed, a sentence citing an
+id outside the retrieved set is **stripped**, never repaired, and the
+result lists the rejected ids and the removed sentences; a marker written
+after the full stop stays with the sentence it follows.
+`knowledge/explain.py`: `explain()` runs the sequence in the graph document
+— news for the `(asset, UTC day)` through `news.fetch_news` (which gained a
+`bar` argument so a historical bar searches that day's news and its cache
+key while the credit is ledgered *now* and sums into this month's budget;
+`retrieved_at` stays on the clock too), hybrid retrieval as of the bar
+filtered to the asset's mentions with the aliases as lexical terms, the
+pure `numeric_context` (price, 1h/3h/24h moves by last-price-before-horizon
+so a thin token's gaps are fine, window mean/std/z/high/low, and the move,
+correlation and beta against `KNOWLEDGE_REFERENCE_SYMBOL` over aligned bars
+— every missing figure `None`, computed from bars at or before the bar
+only), the narrator (`TemplateExplanationNarrator` by default, deterministic
+and citing every retrieved chunk; `AnthropicExplanationNarrator` behind the
+same `complete` seam as the agents', `KNOWLEDGE_LLM_MODEL` falling back to
+`AGENT_LLM_MODEL`), the validator, and the `explanation` upsert on the
+signal's natural key with the numeric context and the citation set as JSON.
+No Tavily key means no search and the output says "stored documents only";
+a budget refusal is a ledger row and the output says "serving stored
+documents"; no embedder means the lexical leg alone, said too. Statements
+`upsert_explanation`, `get_explanation`, `get_recent_explanations`. CLI
+`signals SYMBOL --explain [--at ISO] [--reference SYMBOL] [--no-search]`
+(explains the latest bar by default, prints the rationale, one line per
+citation with URL, publication time and retrieval time, the news and
+retrieval status, and the validator's note when it stripped anything);
+`make explain ARGS='WETH --strategy bollinger'`. Settings
+`KNOWLEDGE_LLM_MODEL`, `KNOWLEDGE_REFERENCE_SYMBOL`. **No schema change**
+and no GraphQL change. 52 unit tests (the validator exhaustively, the
+context's no-look-ahead and None-not-zero rules, the template's wording and
+citation set, the model narrator's seam and fallbacks, the pipeline on the
+replaying fake database: exit criterion without any key, invented citation
+stripped end to end, one network call for two explanations on a day, the
+window following the bar while the ledger follows the clock, budget refused
+serves stored documents, lexical fallback, bar selection, CLI) and 5
+integration tests on the seeded corpus with real prices: **the exit
+criterion** (citation with URL and timestamp, row stored, every cited chunk
+exists), **appending a document published after the bar leaves the bar's
+explanation unchanged** while the next day cites it, two explanations on one
+asset-day make one `source_call`, an exhausted budget serves from cache with
+a `budget_refused` row, and re-explaining is an upsert.
 
 ## Step 9 — Observer integration
 

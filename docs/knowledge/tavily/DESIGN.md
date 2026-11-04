@@ -4,8 +4,9 @@
 (`knowledge/sources/tavily.py`), the pure guard (`knowledge/budget.py`),
 the pipeline that wraps cache, budget and ledger around every call
 (`knowledge/news.py`), `candlegraph knowledge fetch-news`, and the News
-dashboard. The `explain()` wiring in the diagram below is step 8; until
-then the pipeline is driven by the CLI, the UI, and later the scheduler.
+dashboard. The `explain()` wiring in the diagram below landed with step 8
+(2026-11-04): `signals --explain` calls the same pipeline with the bar as
+the window's end and cache key, while the credit is ledgered at the clock.
 Pricing re-checked 2026-11-01: the free tier is still 1,000 credits a
 month; the per-search costs (basic 1, advanced 2) are pinned in
 `sources/tavily.py::SEARCH_COST` and were not contradicted by the page.

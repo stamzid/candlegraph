@@ -1,15 +1,18 @@
 # Knowledge graph: schema, retrieval, and how it attaches to what exists
 
-**Status:** in progress — 2026-10-31. The schema (all eight tables, pgvector
+**Status:** in progress — 2026-11-04. The schema (all eight tables, pgvector
 installed, revision `f399ca0770a0`), the asset sync
 (`candlegraph knowledge sync-assets`, aliases in `config/tokens.yaml`) and
 the document pipeline (`knowledge/documents.py`: URL normalisation,
 `url_hash`, chunking, the upserts), embeddings (`knowledge/embed.py`,
 `bge-m3` via the `ollama` service) and the Tavily source with its budget
 guard and `source_call` ledger (`knowledge/sources/`, `budget.py`,
-`news.py`), alias entity linking (`knowledge/mentions.py`) and hybrid
-retrieval with the no-look-ahead bound (`knowledge/retrieve.py`) are
-implemented — rollout steps 2–7. `--explain` is still design only. RAGFlow
+`news.py`), alias entity linking (`knowledge/mentions.py`), hybrid
+retrieval with the no-look-ahead bound (`knowledge/retrieve.py`) and
+`signals --explain` (`knowledge/explain.py`, `knowledge/validate.py`: the
+sequence below, the `explanation` upsert, template-first narration) are
+implemented — rollout steps 2–8. Still design only: the observer's
+`collect_knowledge` node (step 9) and the MCP server (step 10). RAGFlow
 as an alternative retrieval backend was evaluated and declined for now
 (`../ragflow/DESIGN.md`).
 **Area (when built):** `candlegraph/knowledge/`, `alembic/versions/`,
@@ -415,7 +418,8 @@ small fixed embedding model so similarity is deterministic.
 | `EMBEDDING_MODEL` | `BAAI/bge-m3` | must produce 1024 dimensions, or support truncation to 1024 |
 | `EMBEDDING_DIMENSIONS` | `1024` | fixed by the column type; a migration to change |
 | `RERANKER_MODEL` | empty | off by default |
-| `KNOWLEDGE_LLM_MODEL` | empty | the narrator; `AGENT_LLM_MODEL` is reused if unset |
+| `KNOWLEDGE_LLM_MODEL` | empty | the narrator; `AGENT_LLM_MODEL` is reused if unset; empty is the template, a first-class mode |
+| `KNOWLEDGE_REFERENCE_SYMBOL` | `WBTC` | the market-wide reference the numeric context compares a move against |
 
 ## Exit criterion, restated as tests
 

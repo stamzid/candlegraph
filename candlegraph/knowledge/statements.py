@@ -150,6 +150,10 @@ class KnowledgeStatements:
     get_documents_without_mentions: sql.Composed
     hybrid_search: sql.Composed
     lexical_search: sql.Composed
+    # explanations (step 8)
+    upsert_explanation: sql.Composed
+    get_explanation: sql.Composed
+    get_recent_explanations: sql.Composed
 
 
 @lru_cache(maxsize=4)
@@ -425,6 +429,47 @@ def knowledge_statements_for(schema: str) -> KnowledgeStatements:
         + _RESULT_SELECT
     ).format(ns=ns)
 
+    # --- explanations (step 8) ---------------------------------------------------
+
+    # Keyed by the signal's natural key, so re-explaining a bar is an upsert
+    # and the citation set for a bar is one row. `numeric_context` is what
+    # the narrator was shown; `citations` is the retrieved set the validator
+    # held the prose to. Both are JSON so the row is auditable on its own.
+    upsert_explanation = sql.SQL(
+        """
+        INSERT INTO {ns}.explanation
+            (strategy, symbol, period_start_unix, position, numeric_context, citations, rationale,
+             model, generated_at)
+        VALUES (%(strategy)s, %(symbol)s, %(period_start_unix)s, %(position)s, %(numeric_context)s,
+                %(citations)s, %(rationale)s, %(model)s, %(generated_at)s)
+        ON CONFLICT (strategy, symbol, period_start_unix) DO UPDATE SET
+            position = EXCLUDED.position,
+            numeric_context = EXCLUDED.numeric_context,
+            citations = EXCLUDED.citations,
+            rationale = EXCLUDED.rationale,
+            model = EXCLUDED.model,
+            generated_at = EXCLUDED.generated_at
+        """
+    ).format(ns=ns)
+
+    get_explanation = sql.SQL(
+        """
+        SELECT * FROM {ns}.explanation
+        WHERE strategy = %(strategy)s AND symbol = %(symbol)s AND period_start_unix = %(period_start_unix)s
+        """
+    ).format(ns=ns)
+
+    get_recent_explanations = sql.SQL(
+        """
+        SELECT strategy, symbol, period_start_unix, position, jsonb_array_length(citations) AS citations,
+               model, generated_at
+        FROM {ns}.explanation
+        WHERE (%(symbol)s::text IS NULL OR symbol = %(symbol)s)
+        ORDER BY generated_at DESC
+        LIMIT %(limit)s
+        """
+    ).format(ns=ns)
+
     return KnowledgeStatements(
         upsert_asset=upsert_asset,
         upsert_asset_template=_ASSET_TEMPLATE,
@@ -453,4 +498,7 @@ def knowledge_statements_for(schema: str) -> KnowledgeStatements:
         get_documents_without_mentions=get_documents_without_mentions,
         hybrid_search=hybrid_search,
         lexical_search=lexical_search,
+        upsert_explanation=upsert_explanation,
+        get_explanation=get_explanation,
+        get_recent_explanations=get_recent_explanations,
     )

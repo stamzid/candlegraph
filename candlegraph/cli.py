@@ -70,6 +70,23 @@ def _parser() -> argparse.ArgumentParser:
     _add_window(signals)
     signals.add_argument("--store", action="store_true", help="write the signals to the database")
     signals.add_argument("--tail", type=int, default=10, help="rows to print")
+    signals.add_argument(
+        "--explain",
+        action="store_true",
+        help="explain one bar (default: the latest) with the numeric context and cited news published "
+        "before it; stores an explanation row. One Tavily search per token per UTC day at most",
+    )
+    signals.add_argument("--at", default=None, help="with --explain: the bar to explain, ISO 8601 UTC")
+    signals.add_argument(
+        "--reference",
+        default=None,
+        help="with --explain: the symbol the move is compared against (default: KNOWLEDGE_REFERENCE_SYMBOL)",
+    )
+    signals.add_argument(
+        "--no-search",
+        action="store_true",
+        help="with --explain: never call the news source; stored documents only",
+    )
     _add_strategy_flags(signals)
 
     bt = sub.add_parser("backtest", help="backtest a strategy over stored history")
@@ -509,6 +526,52 @@ def _signals(settings: Settings, args: argparse.Namespace) -> int:
 
     if args.store:
         print(f"stored {store_signals(get_db(), result, symbol=args.symbol)} rows")
+    if args.explain:
+        return _explain(settings, args, result)
+    return 0
+
+
+def _explain(settings: Settings, args: argparse.Namespace, result: Any) -> int:
+    """The `--explain` half of `signals`: one bar, cited, validated, stored."""
+    from datetime import UTC, datetime
+
+    from candlegraph.knowledge.explain import (
+        ExplainError,
+        explain,
+        format_explanation,
+        request_for,
+        services_for,
+    )
+    from candlegraph.knowledge.retrieve import RetrievalError
+    from candlegraph.storage import get_db
+    from candlegraph.tokens import get_token_registry
+
+    registry = get_token_registry()
+    token = registry.by_symbol(args.symbol)
+    assert token is not None  # _prices_for already refused an unknown symbol
+    reference_symbol = args.reference or settings.knowledge_reference_symbol
+    reference = None
+    if reference_symbol.casefold() != args.symbol.casefold():
+        if registry.by_symbol(reference_symbol) is None:
+            print(f"reference {reference_symbol!r} is not tracked; no market comparison")
+        else:
+            try:
+                reference = _prices_for(settings, reference_symbol, args.days)
+            except SystemExit as exc:
+                print(f"no reference prices: {exc}; no market comparison")
+    at = datetime.fromisoformat(args.at).astimezone(UTC) if args.at else None
+
+    source, embedder, notes = services_for(settings)
+    if args.no_search:
+        source = None
+    for note in notes:
+        print(note)
+    try:
+        request = request_for(result, token, at=at, reference=reference)
+        explanation = explain(get_db(), settings, request, source=source, embedder=embedder)
+    except (ExplainError, RetrievalError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(format_explanation(explanation))
     return 0
 
 

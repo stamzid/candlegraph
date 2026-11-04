@@ -137,6 +137,8 @@ see [`.env.example`](.env.example) for the full list.
 | `TAVILY_API_KEY` | unset | **Required for `fetch-news`.** Free tier ~1,000 credits/month; without it the news pipeline refuses and everything else still works. |
 | `TAVILY_MONTHLY_CREDITS` / `TAVILY_DAILY_CREDITS` / `TAVILY_RESERVE_CREDITS` | 1000 / 40 / 50 | The budget guard's caps: the plan, a daily smoothing cap, and a reserve kept for manual searches. |
 | `RETRIEVAL_BACKEND` / `RETRIEVAL_TOP_K` / `RETRIEVAL_CANDIDATES` | `postgres` / 8 / 40 | The hybrid pgvector + `tsvector` retrieval; `ragflow` is refused with a pointer to its evaluation. |
+| `KNOWLEDGE_LLM_MODEL` | unset | Optional Claude model that writes the `--explain` rationale over the numbers and citations; unset is the deterministic template. Falls back to `AGENT_LLM_MODEL`. |
+| `KNOWLEDGE_REFERENCE_SYMBOL` | `WBTC` | The tracked token an explained move is compared against, so the rationale can call it idiosyncratic or market-wide. |
 | `RISK_FREE_RATE_SOURCE` / `INFLATION_RATE` | `constant` / 0.0 | Where the risk-free rate comes from (a Tavily source is planned), and the inflation rate for the real rate printed beside it. |
 | `UI_HOST`, `UI_PORT` | `0.0.0.0`, 8501 | Streamlit UI. |
 | `DATA_POLL_INTERVAL` | 300 | Seconds between ingest runs. |
@@ -205,7 +207,7 @@ a failing one always is.
 | `strategies` | List the registered strategies |
 | `stats SYMBOL [--window N]` | Rolling mean and annualised volatility |
 | `compare SYMBOL_A SYMBOL_B [--window N]` | Pairwise comparison: correlation, beta, relative return |
-| `signals SYMBOL [--strategy X] [--store]` | Generate signals, optionally persisting them |
+| `signals SYMBOL [--strategy X] [--store] [--explain [--at ISO] [--reference S] [--no-search]]` | Generate signals, optionally persisting them; `--explain` prints one bar's numeric context and a rationale citing news published before it (URL and timestamp per citation), stored in `explanation`. Works with no LLM key and no Tavily key |
 | `backtest SYMBOL [--strategy X\|all]` | Backtest, net of fees and slippage |
 | `portfolio [--objective X] [--risk-free-rate R]` | Mean-variance allocation |
 | `forecast SYMBOL [--auto-order]` | ARIMA point forecast and interval |
@@ -471,7 +473,11 @@ Next, in order:
    the Tavily news source (`make fetch-news`: one budgeted search per
    token per UTC day, every call ledgered) and hybrid retrieval
    (`make search`: pgvector + `tsvector` legs fused by reciprocal rank,
-   bounded by `published_at <= bar`) are in; `--explain` is next. RAGFlow
+   bounded by `published_at <= bar`) and `signals --explain` (`make explain`:
+   the numeric context plus a rationale that may cite only the documents
+   retrieved for the bar — an invented citation is stripped — stored in
+   `explanation`, no LLM key required) are in; the observer's knowledge
+   findings and the MCP server are next. RAGFlow
    was evaluated as a second retrieval backend and declined for now
    (`docs/knowledge/ragflow/DESIGN.md`). See `docs/knowledge/` and `docs/rollout/ROLLOUT.md`.
 2. **Harness** — YAML pipeline specs, an event bus, OpenTelemetry, and the

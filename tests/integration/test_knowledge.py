@@ -14,9 +14,11 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
+from candlegraph.analytics.prices import load_price_frame
 from candlegraph.knowledge.assets import sync_assets
 from candlegraph.knowledge.documents import ChunkConfig, RawDocument, ensure_source, store_document, url_hash
 from candlegraph.knowledge.embed import HashEmbedder, embed_pending, embedding_backlog, to_vector_literal
+from candlegraph.knowledge.explain import ExplainRequest, explain, format_explanation
 from candlegraph.knowledge.mentions import link_mentions, link_unlinked_documents
 from candlegraph.knowledge.news import fetch_news, source_spend
 from candlegraph.knowledge.retrieve import RetrievalConfig, retrieve, rrf_score
@@ -43,7 +45,7 @@ pytestmark = pytest.mark.integration
 @pytest.fixture
 def kdb(db: DatabaseManager) -> DatabaseManager:
     """The migrated database with the knowledge tables emptied too."""
-    db.execute(f'TRUNCATE "{db.schema}".asset, "{db.schema}".source CASCADE')
+    db.execute(f'TRUNCATE "{db.schema}".asset, "{db.schema}".source, "{db.schema}".explanation CASCADE')
     return db
 
 
@@ -747,3 +749,183 @@ def test_fetch_news_links_the_documents_it_stores(kdb: DatabaseManager) -> None:
     assert summary.outcomes[0].mentions_linked >= 1
     rows = kdb.fetch_all(f'SELECT DISTINCT asset_id FROM "{kdb.schema}".mention')
     assert {r["asset_id"] for r in rows} == {WBTC}
+
+
+# --- signals --explain (step 8) -----------------------------------------------------------
+
+
+def _seed_prices(kdb: DatabaseManager, bar: datetime = BAR, hours: int = 34) -> None:
+    """WBTC flat then spiking into the bar; SHIB flat. Both hourly, ending at the bar."""
+    end = int(bar.timestamp())
+    wbtc = [100.0] * (hours - 4) + [101.0, 103.0, 106.0, 108.0]
+    rows = [hour_record(end - (hours - 1 - i) * HOUR, WBTC, str(price)) for i, price in enumerate(wbtc)]
+    # Drifting, not constant: a flat series has no defined correlation.
+    rows += [
+        {**hour_record(end - (hours - 1 - i) * HOUR, SHIB, f"{1.0 + 0.001 * i:.4f}"), "symbol": "SHIB"}
+        for i in range(hours)
+    ]
+    write_hours(kdb, rows)
+
+
+def _explain_request(
+    kdb: DatabaseManager, bar: datetime = BAR, strategy: str = "bollinger"
+) -> ExplainRequest:
+    frame = load_price_frame(kdb, ["WBTC", "SHIB"])
+    return ExplainRequest(
+        token=WBTC_TOKEN,
+        strategy=strategy,
+        bar=bar,
+        position=-1,
+        score=2.31,
+        prices=frame["WBTC"],
+        window=24,
+        reference=frame["SHIB"],
+    )
+
+
+def _explanations(kdb: DatabaseManager) -> list[dict[str, object]]:
+    return kdb.fetch_all(f'SELECT * FROM "{kdb.schema}".explanation ORDER BY strategy, period_start_unix')
+
+
+def test_the_stage_exit_criterion_holds_without_an_llm_key(kdb: DatabaseManager) -> None:
+    """A rationale citing a retrieved document with a URL and a timestamp, stored with the signal."""
+    _seed_news_corpus(kdb)
+    _seed_prices(kdb)
+
+    explanation = explain(kdb, news_settings(), _explain_request(kdb), embedder=HashEmbedder(), now=NEWS_NOW)
+
+    assert explanation.model is None, "no LLM key: the template narrates"
+    assert explanation.citations, "the corpus has two dated documents before the bar"
+    first = explanation.citations[0]
+    assert first.url.startswith("https://news.example/") and first.published_at == BEFORE
+    assert f"[{first.n}]" in explanation.rationale
+    assert explanation.numeric_context["price"] == 108.0
+    assert explanation.numeric_context["move_24h"] == pytest.approx(0.08, abs=1e-6)
+    assert explanation.numeric_context["reference"]["symbol"] == "SHIB"
+    assert "idiosyncratic" in explanation.rationale
+
+    (row,) = _explanations(kdb)
+    assert (row["strategy"], row["symbol"], row["period_start_unix"]) == (
+        "bollinger",
+        "WBTC",
+        int(BAR.timestamp()),
+    )
+    assert row["position"] == -1 and row["model"] is None
+    citations = row["citations"]
+    assert isinstance(citations, list) and citations[0]["url"] == first.url
+    stored_chunk_ids = {c["chunk_id"] for c in citations}
+    existing = {int(r["id"]) for r in kdb.fetch_all(f'SELECT id FROM "{kdb.schema}".chunk')}
+    assert stored_chunk_ids <= existing, "every citation is a chunk that exists"
+    assert row["numeric_context"]["score"] == 2.31
+
+    text = format_explanation(explanation)
+    assert first.url in text and "2026-10-24 09:12 UTC" in text
+
+
+def test_appending_a_document_published_after_the_bar_does_not_change_its_explanation(
+    kdb: DatabaseManager,
+) -> None:
+    """The no-look-ahead rule, end to end: the explanation of a bar is fixed by what preceded it."""
+    _seed_news_corpus(kdb)
+    _seed_prices(kdb)
+    before = explain(kdb, news_settings(), _explain_request(kdb), embedder=HashEmbedder(), now=NEWS_NOW)
+
+    later = _seed_doc(
+        kdb,
+        "https://news.example/later",
+        "WBTC surged after the bar on fresh Bitcoin ETF inflows.",
+        published_at=datetime(2026, 10, 25, 9, 0, tzinfo=UTC),
+        retrieved_at=datetime(2026, 10, 25, 9, 5, tzinfo=UTC),
+    )
+    embed_pending(kdb, HashEmbedder())
+    link_mentions(kdb, later, ALIASES)
+    after = explain(kdb, news_settings(), _explain_request(kdb), embedder=HashEmbedder(), now=NEWS_NOW)
+
+    assert [c.chunk_id for c in after.citations] == [c.chunk_id for c in before.citations]
+    assert after.rationale == before.rationale
+    assert after.numeric_context == before.numeric_context
+    assert later not in {c.document_id for c in after.citations}
+    # The next day's bar does see it.
+    next_day = explain(
+        kdb,
+        news_settings(),
+        _explain_request(kdb, bar=datetime(2026, 10, 25, 12, 0, tzinfo=UTC)),
+        embedder=HashEmbedder(),
+        now=NEWS_NOW,
+    )
+    assert later in {c.document_id for c in next_day.citations}
+
+
+def test_two_explanations_on_one_asset_day_make_one_source_call(kdb: DatabaseManager) -> None:
+    """Assert on the ledger: the cache key is (asset, UTC day), shared by every signal."""
+    _seed_prices(kdb)
+    raw = RawDocument(
+        source_id="tavily",
+        url="https://x.com/unlock",
+        raw_text="WBTC fell as a large unlock hit the market. Bitcoin was flat.",
+        title="Unlock",
+        published_at=BEFORE,
+    )
+    source = OneShotSource(SearchResult([raw], credits=1, results=1))
+
+    first = explain(
+        kdb, news_settings(), _explain_request(kdb, strategy="bollinger"), source=source, now=NEWS_NOW
+    )
+    second = explain(
+        kdb,
+        news_settings(),
+        _explain_request(kdb, bar=BAR.replace(hour=20), strategy="crossover"),
+        source=source,
+        now=NEWS_NOW.replace(hour=16),
+    )
+
+    assert source.calls == 1
+    calls = _calls(kdb)
+    assert [c["status"] for c in calls] == ["ok"]
+    assert calls[0]["params"]["cache_key"] == "WBTC:2026-10-24"
+    assert calls[0]["called_at"] == NEWS_NOW, "the credit is spent on the clock, not at the bar"
+    assert first.news_status == "ok" and second.news_status == "cached"
+    # The fetched document was stored, linked and is cited by both — lexically,
+    # since nothing embedded it yet.
+    assert {c.url for c in first.citations} == {"https://x.com/unlock"} == {c.url for c in second.citations}
+    assert len(_explanations(kdb)) == 2
+
+
+def test_with_the_budget_exhausted_explain_serves_from_cache_and_records_the_refusal(
+    kdb: DatabaseManager,
+) -> None:
+    _seed_news_corpus(kdb)
+    _seed_prices(kdb)
+    exhausted = news_settings(tavily_monthly_credits=10, tavily_daily_credits=10, tavily_reserve_credits=0)
+    ensure_source(kdb, "tavily", "search")
+    kdb.execute(
+        f'INSERT INTO "{kdb.schema}".source_call (source_id, called_at, credits, status) '
+        "VALUES ('tavily', %(at)s, 10, 'ok')",
+        {"at": NEWS_NOW.replace(hour=1)},
+    )
+    source = OneShotSource(SearchResult([], credits=1, results=0))
+
+    explanation = explain(
+        kdb, exhausted, _explain_request(kdb), source=source, embedder=HashEmbedder(), now=NEWS_NOW
+    )
+
+    assert source.calls == 0, "no network"
+    refusal = _calls(kdb)[-1]
+    assert refusal["status"] == "budget_refused" and refusal["credits"] == 0
+    assert explanation.news_status == "budget_refused"
+    assert "serving stored documents" in explanation.news_message
+    assert explanation.citations, "the stored corpus still serves"
+    assert "news: budget_refused" in format_explanation(explanation)
+
+
+def test_re_explaining_a_bar_is_an_upsert_on_the_natural_key(kdb: DatabaseManager) -> None:
+    _seed_news_corpus(kdb)
+    _seed_prices(kdb)
+
+    explain(kdb, news_settings(), _explain_request(kdb), embedder=HashEmbedder(), now=NEWS_NOW)
+    explain(
+        kdb, news_settings(), _explain_request(kdb), embedder=HashEmbedder(), now=NEWS_NOW.replace(hour=15)
+    )
+
+    (row,) = _explanations(kdb)
+    assert row["generated_at"] == NEWS_NOW.replace(hour=15)

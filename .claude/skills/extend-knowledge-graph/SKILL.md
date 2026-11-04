@@ -5,10 +5,11 @@ description: Build or extend candlegraph's knowledge layer (stage 1) — the pgv
 
 # Extend the knowledge graph
 
-The layer is **partly built**: the schema, the asset sync, the document
+The layer is **mostly built**: the schema, the asset sync, the document
 pipeline, embeddings, the Tavily source with its budget guard and ledger,
-alias entity linking and hybrid retrieval (rollout steps 1–7) exist;
-`--explain` onwards does not. Read
+alias entity linking, hybrid retrieval and `signals --explain` with its
+citation validator (rollout steps 1–8) exist; the observer's knowledge
+findings (step 9) and the MCP server (step 10) do not. Read
 `docs/knowledge/graph/DESIGN.md` first and the four companions as you reach
 them. Every step below exists
 because of a decision recorded there; do not reverse one in code without
@@ -101,6 +102,23 @@ and e5 do. The observer reports rows embedded with any other model as a
 backlog until it finishes (step 9). Record the evaluation-set result in the
 document when you measure it. To develop without a model server, set
 `EMBEDDING_PROVIDER=fake`.
+
+## 4b. Explaining a signal
+
+`signals SYMBOL --explain` is `knowledge/explain.py`. The order is fixed:
+news for the `(asset, UTC day)` through `news.fetch_news(…, bar=bar)` (the
+cache key and search window follow the bar; the ledger row and
+`retrieved_at` follow the clock), retrieval as of the bar filtered to the
+asset, the pure `numeric_context` (bars at or before the bar only; a
+missing figure is `None`), the narrator, `validate.validate_rationale`,
+then the `explanation` upsert. Add a number by extending
+`numeric_context` and its tests, not the narrator; add prose by changing
+the template or the prompt, never by letting the narrator see the
+database. The CLI prints the news and retrieval status every time so a
+cache hit, a refusal, a missing key and a lexical-only retrieval are all
+visible. Tests: `tests/unit/knowledge/test_explain.py` runs the pipeline on
+the replaying fake database from `test_news.py`; the integration tests seed
+prices and a corpus and prove the exit criterion and the no-look-ahead rule.
 
 ## 5. The rules that do not bend
 

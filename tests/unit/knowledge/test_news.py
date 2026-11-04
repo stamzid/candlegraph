@@ -9,7 +9,7 @@ stubbed return values.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -164,6 +164,28 @@ def test_the_search_window_ends_at_the_bar_and_reaches_back_the_configured_hours
     (call,) = source.calls
     assert call["end"] == NOW
     assert (call["end"] - call["start"]).total_seconds() == 24 * 3600
+
+
+def test_an_explicit_bar_moves_the_window_and_the_cache_key_but_not_the_ledger_clock() -> None:
+    """Explaining a past bar searches that day's news but spends today's credit."""
+    db = NewsDatabase()
+    source = FakeSource([SearchResult([document()], 1, 1)])
+    bar = datetime(2026, 10, 24, 14, 0, tzinfo=UTC)
+
+    summary = fetch_news(db, settings(), source, TOKENS[:1], now=NOW, bar=bar)
+
+    (call,) = source.calls
+    assert call["end"] == bar and call["start"] == bar - timedelta(hours=24)
+    (row,) = db.source_calls
+    assert row["called_at"] == NOW, "the credit is spent now, and sums into this month"
+    assert json.loads(row["params"])["cache_key"] == "WBTC:2026-10-24"
+    assert summary.day == "2026-10-24"
+    # And the spend is visible to today's budget, not October's.
+    month, today = db.fetch_all(
+        db.knowledge_sql.source_spend,
+        {"source_id": "tavily", "month_start": NOW.replace(day=1, hour=0), "day_start": NOW.replace(hour=0)},
+    )[0].values()
+    assert (month, today) == (1, 1)
 
 
 def test_the_source_row_is_registered_before_any_document() -> None:

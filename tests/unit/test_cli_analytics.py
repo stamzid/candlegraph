@@ -245,6 +245,99 @@ def test_signal_flags_reach_the_strategy(cli: FakeDatabase, capsys: pytest.Captu
     assert eager != patient
 
 
+def _explain_rows() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": 1,
+            "document_id": 10,
+            "ordinal": 0,
+            "text": "WBTC moved on an unlock.",
+            "url": "https://news.example/unlock",
+            "title": "Unlock",
+            "published_at": datetime(2026, 10, 24, 9, 12, tzinfo=UTC),
+            "retrieved_at": datetime(2026, 10, 24, 14, 3, tzinfo=UTC),
+            "score": 1 / 61,
+            "dense_rank": 1,
+            "lexical_rank": None,
+        }
+    ]
+
+
+@pytest.fixture
+def explain_cli(tokens_file: Path, monkeypatch: pytest.MonkeyPatch) -> FakeDatabase:
+    """The signals CLI with a corpus to cite, a fake embedder, and no Tavily key."""
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    monkeypatch.setattr(
+        "candlegraph.cli.get_settings",
+        lambda: make_settings(
+            tokens_file=str(tokens_file),
+            analytics_lookback_days=30,
+            embedding_provider="fake",
+            knowledge_reference_symbol="SHIB",
+        ),
+    )
+    db = FakeDatabase(
+        get_price_history=price_rows("WBTC", 400) + price_rows("SHIB", 400, seed=12),
+        hybrid_search=_explain_rows(),
+        lexical_search=_explain_rows(),
+    )
+    set_db(db)
+    return db
+
+
+def test_signals_explain_prints_a_cited_rationale_and_stores_the_explanation(
+    explain_cli: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The stage exit criterion at the CLI: a URL, a timestamp, a stored row, no key anywhere."""
+    assert main(["signals", "WBTC", "--strategy", "bollinger", "--explain"]) == 0
+
+    out = capsys.readouterr().out
+    assert "no TAVILY_API_KEY" in out
+    assert "[1] https://news.example/unlock   2026-10-24 09:12 UTC" in out
+    assert "[1]" in out and "model: template" in out
+    assert "SHIB moved" in out, "the reference comparison ran"
+    [(_, params)] = [(name, p) for name, p in explain_cli.executed if name == "upsert_explanation"]
+    assert params is not None
+    assert params["strategy"] == "bollinger" and params["symbol"] == "WBTC"
+    assert params["period_start_unix"] == BASE + 399 * HOUR, "the latest bar by default"
+    assert explain_cli.upserts == [], "explain alone does not store the signals"
+
+
+def test_signals_explain_can_pick_a_bar_and_skip_the_search(
+    explain_cli: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    at = datetime.fromtimestamp(BASE + 100 * HOUR, tz=UTC).isoformat()
+
+    assert main(["signals", "WBTC", "--explain", "--at", at, "--no-search", "--reference", "WBTC"]) == 0
+
+    out = capsys.readouterr().out
+    assert "news: skipped" in out
+    assert "SHIB moved" not in out, "a token is not compared with itself"
+    [(_, params)] = [(name, p) for name, p in explain_cli.executed if name == "upsert_explanation"]
+    assert params is not None and params["period_start_unix"] == BASE + 100 * HOUR
+
+
+def test_signals_explain_refuses_a_bar_that_is_not_in_the_series(explain_cli: FakeDatabase) -> None:
+    with pytest.raises(SystemExit, match="no bollinger bar at"):
+        main(["signals", "WBTC", "--explain", "--at", "2031-01-01T00:00:00+00:00"])
+
+
+def test_signals_explain_with_an_untracked_reference_still_explains(
+    explain_cli: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["signals", "WBTC", "--explain", "--reference", "DOGE"]) == 0
+
+    out = capsys.readouterr().out
+    assert "not tracked; no market comparison" in out
+    assert "[1] https://news.example/unlock" in out
+
+
+def test_signals_without_explain_writes_no_explanation(cli: FakeDatabase) -> None:
+    main(["signals", "WBTC", "--store"])
+
+    assert all(label != "upsert_explanation" for label, _ in cli.executed)
+
+
 def test_an_unknown_strategy_is_an_error(cli: FakeDatabase) -> None:
     with pytest.raises(KeyError, match="unknown strategy"):
         main(["signals", "WBTC", "--strategy", "nope"])

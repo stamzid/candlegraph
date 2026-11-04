@@ -34,3 +34,23 @@ def test_nothing_in_the_knowledge_statements_deletes() -> None:
 
     for name in ("upsert_asset", "get_assets"):
         assert "DELETE" not in render(getattr(statements, name)).upper()
+
+
+def test_the_explanation_upsert_conflicts_on_the_signal_natural_key() -> None:
+    """Re-explaining a bar refreshes its one row; the citation set for a bar is one row."""
+    text = render(knowledge_statements_for("candlegraph").upsert_explanation)
+
+    assert "ON CONFLICT (strategy, symbol, period_start_unix) DO UPDATE" in text
+    assert "numeric_context = EXCLUDED.numeric_context" in text
+    assert "citations = EXCLUDED.citations" in text
+    assert "rationale = EXCLUDED.rationale" in text
+
+
+def test_the_explanation_statements_only_touch_the_explanation_table() -> None:
+    statements = knowledge_statements_for("candlegraph")
+
+    for name in ("upsert_explanation", "get_explanation", "get_recent_explanations"):
+        text = render(getattr(statements, name))
+        assert '"candlegraph".explanation' in text
+        assert "DELETE" not in text.upper()
+        assert "token_hours_data" not in text and "signal" not in text.replace("explanation", "")

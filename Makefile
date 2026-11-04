@@ -12,7 +12,7 @@ E2E_URL ?= http://localhost:$${APP_HOST_PORT:-8000}
 .PHONY: help install lock fmt fmt-check lint typecheck test test-unit test-integration \
         cov check up down reset logs logs-worker ps migrate revision e2e sdl clean \
         ingest backfill report runs ui logs-ui observe janitor agent-runs logs-agents sync-assets \
-        up-knowledge logs-ollama embed reembed fetch-news search link-mentions
+        up-knowledge logs-ollama embed reembed fetch-news search link-mentions explain
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -116,6 +116,9 @@ fetch-news: ## One budgeted news search per token per UTC day, inside the stack
 
 search: ## Hybrid retrieval over stored news as of now: make search ARGS='"WBTC unlock" --symbol WBTC'
 	$(COMPOSE) exec worker python -m candlegraph knowledge search $(ARGS)
+
+explain: ## Explain the latest signal with cited news, inside the stack: make explain ARGS='WETH --strategy bollinger'
+	$(COMPOSE) exec worker python -m candlegraph signals $(ARGS) --explain
 
 link-mentions: ## Link stored chunks to the assets their aliases name (idempotent backfill)
 	$(COMPOSE) exec worker python -m candlegraph knowledge link-mentions

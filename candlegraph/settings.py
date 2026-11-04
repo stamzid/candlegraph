@@ -150,6 +150,17 @@ class Settings(BaseSettings):
     retrieval_top_k: int = Field(default=8, ge=1)
     retrieval_candidates: int = Field(default=40, ge=1)
 
+    # --- Knowledge: explanations (`signals --explain`) -------------------------
+    # The narrator that writes the rationale over the numbers and citations.
+    # Unset = the deterministic template, a first-class mode: the numeric
+    # context and the citation list *are* the explanation, prose only reads
+    # them (docs/knowledge/graph/DESIGN.md). Falls back to AGENT_LLM_MODEL.
+    knowledge_llm_model: str | None = None
+    # The market-wide reference the numeric context compares a move against,
+    # so a rationale can say whether a move was idiosyncratic. A tracked
+    # symbol; a token explaining itself gets no comparison.
+    knowledge_reference_symbol: str = "WBTC"
+
     # --- Agents ------------------------------------------------------------
     # Where agent reports go: a comma-separated subset of
     # log, ledger, file, webhook, github.
