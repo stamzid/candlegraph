@@ -17,9 +17,16 @@ from typing import Any
 import pandas as pd
 
 from candlegraph.agents.base import Finding, Severity
-from candlegraph.agents.observer.state import ObserverState, ObserverThresholds, RunMetrics, SymbolMetrics
+from candlegraph.agents.observer.state import (
+    KnowledgeFacts,
+    ObserverState,
+    ObserverThresholds,
+    RunMetrics,
+    SymbolMetrics,
+)
 from candlegraph.analytics.rolling import log_returns
 from candlegraph.ingestion.quality import QualityReport
+from candlegraph.knowledge.budget import usage_fraction, usage_level
 
 # --- metric computation ----------------------------------------------------
 
@@ -403,6 +410,142 @@ def assess_run_drift(rm: RunMetrics | None, t: ObserverThresholds) -> list[Findi
     return findings
 
 
+def assess_knowledge(facts: KnowledgeFacts | None, t: ObserverThresholds) -> list[Finding]:
+    """The knowledge layer: budget, source health, embedding backlog, citations.
+
+    The grading reuses :func:`candlegraph.knowledge.budget.usage_level` —
+    OK below 80%, WARNING from 80%, CRITICAL from 100% — so the observer and
+    the guard cannot drift apart. A stack with no knowledge rows comes out
+    all OK: nothing spent, nothing failing, nothing waiting, is the design.
+    """
+    if facts is None:
+        return []
+    findings: list[Finding] = []
+    severity_of = {"ok": Severity.OK, "warning": Severity.WARNING, "critical": Severity.CRITICAL}
+
+    # source_budget — the month is the finding; the day rides as evidence
+    # because the daily cap only smooths the month (its refusals already
+    # surface through source_errors evidence and the News dashboard).
+    fraction = usage_fraction(facts.month_spent, facts.monthly_cap)
+    findings.append(
+        Finding(
+            "source_budget",
+            severity_of[usage_level(fraction)],
+            facts.source_id,
+            f"{facts.month_spent} of {facts.monthly_cap} monthly credits used ({fraction:.0%}); "
+            f"{facts.today_spent} of {facts.daily_cap} today",
+            {
+                "month_spent": facts.month_spent,
+                "monthly_cap": facts.monthly_cap,
+                "fraction": round(fraction, 4),
+                "today_spent": facts.today_spent,
+                "daily_cap": facts.daily_cap,
+            },
+        )
+    )
+
+    # source_errors — the failed_runs rule applied to source_call: a streak
+    # of real failures is a finding, one failure is noise the next day's
+    # search retries. Refusals and cache hits are expected behaviour.
+    failures = ("error", "rate_limited")
+    streak = facts.call_statuses[: t.failure_streak]
+    counts = {status: facts.call_statuses.count(status) for status in ("ok", *failures, "budget_refused")}
+    if len(streak) >= t.failure_streak and all(status in failures for status in streak):
+        findings.append(
+            Finding(
+                "source_errors",
+                Severity.WARNING,
+                facts.source_id,
+                f"the last {len(streak)} source calls all failed ({', '.join(streak)}); "
+                "check make logs-worker and the News dashboard",
+                {"streak": list(streak), "counts": counts},
+            )
+        )
+    else:
+        label = (
+            f"{counts['ok']} ok, {counts['error']} errors, {counts['rate_limited']} rate-limited, "
+            f"{counts['budget_refused']} refused"
+            if facts.call_statuses
+            else "no source calls recorded"
+        )
+        findings.append(
+            Finding(
+                "source_errors",
+                Severity.OK,
+                facts.source_id,
+                f"recent source calls: {label}",
+                {"counts": counts},
+            )
+        )
+
+    # embedding_backlog — missing vectors are routine (`make embed` is the
+    # cure and explain() drains small ones); vectors stamped with another
+    # model mean retrieval cannot see them until `make reembed` finishes.
+    if facts.backlog_stale > 0:
+        findings.append(
+            Finding(
+                "embedding_backlog",
+                Severity.WARNING,
+                facts.embedding_model,
+                f"{facts.backlog_stale} of {facts.chunks_total} chunks are embedded with another model; "
+                "run make reembed",
+                {"missing": facts.backlog_missing, "stale": facts.backlog_stale, "total": facts.chunks_total},
+            )
+        )
+    elif facts.backlog_missing > 0:
+        findings.append(
+            Finding(
+                "embedding_backlog",
+                Severity.INFO,
+                facts.embedding_model,
+                f"{facts.backlog_missing} of {facts.chunks_total} chunks have no embedding yet; "
+                "run make embed (an explain run drains up to 256 itself)",
+                {"missing": facts.backlog_missing, "stale": facts.backlog_stale, "total": facts.chunks_total},
+            )
+        )
+    else:
+        findings.append(
+            Finding(
+                "embedding_backlog",
+                Severity.OK,
+                facts.embedding_model,
+                f"all {facts.chunks_total} chunks carry the active model's vector",
+                {"total": facts.chunks_total},
+            )
+        )
+
+    # uncited_explanations — some uncited explanations are honest (a token
+    # nobody wrote about); every one uncited means retrieval returns nothing
+    # at all, and that is a fault to look at, not a quiet corpus.
+    if facts.explanations_total > 0 and facts.explanations_uncited == facts.explanations_total:
+        findings.append(
+            Finding(
+                "uncited_explanations",
+                Severity.WARNING,
+                "explanation",
+                f"all {facts.explanations_total} explanations in the last {facts.window_hours}h have zero "
+                "citations; retrieval is returning nothing (check mentions, embeddings, and the corpus)",
+                {"uncited": facts.explanations_uncited, "total": facts.explanations_total},
+            )
+        )
+    else:
+        label = (
+            f"{facts.explanations_uncited} of {facts.explanations_total} explanations uncited"
+            if facts.explanations_total
+            else "no explanations generated"
+        )
+        findings.append(
+            Finding(
+                "uncited_explanations",
+                Severity.OK,
+                "explanation",
+                f"{label} in the last {facts.window_hours}h",
+                {"uncited": facts.explanations_uncited, "total": facts.explanations_total},
+            )
+        )
+    return findings
+
+
 def assess(state: ObserverState) -> dict[str, Any]:
     """The graph node: every assessment over the collected state."""
     t = state["thresholds"]
@@ -414,6 +557,7 @@ def assess(state: ObserverState) -> dict[str, Any]:
         *assess_quality(state.get("quality"), metrics, t),
         *assess_drift(metrics, t),
         *assess_run_drift(state.get("run_metrics"), t),
+        *assess_knowledge(state.get("knowledge"), t),
     ]
     for error in state.get("errors", []):
         findings.append(Finding("error", Severity.WARNING, "observer", error))

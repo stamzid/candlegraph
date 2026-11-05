@@ -8,16 +8,18 @@ data" rather than drift, and staleness is measured against the poll interval.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from candlegraph.agents.base import Severity
+from candlegraph.agents.base import Finding, Severity
 from candlegraph.agents.observer.assess import (
     assess,
     assess_drift,
     assess_freshness,
+    assess_knowledge,
     assess_ledger,
     assess_quality,
     assess_run_drift,
@@ -25,7 +27,7 @@ from candlegraph.agents.observer.assess import (
     run_metrics,
     symbol_metrics,
 )
-from candlegraph.agents.observer.state import ObserverThresholds, RunMetrics, SymbolMetrics
+from candlegraph.agents.observer.state import KnowledgeFacts, ObserverThresholds, RunMetrics, SymbolMetrics
 from candlegraph.ingestion.quality import Gap, QualityReport, TokenQuality
 from tests.unit.agents.conftest import run_row
 
@@ -339,3 +341,110 @@ def test_the_assess_node_combines_every_assessment_and_reports_collect_errors() 
     kinds = [f.kind for f in findings]
     assert kinds == ["fresh", "ledger", "coverage", "drift", "error"]
     assert findings[-1].severity == Severity.WARNING and "boom" in findings[-1].message
+
+
+# --- the knowledge layer (rollout step 9) --------------------------------------------
+
+
+def knowledge_facts(**overrides: Any) -> KnowledgeFacts:
+    base: dict[str, Any] = {
+        "source_id": "tavily",
+        "month_spent": 0,
+        "today_spent": 0,
+        "monthly_cap": 1000,
+        "daily_cap": 40,
+        "call_statuses": (),
+        "embedding_model": "bge-m3",
+        "backlog_missing": 0,
+        "backlog_stale": 0,
+        "chunks_total": 0,
+        "explanations_total": 0,
+        "explanations_uncited": 0,
+        "window_hours": 24,
+    }
+    base.update(overrides)
+    return KnowledgeFacts(**base)
+
+
+def by_kind(findings: list[Finding], kind: str) -> Finding:
+    (found,) = [f for f in findings if f.kind == kind]
+    return found
+
+
+def test_a_stack_with_no_knowledge_rows_is_calm_ok_everywhere() -> None:
+    """The step-9 exit criterion: absence of news is not a fault."""
+    findings = assess_knowledge(knowledge_facts(), T)
+
+    assert [f.kind for f in findings] == [
+        "source_budget",
+        "source_errors",
+        "embedding_backlog",
+        "uncited_explanations",
+    ]
+    assert all(f.severity == Severity.OK for f in findings)
+    assert "no source calls recorded" in by_kind(findings, "source_errors").message
+    assert "no explanations generated" in by_kind(findings, "uncited_explanations").message
+
+
+def test_the_budget_grades_ok_at_79_warning_at_80_and_critical_at_100_percent() -> None:
+    """The graph document's boundary test, against the same grading the guard uses."""
+    at = lambda spent: by_kind(  # noqa: E731
+        assess_knowledge(knowledge_facts(month_spent=spent), T), "source_budget"
+    )
+
+    assert at(790).severity == Severity.OK
+    assert at(800).severity == Severity.WARNING
+    assert at(999).severity == Severity.WARNING
+    assert at(1000).severity == Severity.CRITICAL
+    assert "800 of 1000 monthly credits used (80%)" in at(800).message
+    assert at(800).evidence["fraction"] == 0.8
+
+
+def test_an_unreadable_knowledge_layer_produces_no_findings() -> None:
+    assert assess_knowledge(None, T) == []
+
+
+def test_a_failure_streak_on_the_source_is_a_warning_like_failed_runs() -> None:
+    streak = knowledge_facts(call_statuses=("error", "rate_limited", "error", "ok"))
+
+    found = by_kind(assess_knowledge(streak, T), "source_errors")
+
+    assert found.severity == Severity.WARNING
+    assert "last 3 source calls all failed" in found.message
+    assert found.evidence["streak"] == ["error", "rate_limited", "error"]
+
+
+def test_one_failure_or_a_refusal_is_not_a_streak() -> None:
+    single = knowledge_facts(call_statuses=("error", "ok", "ok"))
+    refused = knowledge_facts(call_statuses=("budget_refused", "budget_refused", "budget_refused"))
+
+    assert by_kind(assess_knowledge(single, T), "source_errors").severity == Severity.OK
+    found = by_kind(assess_knowledge(refused, T), "source_errors")
+    assert found.severity == Severity.OK, "a refusal is the guard working, not the source failing"
+    assert "3 refused" in found.message
+
+
+def test_missing_embeddings_are_info_and_a_model_mismatch_is_a_warning() -> None:
+    missing = knowledge_facts(backlog_missing=7, chunks_total=100)
+    stale = knowledge_facts(backlog_stale=40, backlog_missing=2, chunks_total=100)
+    clean = knowledge_facts(chunks_total=100)
+
+    info = by_kind(assess_knowledge(missing, T), "embedding_backlog")
+    assert info.severity == Severity.INFO and "make embed" in info.message
+
+    warn = by_kind(assess_knowledge(stale, T), "embedding_backlog")
+    assert warn.severity == Severity.WARNING and "make reembed" in warn.message
+    assert warn.subject == "bge-m3"
+
+    assert by_kind(assess_knowledge(clean, T), "embedding_backlog").severity == Severity.OK
+
+
+def test_every_explanation_uncited_is_a_warning_but_some_uncited_are_honest() -> None:
+    all_blank = knowledge_facts(explanations_total=5, explanations_uncited=5)
+    some = knowledge_facts(explanations_total=5, explanations_uncited=2)
+
+    warn = by_kind(assess_knowledge(all_blank, T), "uncited_explanations")
+    assert warn.severity == Severity.WARNING and "retrieval is returning nothing" in warn.message
+
+    ok = by_kind(assess_knowledge(some, T), "uncited_explanations")
+    assert ok.severity == Severity.OK and "2 of 5" in ok.message

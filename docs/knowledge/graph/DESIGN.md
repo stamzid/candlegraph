@@ -11,8 +11,9 @@ guard and `source_call` ledger (`knowledge/sources/`, `budget.py`,
 retrieval with the no-look-ahead bound (`knowledge/retrieve.py`) and
 `signals --explain` (`knowledge/explain.py`, `knowledge/validate.py`: the
 sequence below, the `explanation` upsert, template-first narration) are
-implemented — rollout steps 2–8. Still design only: the observer's
-`collect_knowledge` node (step 9) and the MCP server (step 10). RAGFlow
+implemented — rollout steps 2–9, the observer's `collect_knowledge`
+node and four findings included (`docs/agents/observer/DESIGN.md` has the
+rules). Still design only: the MCP server (step 10). RAGFlow
 as an alternative retrieval backend was evaluated and declined for now
 (`../ragflow/DESIGN.md`).
 **Area (when built):** `candlegraph/knowledge/`, `alembic/versions/`,
@@ -416,8 +417,9 @@ Decisions:
 
 ## Integration with the agents
 
-**The run observer** gains one collect node, `collect_knowledge`, and four
-findings. All numbers; the same severity discipline as the rest.
+**The run observer** has one collect node, `collect_knowledge`, and four
+findings (step 9, implemented). All numbers; the same severity discipline
+as the rest; the rules as built are in the observer document.
 
 | kind | severity | means |
 |---|---|---|

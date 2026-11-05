@@ -49,6 +49,24 @@ The status is the worst finding. Read the findings in this order:
 | `drift` | info | not enough bars to judge | expected on a new stack or a thin token |
 | `fresh`, `ledger`, `coverage`, `drift` | ok | checked and fine | nothing |
 
+Four knowledge-layer findings ride in every observer report (stage 1,
+step 9); read them the same way:
+
+- `source_budget` — WARNING at 80% of the monthly Tavily credits, CRITICAL
+  at 100%. The number comes from the `source_call` ledger, the same sums
+  the budget guard refuses on.
+- `source_errors` — WARNING only on a streak of `error`/`rate_limited`
+  calls. A `budget_refused` is the guard working and never counts.
+- `embedding_backlog` — INFO means new chunks await `make embed`;
+  WARNING means chunks are stamped with another model and retrieval cannot
+  see them until `make reembed` finishes.
+- `uncited_explanations` — WARNING only when *every* explanation in the
+  window has zero citations (retrieval returns nothing); some uncited
+  explanations are an honest quiet corpus.
+
+On a stack that has never used the knowledge layer all four are OK — that
+is the designed reading, not a bug.
+
 Three things the observer deliberately does **not** do, so do not "fix" them:
 
 - It never flags a gap on a thin token. Invariant 19: an hour with no swaps

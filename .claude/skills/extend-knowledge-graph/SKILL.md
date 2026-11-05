@@ -7,9 +7,9 @@ description: Build or extend candlegraph's knowledge layer (stage 1) — the pgv
 
 The layer is **mostly built**: the schema, the asset sync, the document
 pipeline, embeddings, the Tavily source with its budget guard and ledger,
-alias entity linking, hybrid retrieval and `signals --explain` with its
-citation validator (rollout steps 1–8) exist; the observer's knowledge
-findings (step 9) and the MCP server (step 10) do not. Read
+alias entity linking, hybrid retrieval, `signals --explain` with its
+citation validator, and the observer's knowledge findings (rollout steps
+1–9) exist; only the MCP server and the closeout (step 10) do not. Read
 `docs/knowledge/graph/DESIGN.md` first and the four companions as you reach
 them. Every step below exists
 because of a decision recorded there; do not reverse one in code without

@@ -20,7 +20,8 @@ graph TD
   collect_ledger -. database down .-> publish
   collect_ledger --> collect_quality
   collect_quality --> collect_metrics
-  collect_metrics --> assess
+  collect_metrics --> collect_knowledge
+  collect_knowledge --> assess
   assess --> publish
   publish --> __end__
 ```
@@ -33,6 +34,7 @@ pins this node and edge set.
 | `collect_ledger` | `ledger.recent_runs`, `ledger.seconds_since_last_success` | `runs`, `seconds_since_success`, `database_up` |
 | `collect_quality` | `quality.build_report` over `OBSERVER_BASELINE_DAYS` | `quality` |
 | `collect_metrics` | `prices.load_price_history` for every tracked symbol over baseline + recent window | `metrics` (per-symbol recent vs baseline numbers) |
+| `collect_knowledge` | `source_call` spend and recent statuses, the embedding backlog for the configured model, explanation citation counts over the recent window | `knowledge` (a `KnowledgeFacts` of numbers and the caps) |
 | `assess` | state only — pure | `findings` |
 | `publish` | — | `report`, posted to the sinks; `stages` completed with any skipped node |
 
@@ -60,6 +62,7 @@ the run, not findings**: severity still comes from the findings alone
 | `collect_ledger` | `database_up`, `runs` read, `seconds_since_success` |
 | `collect_quality` | `tokens` judged, `missing_tokens`, `violations` |
 | `collect_metrics` | `symbols` with metrics, `bars` loaded, `runs_judged` |
+| `collect_knowledge` | `credits_month`, `calls` read, `backlog`, `explanations` in the window |
 | `assess` | `findings` and the count per severity |
 | `publish` | `sinks` posted to, `failed` |
 
@@ -166,6 +169,20 @@ not flag gaps as such. It flags:
   distinction `backfill-and-verify` tells a human to make; the observer makes
   it the same way.
 
+### The knowledge layer (stage 1, rollout step 9)
+
+Four findings over the knowledge tables, read-only (invariant 21), graded
+by `assess_knowledge` — pure, like every other rule here. A stack that has
+never used the knowledge layer comes out all `OK`: nothing spent, nothing
+failing, nothing waiting. Absence of news is not a fault.
+
+| kind | severity | rule |
+|---|---|---|
+| `source_budget` | OK below 80%, WARNING from 80%, CRITICAL from 100% | credits spent this UTC month against `TAVILY_MONTHLY_CREDITS`, summed from `source_call`; the grading is `knowledge.budget.usage_level`, the same function the guard's refusal messages use, so the two cannot drift. Today's spend rides as evidence |
+| `source_errors` | WARNING on a streak | the `failed_runs` rule applied to `source_call`: the last `OBSERVER_FAILURE_STREAK` calls all `error`/`rate_limited`. One failure is noise the next day's search retries; a `budget_refused` is the guard working and never counts as a failure |
+| `embedding_backlog` | INFO when chunks await a first vector (`make embed`; an explain run drains up to 256 itself); WARNING when any chunk is stamped with another model (`make reembed` — retrieval cannot see those rows until it finishes) | counted against the configured `EMBEDDING_MODEL` |
+| `uncited_explanations` | WARNING only when **every** explanation in the window has zero citations — retrieval is returning nothing at all. Some uncited explanations are honest: a token nobody wrote about | counted over `OBSERVER_DRIFT_WINDOW_HOURS` |
+
 ### Metric drift
 
 For each tracked symbol, a **recent** window (`OBSERVER_DRIFT_WINDOW_HOURS`,
@@ -243,13 +260,21 @@ the report is plain ASCII in a terminal and in a webhook body.
 | `OBSERVER_SUSPICIOUS_GAP_HOURS` | `6` | Contiguous gap length that matters on a liquid token |
 | `OBSERVER_LIQUID_VOLUME_USD` | `100000` | Baseline mean hourly volume above which a token counts as liquid |
 
+The knowledge findings deliberately add no knobs: the budget caps are
+`TAVILY_MONTHLY_CREDITS`/`TAVILY_DAILY_CREDITS` (what the guard enforces),
+the model is `EMBEDDING_MODEL`, the streak is `OBSERVER_FAILURE_STREAK`
+and the window is `OBSERVER_DRIFT_WINDOW_HOURS` — the observer grades
+against the settings the pipeline actually obeys.
+
 ## Tests
 
 `tests/unit/agents/test_observer_assess.py` exercises every rule above with
 hand-built inputs: a fresh ledger is `OK`; stale is `WARNING` and doubly
 stale `CRITICAL`; a seven-hour gap on WETH is `WARNING` while the same gap on
 GNO is not; volume x5 is drift and x2 is not; a thin window yields `INFO`,
-never drift; backfills are excluded from run metrics.
+never drift; backfills are excluded from run metrics; the budget at 79%,
+80% and 100%; a source failure streak against single failures and refusals;
+missing versus wrong-model backlog; all-uncited versus some-uncited.
 `tests/unit/agents/test_observer_graph.py` runs the compiled graph against
 `FakeDatabase`, including the database-down short-circuit (which must mark
 the three unrun stages `skipped`), a crashing graph posting an `error`

@@ -86,6 +86,12 @@ def healthy_db(**overrides: Any) -> FakeDatabase:
             }
         ],
         "get_price_history": price_rows("WBTC", 192, NOW) + price_rows("SHIB", 192, NOW),
+        # The knowledge layer at rest: nothing spent, nothing failing,
+        # nothing waiting — the calm all-OK the step-9 exit criterion asks for.
+        "source_spend": [{"month": 0, "today": 0}],
+        "get_recent_source_calls": [],
+        "count_embedding_backlog": [{"missing": 0, "stale": 0, "total": 0}],
+        "count_uncited_explanations": [{"total": 0, "uncited": 0}],
     }
     reads.update(overrides)
     return FakeDatabase(**reads)
@@ -102,7 +108,16 @@ def test_a_healthy_stack_produces_an_ok_report_and_records_it(registry: TokenReg
     report = run_observer(make_settings(), db=db, registry=registry, now=NOW, sinks=[LedgerSink(db)])
 
     assert report.status == Severity.OK, [f.message for f in report.findings]
-    assert {f.kind for f in report.findings} == {"fresh", "ledger", "coverage", "drift"}
+    assert {f.kind for f in report.findings} == {
+        "fresh",
+        "ledger",
+        "coverage",
+        "drift",
+        "source_budget",
+        "source_errors",
+        "embedding_backlog",
+        "uncited_explanations",
+    }
     assert db.executed[0][0] == "insert_agent_run"
     assert "## Coverage" in report.markdown and "## Drift" in report.markdown
     assert report.detail["symbols_judged"] == 2
@@ -124,15 +139,23 @@ def test_every_stage_is_recorded_in_order_and_reaches_the_report_and_the_ledger(
         on_stage=lambda r: seen.append(r.name),
     )
 
-    assert seen == ["collect_ledger", "collect_quality", "collect_metrics", "assess", "publish"]
+    assert seen == [
+        "collect_ledger",
+        "collect_quality",
+        "collect_metrics",
+        "collect_knowledge",
+        "assess",
+        "publish",
+    ]
     stages = report.detail["stages"]
     assert [s["name"] for s in stages] == seen
     assert all(s["status"] == "ok" for s in stages)
     assert stages[0]["detail"]["runs"] == 39 and stages[0]["detail"]["database_up"] is True
     assert stages[1]["detail"]["tokens"] == 2
     assert stages[2]["detail"]["symbols"] == 2
-    assert stages[3]["detail"]["findings"] == len(report.findings)
-    assert stages[4]["detail"]["sinks"] == ["ledger"]
+    assert stages[3]["detail"]["credits_month"] == 0 and stages[3]["detail"]["explanations"] == 0
+    assert stages[4]["detail"]["findings"] == len(report.findings)
+    assert stages[5]["detail"]["sinks"] == ["ledger"]
     assert "## Stages" in report.markdown and "| collect_metrics | ok |" in report.markdown
     # And the ledger row carries them, which is what the UI's stage strip reads.
     (_, params) = db.executed[0]
@@ -144,7 +167,7 @@ def test_a_down_database_marks_the_stages_it_skipped(registry: TokenRegistry) ->
 
     by_name = {s["name"]: s for s in report.detail["stages"]}
     assert by_name["collect_ledger"]["status"] == "error"
-    for name in ("collect_quality", "collect_metrics", "assess"):
+    for name in ("collect_quality", "collect_metrics", "collect_knowledge", "assess"):
         assert by_name[name]["status"] == "skipped", name
         assert by_name[name]["detail"] == {"reason": "database unreachable"}
     assert by_name["publish"]["status"] == "ok"
@@ -193,6 +216,7 @@ def test_the_graph_has_the_documented_shape(registry: TokenRegistry) -> None:
         "collect_ledger",
         "collect_quality",
         "collect_metrics",
+        "collect_knowledge",
         "assess",
         "publish",
         "__end__",
@@ -200,6 +224,7 @@ def test_the_graph_has_the_documented_shape(registry: TokenRegistry) -> None:
     edges = {(e.source, e.target) for e in drawing.edges}
     assert ("collect_ledger", "publish") in edges, "the database-down short-circuit"
     assert ("collect_ledger", "collect_quality") in edges
+    assert ("collect_metrics", "collect_knowledge") in edges and ("collect_knowledge", "assess") in edges
     assert ("assess", "publish") in edges and ("publish", "__end__") in edges
 
 

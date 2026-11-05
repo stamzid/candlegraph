@@ -19,9 +19,10 @@ reconstructing the steps:
   tell a real finding from an expected one.
 - `add-agent` — add a new LangGraph graph that follows the framework.
 - `release-check` — the full pre-merge gate.
-- `extend-knowledge-graph` — stage 1, mostly built (schema through
-  `signals --explain`; the observer node and MCP remain): the order to
-  build the rest in, and how to add a source, an entity, or a retriever.
+- `extend-knowledge-graph` — stage 1, mostly built (schema through the
+  observer's knowledge findings; only MCP and the closeout remain): the
+  order to build the rest in, and how to add a source, an entity, or a
+  retriever.
 
 `docs/` holds the design documents, arranged the same way — one directory per
 topic, with a `DESIGN.md` inside and a flowchart in most of them:

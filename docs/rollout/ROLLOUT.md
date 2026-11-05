@@ -1,6 +1,6 @@
 # Rollout: stage 1 — the knowledge graph on pgvector
 
-**Status:** current — 2026-11-04; steps 1–8 done, step 9 next. This directory holds **one
+**Status:** current — 2026-11-05; steps 1–9 done, step 10 next. This directory holds **one
 current rollout at a time**; this document is it, and each working session
 should update the progress table below. When the stage ships, this file
 moves to `docs/rollout/archive/<date>-<slug>.md` and the next rollout
@@ -25,7 +25,7 @@ Status line truthful.
 | 6 | Tavily source, budget guard, `source_call` ledger | M | 2 | **done** 2026-11-01 |
 | 7 | Hybrid retrieval with the no-look-ahead bound | M | 3, 4, 5 | **done** 2026-11-01 |
 | 8 | `signals --explain`: explain, validate, cache | L | 6, 7 | **done** 2026-11-04 |
-| 9 | Observer: `collect_knowledge` + four findings | S | 6, 8 | not started |
+| 9 | Observer: `collect_knowledge` + four findings | S | 6, 8 | **done** 2026-11-05 |
 | 10 | MCP server (optional extra) + stage closeout | M | 8 | not started |
 
 **Combining steps in one session:** 3+4 combine naturally (both small and
@@ -411,6 +411,30 @@ test, thresholds dataclass — and the findings table in
 `test_the_graph_has_the_documented_shape` updated together with the
 observer document's Mermaid flowchart; `make observe` on a stack with no
 knowledge rows reports the new findings as the calm `OK`/`INFO` they are.
+
+**Outcome (2026-11-05).** Done, no new configuration. The graph gained
+`collect_metrics → collect_knowledge → assess` (shape test and both Mermaid
+diagrams updated); the node reads `source_spend`, the recent `source_call`
+statuses, `count_embedding_backlog` for the configured model and the new
+`count_uncited_explanations` statement, into a `KnowledgeFacts` of plain
+numbers with the caps riding along; a failed read is one `errors` entry and
+the run continues. `assess_knowledge` is pure: `source_budget` graded by the
+guard's own `usage_level` (OK <80%, WARNING ≥80%, CRITICAL ≥100%, tested at
+790/800/999/1000 of 1000); `source_errors` WARNING only on an
+`OBSERVER_FAILURE_STREAK` of `error`/`rate_limited` — one failure or any
+number of `budget_refused` stays OK; `embedding_backlog` INFO for missing
+vectors, WARNING when any chunk is stamped with another model;
+`uncited_explanations` WARNING only when every explanation in the drift
+window has zero citations. Thresholds reuse `TAVILY_*_CREDITS`,
+`EMBEDDING_MODEL`, `OBSERVER_FAILURE_STREAK` and
+`OBSERVER_DRIFT_WINDOW_HOURS` — no new settings, nothing added to
+`.env.example`. The stage record for the node reports credits, calls,
+backlog and explanations. 8 unit assess tests, graph tests updated (healthy
+run now shows all eight kinds, the short-circuit skips the node), and 2
+integration tests: an empty knowledge layer is all OK against the real
+tables, and seeded rows produce the 85% budget WARNING, the streak, the
+missing-vector INFO and the all-uncited WARNING in one report.
+
 
 ## Step 10 — MCP server and closeout
 

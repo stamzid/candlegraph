@@ -19,6 +19,8 @@ from candlegraph.agents.ledger import recent_agent_runs, record_agent_run
 from candlegraph.agents.observer import run_observer
 from candlegraph.agents.reporting import LedgerSink
 from candlegraph.ingestion import ledger
+from candlegraph.knowledge.documents import RawDocument, ensure_source, store_document
+from candlegraph.knowledge.statements import knowledge_statements_for
 from candlegraph.storage import DatabaseManager
 from candlegraph.tokens import TokenRegistry
 from tests.conftest import SHIB, WBTC, make_settings
@@ -31,7 +33,10 @@ NOW = datetime(2026, 10, 25, 12, 0, tzinfo=UTC)
 
 @pytest.fixture
 def agent_db(db: DatabaseManager) -> DatabaseManager:
-    db.execute(f'TRUNCATE "{db.schema}".agent_run, "{db.schema}".ingest_run')
+    db.execute(
+        f'TRUNCATE "{db.schema}".agent_run, "{db.schema}".ingest_run, '
+        f'"{db.schema}".source, "{db.schema}".explanation CASCADE'
+    )
     return db
 
 
@@ -164,7 +169,78 @@ def test_a_fresh_complete_database_is_ok(agent_db: DatabaseManager, registry: To
     report = run_observer(make_settings(), db=agent_db, registry=registry, now=NOW, sinks=[])
 
     assert report.status == Severity.OK, [f.message for f in report.findings]
-    assert {f.kind for f in report.findings} == {"fresh", "ledger", "coverage", "drift"}
+    assert {f.kind for f in report.findings} == {
+        "fresh",
+        "ledger",
+        "coverage",
+        "drift",
+        "source_budget",
+        "source_errors",
+        "embedding_backlog",
+        "uncited_explanations",
+    }
+    # The step-9 exit criterion: a stack with no knowledge rows reports the
+    # new findings as the calm OK they are, against the real empty tables.
+    knowledge = {f.kind: f for f in report.findings if f.kind.startswith(("source_", "embedding", "uncited"))}
+    assert all(f.severity == Severity.OK for f in knowledge.values()), knowledge
+    assert knowledge["source_budget"].evidence["month_spent"] == 0
+
+
+def test_the_observer_reads_the_knowledge_ledger_budget_backlog_and_citations(
+    agent_db: DatabaseManager, registry: TokenRegistry
+) -> None:
+    """The four knowledge findings against real rows: spend summed, streaks seen,
+    the backlog counted per model, and an all-uncited window flagged."""
+    seed_hours(agent_db, WBTC, "WBTC", 192, volume_usd=5_000_000)
+    seed_hours(agent_db, SHIB, "SHIB", 192, volume_usd=500)
+    for minutes in range(5, 60, 5):
+        seed_run(agent_db, NOW - timedelta(minutes=minutes))
+    statements = knowledge_statements_for(agent_db.schema)
+    ensure_source(agent_db, "tavily", "search")
+    # 850 credits this month and a three-call failure streak.
+    agent_db.execute(
+        f'INSERT INTO "{agent_db.schema}".source_call (source_id, called_at, credits, status) '
+        "VALUES ('tavily', %(early)s, 850, 'ok'), ('tavily', %(a)s, 1, 'error'), "
+        "('tavily', %(b)s, 1, 'rate_limited'), ('tavily', %(c)s, 1, 'error')",
+        {
+            "early": NOW - timedelta(days=2),
+            "a": NOW - timedelta(hours=3),
+            "b": NOW - timedelta(hours=2),
+            "c": NOW - timedelta(hours=1),
+        },
+    )
+    # One stored document whose chunk has no vector, and one uncited explanation.
+    store_document(
+        agent_db,
+        RawDocument(source_id="tavily", url="https://x.com/a", raw_text="One sentence."),
+        retrieved_at=NOW,
+    )
+    agent_db.execute(
+        statements.upsert_explanation,
+        {
+            "strategy": "bollinger",
+            "symbol": "WBTC",
+            "period_start_unix": int(NOW.timestamp()) - 3600,
+            "position": -1,
+            "numeric_context": "{}",
+            "citations": "[]",
+            "rationale": "",
+            "model": None,
+            "generated_at": NOW - timedelta(hours=2),
+        },
+    )
+
+    report = run_observer(make_settings(), db=agent_db, registry=registry, now=NOW, sinks=[])
+
+    found = {f.kind: f for f in report.findings}
+    assert found["source_budget"].severity == Severity.WARNING, "850 of 1000 is 85%"
+    assert found["source_budget"].evidence["month_spent"] == 853
+    assert found["source_errors"].severity == Severity.WARNING
+    assert found["source_errors"].evidence["streak"] == ["error", "rate_limited", "error"]
+    assert found["embedding_backlog"].severity == Severity.INFO
+    assert found["embedding_backlog"].evidence["missing"] == 1
+    assert found["uncited_explanations"].severity == Severity.WARNING, "every explanation uncited"
+    assert "## Stages" in report.markdown and "collect_knowledge" in report.markdown
 
 
 def test_an_empty_database_is_informational_not_critical(

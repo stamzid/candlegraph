@@ -21,6 +21,7 @@ from candlegraph.agents.narrator import Narrator, TemplateNarrator
 from candlegraph.agents.observer.assess import assess
 from candlegraph.agents.observer.collect import (
     ObserverDeps,
+    collect_knowledge,
     collect_ledger,
     collect_metrics,
     collect_quality,
@@ -36,7 +37,13 @@ from candlegraph.utils.logging_utils import service_logger
 
 AGENT = "observer"
 # The nodes in the order they run; `publish` marks any that did not as skipped.
-STAGES: tuple[str, ...] = ("collect_ledger", "collect_quality", "collect_metrics", "assess")
+STAGES: tuple[str, ...] = (
+    "collect_ledger",
+    "collect_quality",
+    "collect_metrics",
+    "collect_knowledge",
+    "assess",
+)
 
 ObserverGraph = CompiledStateGraph[ObserverState, None, ObserverState, ObserverState]
 
@@ -71,6 +78,18 @@ def metrics_detail(_state: Mapping[str, Any], update: Mapping[str, Any]) -> dict
         "bars": sum(m.recent_bars + m.baseline_bars for m in metrics.values()),
         "runs_judged": getattr(update.get("run_metrics"), "recent_runs", 0)
         + getattr(update.get("run_metrics"), "baseline_runs", 0),
+    }
+
+
+def knowledge_detail(_state: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str, Any]:
+    facts = update.get("knowledge")
+    if facts is None:
+        return {"read": False}
+    return {
+        "credits_month": facts.month_spent,
+        "calls": len(facts.call_statuses),
+        "backlog": facts.backlog_missing + facts.backlog_stale,
+        "explanations": facts.explanations_total,
     }
 
 
@@ -213,9 +232,11 @@ def build_observer_graph(deps: ObserverDeps) -> ObserverGraph:
     ledger_node: Callable[[ObserverState], dict[str, Any]] = partial(collect_ledger, deps)
     quality_node: Callable[[ObserverState], dict[str, Any]] = partial(collect_quality, deps)
     metrics_node: Callable[[ObserverState], dict[str, Any]] = partial(collect_metrics, deps)
+    knowledge_node: Callable[[ObserverState], dict[str, Any]] = partial(collect_knowledge, deps)
     graph.add_node("collect_ledger", staged("collect_ledger", ledger_node, ledger_detail, hook))
     graph.add_node("collect_quality", staged("collect_quality", quality_node, quality_detail, hook))
     graph.add_node("collect_metrics", staged("collect_metrics", metrics_node, metrics_detail, hook))
+    graph.add_node("collect_knowledge", staged("collect_knowledge", knowledge_node, knowledge_detail, hook))
     graph.add_node("assess", staged("assess", assess, assess_detail, hook))
     graph.add_node("publish", partial(publish_node, deps))
 
@@ -224,7 +245,8 @@ def build_observer_graph(deps: ObserverDeps) -> ObserverGraph:
         "collect_ledger", route_after_ledger, {"collect_quality": "collect_quality", "publish": "publish"}
     )
     graph.add_edge("collect_quality", "collect_metrics")
-    graph.add_edge("collect_metrics", "assess")
+    graph.add_edge("collect_metrics", "collect_knowledge")
+    graph.add_edge("collect_knowledge", "assess")
     graph.add_edge("assess", "publish")
     graph.add_edge("publish", END)
     return graph.compile()

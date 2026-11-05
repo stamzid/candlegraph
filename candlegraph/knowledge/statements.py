@@ -155,6 +155,8 @@ class KnowledgeStatements:
     get_explanation: sql.Composed
     get_latest_explanation: sql.Composed
     get_recent_explanations: sql.Composed
+    # the observer's knowledge findings (step 9)
+    count_uncited_explanations: sql.Composed
 
 
 @lru_cache(maxsize=4)
@@ -482,6 +484,18 @@ def knowledge_statements_for(schema: str) -> KnowledgeStatements:
         """
     ).format(ns=ns)
 
+    # The observer's `uncited_explanations` evidence: explanations generated
+    # in the window whose citation set is empty — retrieval returned nothing.
+    count_uncited_explanations = sql.SQL(
+        """
+        SELECT
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE jsonb_array_length(citations) = 0) AS uncited
+        FROM {ns}.explanation
+        WHERE generated_at >= %(since)s
+        """
+    ).format(ns=ns)
+
     return KnowledgeStatements(
         upsert_asset=upsert_asset,
         upsert_asset_template=_ASSET_TEMPLATE,
@@ -514,4 +528,5 @@ def knowledge_statements_for(schema: str) -> KnowledgeStatements:
         get_explanation=get_explanation,
         get_latest_explanation=get_latest_explanation,
         get_recent_explanations=get_recent_explanations,
+        count_uncited_explanations=count_uncited_explanations,
     )
