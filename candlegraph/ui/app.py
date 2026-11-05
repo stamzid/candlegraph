@@ -21,6 +21,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from candlegraph.agents.stages import format_stage
 from candlegraph.analytics.arima import ArimaConfig
 from candlegraph.analytics.portfolio import OBJECTIVES, PortfolioConfig
 from candlegraph.analytics.rates import real_rate
@@ -52,7 +53,9 @@ from candlegraph.ui.viewmodels import (
     default_max_weight,
     default_portfolio_symbols,
     forecast_frame,
+    load_stored_explanation,
     run_backfill,
+    run_explain_now,
     run_news_fetch_now,
     run_observer_now,
 )
@@ -631,7 +634,64 @@ def _strategy_config(name: str) -> Any:
             return None
 
 
-def _strategy_page(db: DatabaseManager, ctx: dict[str, Any]) -> None:
+def _explanation_panel(db: DatabaseManager, settings: Settings, view: Any, symbol: str, name: str) -> None:
+    """The `signals --explain` surface: read what is stored for free, run it on request."""
+    _title(
+        "Explain — what else was true at the latest bar",
+        "The numbers are computed; the prose may cite only documents published before the bar.",
+    )
+    can_search = settings.tavily_api_key is not None
+    left, right = st.columns([3, 1])
+    search = left.checkbox(
+        "Search for news first (at most one Tavily credit per token per UTC day)",
+        value=False,
+        disabled=not can_search,
+        key=f"explain_search_{symbol}_{name}",
+        help="Off: only documents already stored are cited. No TAVILY_API_KEY: the box is disabled.",
+    )
+    shown = None
+    if right.button("▶ Explain latest signal", key=f"explain_run_{symbol}_{name}", type="primary"):
+        with st.spinner("Explaining…"):
+            try:
+                shown = run_explain_now(settings, db, view.strategy, symbol, search=search)
+            except ViewError as exc:
+                st.error(str(exc))
+    if shown is None:
+        shown = load_stored_explanation(db, name, symbol)
+    if shown is None:
+        st.info("Nothing explained for this token and strategy yet. Press “Explain latest signal”.")
+        return
+
+    head = shown.headline
+    cols = st.columns(5)
+    cols[0].metric("Bar", f"{head['bar']:%Y-%m-%d %H:%M}")
+    cols[1].metric("Signal", str(head["position"]).upper())
+    cols[2].metric("Score", f"{head['score']:+.2f}" if head["score"] is not None else "—")
+    cols[3].metric("24h move", _pct(head["move_24h"]) if head["move_24h"] is not None else "—")
+    ref = head["reference_symbol"]
+    cols[4].metric(
+        f"{ref} 24h move" if ref else "Reference",
+        _pct(head["reference_move_24h"]) if head["reference_move_24h"] is not None else "—",
+        help="The market-wide reference (KNOWLEDGE_REFERENCE_SYMBOL): is the move idiosyncratic?",
+    )
+    st.markdown(shown.explanation.rationale or "_No rationale survived validation._")
+    if shown.validator_note:
+        st.warning(shown.validator_note)
+    st.caption(shown.status_line + f" · narrator: {shown.explanation.model or 'template'}")
+    if head["citations"]:
+        st.dataframe(
+            shown.citations_frame,
+            width="stretch",
+            hide_index=True,
+            column_config={"url": st.column_config.LinkColumn("url")},
+        )
+    else:
+        st.caption(
+            "No documents published before the bar were retrieved; the signal stands on the numbers alone."
+        )
+
+
+def _strategy_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
     left, right = st.columns(2)
     symbol = left.selectbox(
         "Token", ctx["symbols"], index=default_index(ctx["symbols"]), key="strategy_symbol"
@@ -674,6 +734,8 @@ def _strategy_page(db: DatabaseManager, ctx: dict[str, Any]) -> None:
 
     _title(f"Trade Ledger — every position change (latest signal: {view.strategy.latest.name})")
     st.dataframe(view.trades_frame.tail(30).style.format({"price": "{:,.4f}"}), width="stretch")
+
+    _explanation_panel(db, settings, view, symbol, name)
 
 
 # --- FORECAST ----------------------------------------------------------------
@@ -750,8 +812,17 @@ def _agents_page(db: DatabaseManager, settings: Settings) -> None:
     st.subheader("Watchtower — is the data fresh, complete, and still the same market?")
 
     if st.button("▶ Run observer now", type="primary", help="One observer run, written to the agent ledger."):
-        with st.spinner("Observing…"):
-            report = run_observer_now(settings, db)
+        # Each stage is written as it finishes, so a slow collect_metrics
+        # over many tokens is visibly running rather than apparently hung.
+        with st.status("Observing…", expanded=True) as progress:
+            report = run_observer_now(
+                settings, db, on_stage=lambda record: progress.write(format_stage(record))
+            )
+            progress.update(
+                label=f"Observer finished {report.status_label.upper()} in {report.duration_seconds:.1f}s",
+                state="error" if report.error else "complete",
+                expanded=False,
+            )
         color = SEVERITY_COLORS.get(report.status_label, "#90a4ae")
         st.markdown(
             f"**Observer finished :{'red' if color == DOWN else 'blue'}"
@@ -790,6 +861,19 @@ def _agents_page(db: DatabaseManager, settings: Settings) -> None:
         help="Errors plus rate limits. Budget refusals are expected behaviour and counted separately.",
     )
     news_cols[3].metric("Budget refusals", f"{counts.get('budget_refused', 0)}")
+
+    _title(
+        "Stages — what the latest run did, in order",
+        "A skipped stage means the database-down short-circuit fired; a slow one says where the time went.",
+    )
+    if view.stages.empty:
+        st.caption("No stage records yet — runs recorded before this feature, or no run at all.")
+    else:
+        stage_cols = st.columns(len(view.stages))
+        for col, (_, row) in zip(stage_cols, view.stages.iterrows(), strict=True):
+            seconds = f"{row['seconds']:.2f}s" if pd.notna(row["seconds"]) else "—"
+            col.metric(str(row["stage"]), str(row["status"]).upper(), seconds, delta_color="off")
+            col.caption(str(row["detail"]) or "—")
 
     _title(
         "Findings — latest observer report",
@@ -1167,7 +1251,7 @@ def main() -> None:
             case "Portfolio":
                 _portfolio_page(db, settings, ctx)
             case "Strategy":
-                _strategy_page(db, ctx)
+                _strategy_page(db, settings, ctx)
             case "Forecast":
                 _forecast_page(db, ctx)
             case "Agents":

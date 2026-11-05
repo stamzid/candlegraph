@@ -15,8 +15,11 @@ compose service, and on demand:
 
 ```sh
 make up
-make observe                                   # one run, report printed
+make observe                                   # one run; each stage printed to stderr as it finishes, then the report
 make observe ARGS="--strict"                   # exit 1 at WARNING or worse
+# A stage line reads: `ok   collect_metrics    1.87s  symbols=9, bars=1612, ...`.
+# `skip` means the database-down short-circuit fired; the same rows are the
+# report's "Stages" section and the Agents dashboard's stage strip.
 # or in the UI: the Agents dashboard has a "Run observer now" button that
 # runs once and writes the report to the agent ledger. The same dashboard
 # shows whether the recent news (Tavily) runs succeeded; the News dashboard

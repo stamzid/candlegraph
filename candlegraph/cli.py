@@ -161,6 +161,12 @@ def _parser() -> argparse.ArgumentParser:
     observe = sub.add_parser("observe", help="run the run-observer agent once and post its report")
     observe.add_argument("--strict", action="store_true", help="exit non-zero at WARNING or worse")
     observe.add_argument("--json", action="store_true", help="print the report as JSON instead of Markdown")
+    observe.add_argument(
+        "--progress",
+        action="store_true",
+        help="print each stage (collect_ledger, collect_quality, collect_metrics, assess, publish) to stderr "
+        "as it finishes, with its duration and what it read",
+    )
     _add_sinks(observe)
 
     janitor = sub.add_parser("janitor", help="run the CI janitor agent once and post its report")
@@ -801,7 +807,16 @@ def _observe(settings: Settings, args: argparse.Namespace) -> int:
 
     db = get_db()
     sinks = build_sinks(settings, db=db, names=_sink_names(args.sinks))
-    report = run_observer(settings, db=db, sinks=sinks)
+    on_stage = None
+    if args.progress:
+        from candlegraph.agents.stages import StageRecord, format_stage
+
+        def on_stage(record: StageRecord) -> None:
+            # stderr so `--json` stays machine-readable on stdout.
+            print(format_stage(record), file=sys.stderr, flush=True)
+
+        print("observer stages:", file=sys.stderr, flush=True)
+    report = run_observer(settings, db=db, sinks=sinks, on_stage=on_stage)
     _print_report(report, args.json)
     return _agent_exit(report, args.strict)
 

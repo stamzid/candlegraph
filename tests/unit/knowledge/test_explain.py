@@ -110,6 +110,9 @@ class ExplainDatabase(NewsDatabase):
         rows = [chunk_row(n) for n in range(1, chunks + 1)]
         self.reads["hybrid_search"] = rows
         self.reads["lexical_search"] = rows
+        # An empty backlog, so the embed step before retrieval finds nothing to do
+        # unless a test hands it rows.
+        self.reads["count_embedding_backlog"] = [{"missing": 0, "stale": 0, "total": 0}]
         self.explanations: list[dict[str, Any]] = []
 
     def execute(self, query: Any, params: dict[str, Any] | None = None) -> int:
@@ -598,3 +601,171 @@ def test_the_row_carries_the_natural_key_and_json_columns() -> None:
     assert json.loads(row["numeric_context"]) == {"a": 1}
     assert json.loads(row["citations"])[0]["published_at"] == "2026-10-24T09:01:00+00:00"
     assert row["generated_at"] == NOW
+
+
+# --- the embed step (docs/incidents/2026-11-04-explain-ran-lexical-only/) ----------
+
+
+def test_explain_embeds_the_chunks_the_search_just_stored_before_retrieving() -> None:
+    """Fresh news must be visible to the dense leg in the same command, not after `make embed`."""
+    db = ExplainDatabase(chunks=1)
+    db.reads["get_chunks_to_embed"] = [{"id": 7, "text": "WBTC moved on an unlock."}]
+    source = FakeSource([SearchResult([document()], 1, 1)])
+
+    explanation = explain(db, settings(), request(), source=source, embedder=HashEmbedder(), now=NOW)
+
+    labels = [label for label, _ in db.fetches]
+    embed_at = labels.index("get_chunks_to_embed")
+    retrieve_at = labels.index("hybrid_search")
+    assert embed_at < retrieve_at, "embed first, then retrieve"
+    assert any(label == "update_chunk_embeddings" for label, _ in db.upserts)
+    assert explanation.chunks_embedded > 0
+    assert "embedded" in format_explanation(explanation)
+
+
+def test_the_embed_step_is_bounded_so_a_long_backlog_stays_make_embeds_job() -> None:
+    from candlegraph.knowledge.explain import EXPLAIN_EMBED_LIMIT
+
+    db = ExplainDatabase(chunks=1)
+    # The fake replays the same backlog row forever; only the bound stops the loop.
+    db.reads["get_chunks_to_embed"] = [{"id": n, "text": "t"} for n in range(32)]
+
+    explanation = explain(db, settings(), request(), embedder=HashEmbedder(), now=NOW)
+
+    assert explanation.chunks_embedded == EXPLAIN_EMBED_LIMIT
+
+
+def test_an_unreachable_embedder_degrades_to_lexical_and_names_the_failure() -> None:
+    class DownEmbedder(HashEmbedder):
+        def embed(self, texts: Any, *, kind: Any) -> list[list[float]]:
+            from candlegraph.knowledge.embed import EmbeddingError
+
+            raise EmbeddingError("cannot reach Ollama at http://ollama:11434")
+
+    db = ExplainDatabase(chunks=1)
+    db.reads["get_chunks_to_embed"] = [{"id": 7, "text": "t"}]
+
+    explanation = explain(db, settings(), request(), embedder=DownEmbedder(), now=NOW)
+
+    assert not explanation.dense_used
+    assert "cannot reach Ollama" in explanation.retrieval_note
+    assert explanation.chunks_embedded == 0
+    assert any(label == "lexical_search" for label, _ in db.fetches)
+
+
+def test_without_an_embedder_nothing_is_embedded() -> None:
+    db = ExplainDatabase(chunks=1)
+    db.reads["get_chunks_to_embed"] = [{"id": 7, "text": "t"}]
+
+    explain(db, settings(), request(), embedder=None, now=NOW)
+
+    assert all(label != "get_chunks_to_embed" for label, _ in db.fetches)
+
+
+# --- reading stored rows and the shared entry point ----------------------------------------
+
+
+def stored_row(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "strategy": "bollinger",
+        "symbol": "WBTC",
+        "period_start_unix": int(BAR.timestamp()),
+        "position": -1,
+        "numeric_context": {"score": 2.31, "move_24h": 0.08},
+        "citations": [Citation.from_chunk(1, chunk(1)).to_dict()],
+        "rationale": "WBTC rose [1].",
+        "model": None,
+        "generated_at": NOW,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_a_stored_row_rebuilds_the_explanation_and_says_it_was_stored() -> None:
+    from candlegraph.knowledge.explain import load_explanation
+
+    db = ExplainDatabase()
+    db.reads["get_latest_explanation"] = [stored_row()]
+    db.reads["get_explanation"] = [stored_row(position=1)]
+
+    latest = load_explanation(db, "bollinger", "WBTC")
+    exact = load_explanation(db, "bollinger", "WBTC", bar=BAR)
+
+    assert latest is not None and latest.bar == BAR and latest.position == -1 and latest.score == 2.31
+    assert (
+        latest.citations[0].url == "https://news.example/1" and latest.citations[0].published_at is not None
+    )
+    assert latest.news_status == "stored" and latest.dense_used
+    assert latest.rationale == "WBTC rose [1]."
+    assert exact is not None and exact.position == 1
+    assert "period_start_unix" in db.fetches[-1][1]
+
+
+def test_a_missing_stored_row_is_none_not_an_error() -> None:
+    from candlegraph.knowledge.explain import load_explanation
+
+    assert load_explanation(ExplainDatabase(), "bollinger", "WBTC") is None
+
+
+def test_json_columns_arriving_as_strings_are_decoded() -> None:
+    row = stored_row(numeric_context=json.dumps({"score": 1.0}), citations="[]")
+
+    explanation = Explanation.from_row(row)
+
+    assert explanation.score == 1.0 and explanation.citations == () and not explanation.dense_used
+
+
+def price_history_rows(symbol: str, n: int = 60) -> list[dict[str, Any]]:
+    from decimal import Decimal
+
+    start = BAR - timedelta(hours=n - 1)
+    rows = []
+    for i in range(n):
+        price = 100.0 + (i if i > n - 5 else 0)
+        moment = start + timedelta(hours=i)
+        rows.append(
+            {
+                "symbol": symbol,
+                "token_id": f"0x{symbol}",
+                "period_start_unix": int(moment.timestamp()),
+                "timestamp": moment,
+                "open": Decimal(str(price)),
+                "high": Decimal(str(price)),
+                "low": Decimal(str(price)),
+                "close": Decimal(str(price)),
+                "price_usd": Decimal(str(price)),
+                "volume_usd": Decimal("1"),
+                "total_value_locked_usd": Decimal("1"),
+            }
+        )
+    return rows
+
+
+def test_explain_symbol_runs_the_strategy_and_never_searches_unless_asked() -> None:
+    from candlegraph.knowledge.explain import explain_symbol
+    from candlegraph.tokens import TokenRegistry
+
+    db = ExplainDatabase(chunks=1)
+    db.reads["get_price_history"] = price_history_rows("WBTC") + price_history_rows("SHIB")
+    registry = TokenRegistry(tokens=(TOKEN, REFERENCE))
+    cfg = settings(tavily_api_key="tvly-x", embedding_provider="fake", knowledge_reference_symbol="SHIB")
+
+    explanation = explain_symbol(db, cfg, "WBTC", "bollinger", registry=registry, now=NOW)
+
+    assert explanation.strategy == "bollinger" and explanation.symbol == "WBTC"
+    assert explanation.bar == BAR, "the latest bar by default"
+    assert explanation.news_status == "skipped", "search is opt-in even with a key configured"
+    assert explanation.numeric_context["reference"]["symbol"] == "SHIB"
+    assert db.source_calls == []
+    assert db.explanations, "stored"
+
+
+def test_explain_symbol_refuses_an_untracked_symbol_and_an_empty_history() -> None:
+    from candlegraph.knowledge.explain import explain_symbol
+    from candlegraph.tokens import TokenRegistry
+
+    registry = TokenRegistry(tokens=(TOKEN,))
+    with pytest.raises(ExplainError, match="unknown token"):
+        explain_symbol(ExplainDatabase(), settings(), "DOGE", registry=registry)
+    with pytest.raises(ExplainError, match="no stored price history"):
+        explain_symbol(ExplainDatabase(), settings(embedding_provider="fake"), "WBTC", registry=registry)

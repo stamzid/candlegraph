@@ -21,6 +21,14 @@ layer on top. Five pieces of work are delivered and in the test suite:
 | **Agent layer** | Two LangGraph graphs — a run observer (stale data, gaps on liquid tokens, metric drift) and a CI janitor (checks, mechanical fixes, draft PRs) — plus the `agent_run` ledger and report sinks. | `make observe && make agent-runs`, and the janitor's daily workflow |
 | **Time-series storage** | The three series tables are TimescaleDB hypertables chunked on `period_start_unix`; the state and ledger tables deliberately are not. | `make test-integration` (`test_timescale.py`) |
 
+Two stages are open. Stage 0 is paused with its first deliverable landed;
+stage 1 is at rollout step 8 of 10 and its exit criterion already holds:
+
+| In progress | Landed | Remaining | Exit criterion |
+|---|---|---|---|
+| **0. Descriptive statistics, deeper** | `candlegraph compare` over aligned bars. | The `active` token flag; the `FillPolicy` seam. Resumes after stage 1. | met for `compare`; the five active tokens and the no-look-ahead fill test remain |
+| **1. Knowledge graph and signaller** | Steps 1–8 of `../rollout/ROLLOUT.md`: schema, assets, documents, embeddings, Tavily, retrieval, `signals --explain` (CLI, GraphQL, UI). | Step 9 (observer knowledge findings), step 10 (MCP, closeout). | `signals WETH --explain` cites a stored document with URL and timestamp, no LLM key — met 2026-11-04 |
+
 What that adds up to, and where the next stages attach:
 
 ```mermaid

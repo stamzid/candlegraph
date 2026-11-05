@@ -17,6 +17,7 @@ from candlegraph.agents.narrator import Narrator
 from candlegraph.agents.observer.assess import run_metrics, symbol_metrics
 from candlegraph.agents.observer.state import ObserverState, SymbolMetrics
 from candlegraph.agents.reporting import Sink
+from candlegraph.agents.stages import StageHook
 from candlegraph.analytics.prices import load_price_history
 from candlegraph.ingestion import ledger
 from candlegraph.ingestion.quality import build_report
@@ -35,6 +36,8 @@ class ObserverDeps:
     sinks: Sequence[Sink]
     run_id: str
     started_at: datetime
+    on_stage: StageHook | None = None
+    """Called with each stage's record as it finishes; the CLI prints them."""
 
 
 def collect_ledger(deps: ObserverDeps, state: ObserverState) -> dict[str, Any]:

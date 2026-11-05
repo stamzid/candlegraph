@@ -23,6 +23,7 @@ import pandas as pd
 from candlegraph.agents.base import AgentReport
 from candlegraph.agents.observer import run_observer
 from candlegraph.agents.reporting import build_sinks
+from candlegraph.agents.stages import StageHook, StageRecord
 from candlegraph.analytics.arima import ArimaConfig, ArimaForecast, fit_forecast
 from candlegraph.analytics.pairwise import PairwiseComparison, compare_pair
 from candlegraph.analytics.portfolio import (
@@ -56,7 +57,16 @@ from candlegraph.analytics.rolling import (
 )
 from candlegraph.ingestion.runner import IngestResult, run_ingest
 from candlegraph.knowledge.budget import Level, usage_fraction, usage_level
+from candlegraph.knowledge.explain import (
+    ExplainError,
+    Explanation,
+    explain,
+    load_explanation,
+    request_for,
+    services_for,
+)
 from candlegraph.knowledge.news import NewsError, NewsFetchSummary, budget_from, run_news_fetch, source_spend
+from candlegraph.knowledge.retrieve import RetrievalError
 from candlegraph.knowledge.sources.tavily import SOURCE_ID as TAVILY
 from candlegraph.knowledge.statements import knowledge_statements_for
 from candlegraph.settings import Settings
@@ -580,6 +590,119 @@ def build_strategy_view(
     return StrategyView(strategy=result, report=backtest(result, config=backtest_config))
 
 
+# --- explanations (signals --explain in the UI) --------------------------------
+
+
+@dataclass
+class ExplanationView:
+    """One explained signal, shaped for the Strategy dashboard."""
+
+    explanation: Explanation
+
+    @property
+    def citations_frame(self) -> pd.DataFrame:
+        """One row per citation in the order the prose numbers them."""
+        columns = ["n", "published", "title", "url", "legs", "quote"]
+        rows = [
+            {
+                "n": c.n,
+                "published": c.published_at.strftime("%Y-%m-%d %H:%M UTC")
+                if c.published_at
+                else "date unknown",
+                "title": c.title or "",
+                "url": c.url,
+                "legs": c.legs,
+                "quote": c.quote,
+            }
+            for c in self.explanation.citations
+        ]
+        return pd.DataFrame(rows, columns=columns)
+
+    @property
+    def headline(self) -> dict[str, Any]:
+        """The metric strip: what the signal said and how far the price moved."""
+        context = self.explanation.numeric_context
+        reference = context.get("reference") or {}
+        return {
+            "bar": self.explanation.bar,
+            "position": self.explanation.position_label,
+            "score": self.explanation.score,
+            "move_24h": context.get("move_24h"),
+            "reference_symbol": reference.get("symbol"),
+            "reference_move_24h": reference.get("move_24h"),
+            "citations": len(self.explanation.citations),
+        }
+
+    @property
+    def status_line(self) -> str:
+        """Where the documents came from and which retrieval legs ran — always shown."""
+        e = self.explanation
+        legs = "hybrid retrieval" if e.dense_used else "lexical retrieval only"
+        line = f"news: {e.news_status} — {e.news_message}; {legs}"
+        if e.retrieval_note:
+            line += f" ({e.retrieval_note})"
+        if e.chunks_embedded:
+            line += f"; embedded {e.chunks_embedded} new chunks"
+        return line
+
+    @property
+    def validator_note(self) -> str | None:
+        """What the validator removed, or None when the prose was clean."""
+        e = self.explanation
+        if not e.rejected_citations:
+            return None
+        return (
+            f"The narrator cited {list(e.rejected_citations)}, which retrieval never returned; "
+            f"{len(e.stripped_sentences)} sentence(s) were removed."
+        )
+
+
+def load_stored_explanation(db: DatabaseManager, strategy: str, symbol: str) -> ExplanationView | None:
+    """The latest stored explanation for the pair. Free: no network, no model."""
+    found = load_explanation(db, strategy, symbol)
+    return ExplanationView(found) if found else None
+
+
+def run_explain_now(
+    settings: Settings,
+    db: DatabaseManager,
+    result: StrategyResult,
+    symbol: str,
+    *,
+    search: bool,
+    at: datetime | None = None,
+) -> ExplanationView:
+    """Explain one bar of a strategy already run on this screen, and store it.
+
+    ``search`` is the one way a credit gets spent from the UI, and it is a
+    checkbox the user ticked; without it the stored corpus serves. The
+    reference series is ``KNOWLEDGE_REFERENCE_SYMBOL`` when it is a different
+    token with stored history.
+
+    Raises:
+        ViewError: an untracked symbol or no bar at ``at``.
+    """
+    registry = get_token_registry()
+    token = registry.by_symbol(symbol)
+    if token is None:
+        raise ViewError(f"unknown token {symbol!r}")
+    reference = None
+    reference_symbol = settings.knowledge_reference_symbol
+    if reference_symbol.casefold() != symbol.casefold() and registry.by_symbol(reference_symbol) is not None:
+        try:
+            reference = _one_symbol(db, reference_symbol, None)
+        except ViewError:
+            reference = None  # no stored history for the reference: explain without the comparison
+    source, embedder, _notes = services_for(settings)
+    if not search:
+        source = None
+    try:
+        request = request_for(result, token, at=at, reference=reference)
+        return ExplanationView(explain(db, settings, request, source=source, embedder=embedder))
+    except (ExplainError, RetrievalError) as exc:
+        raise ViewError(str(exc)) from exc
+
+
 # --- forecast dashboard ------------------------------------------------------
 
 
@@ -621,6 +744,9 @@ class AgentsView:
     news_calls: pd.DataFrame = field(default_factory=pd.DataFrame)
     """Recent Tavily calls, newest first — the minimal news-health strip here;
     the News dashboard carries the full analysis."""
+    stages: pd.DataFrame = field(default_factory=pd.DataFrame)
+    """The latest observer run's stages in order: stage, status, seconds, detail.
+    Empty before the first run, and for runs recorded before stages existed."""
 
     @property
     def status(self) -> str:
@@ -639,6 +765,23 @@ class AgentsView:
             return {}
         counts = self.news_calls["status"].value_counts()
         return {str(k): int(v) for k, v in counts.items()}
+
+
+def stages_frame(detail: Any) -> pd.DataFrame:
+    """The ``stages`` list of an ``agent_run.detail`` as a frame, order kept."""
+    columns = ["stage", "status", "seconds", "detail"]
+    raw = detail.get("stages") if isinstance(detail, dict) else None
+    if not raw:
+        return pd.DataFrame(columns=columns)
+    records = [StageRecord.from_dict(item) for item in raw]
+    return pd.DataFrame(
+        {
+            "stage": [r.name for r in records],
+            "status": [r.status for r in records],
+            "seconds": [r.duration_seconds for r in records],
+            "detail": [", ".join(f"{k}={v}" for k, v in r.detail.items()) for r in records],
+        }
+    )
 
 
 def _findings_frame(rows: Any) -> pd.DataFrame:
@@ -700,6 +843,7 @@ def build_agents_view(db: DatabaseManager, limit: int = 30) -> AgentsView:
         ingest_runs=ingest_runs,
         coverage=coverage,
         news_calls=news_calls,
+        stages=stages_frame(latest.get("detail") if latest else None),
     )
 
 
@@ -826,16 +970,19 @@ def run_news_fetch_now(
         raise ViewError(str(exc)) from exc
 
 
-def run_observer_now(settings: Settings, db: DatabaseManager) -> AgentReport:
+def run_observer_now(
+    settings: Settings, db: DatabaseManager, on_stage: StageHook | None = None
+) -> AgentReport:
     """One on-demand observer run, written to the agent ledger.
 
     The ledger sink is used regardless of ``AGENT_REPORT_SINKS`` so the run
     always lands in the history this dashboard reads; the report is also
     returned for immediate rendering. Never raises for a failing graph —
     a crashed run comes back with ``error`` set, exactly like a scheduled one.
+    ``on_stage`` lets the page show each stage as it finishes.
     """
     sinks = build_sinks(settings, db=db, names=("ledger",))
-    return run_observer(settings, db=db, sinks=sinks)
+    return run_observer(settings, db=db, sinks=sinks, on_stage=on_stage)
 
 
 # --- data dashboard ------------------------------------------------------------

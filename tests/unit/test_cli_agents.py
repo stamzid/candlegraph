@@ -53,6 +53,38 @@ def test_observe_prints_the_markdown_and_exits_zero(
     assert [s.name for s in captured["sinks"]] == ["log", "ledger"]
 
 
+def test_observe_progress_prints_each_stage_to_stderr_and_leaves_stdout_to_the_report(
+    cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from candlegraph.agents.stages import StageRecord
+
+    def fake(settings: Any, **kwargs: Any) -> AgentReport:
+        hook = kwargs["on_stage"]
+        hook(StageRecord("collect_ledger", "ok", NOW, 0.05, {"runs": 39}))
+        hook(StageRecord("assess", "skipped", None, None, {"reason": "database unreachable"}))
+        return report("observer")
+
+    monkeypatch.setattr("candlegraph.agents.observer.run_observer", fake)
+
+    assert main(["observe", "--progress", "--json"]) == 0
+    out, err = capsys.readouterr()
+    assert "observer stages:" in err and "ok   collect_ledger" in err and "skip assess" in err
+    assert "collect_ledger" not in out, "stdout stays machine-readable"
+
+
+def test_observe_without_progress_passes_no_hook(
+    cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "candlegraph.agents.observer.run_observer", lambda s, **k: captured.update(k) or report("observer")
+    )
+
+    main(["observe"])
+
+    assert captured["on_stage"] is None
+
+
 def test_observe_strict_exits_one_at_warning_and_two_on_error(
     cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:

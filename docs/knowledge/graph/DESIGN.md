@@ -355,6 +355,65 @@ has to be built *as of* each bar, which is why continuous feeds (stage 5)
 and not on-demand search are the source for strategy features. On-demand
 search is for explanation.
 
+## Serving explanations: CLI, API and UI
+
+Three surfaces call the same `explain()`; the design between them is one
+rule: **reading what is stored is free; running the pipeline is explicit;
+spending a credit is a separate, opt-in decision.** The pipeline writes an
+`explanation` row and may write documents and a `source_call` row, so no
+surface may run it as a side effect of looking at something.
+
+```mermaid
+flowchart LR
+  subgraph read["Read (free: table only)"]
+    Q1["GraphQL signalExplanation(symbol, strategy, at?)"]
+    Q2["GraphQL signalExplanations(symbol?, limit)"]
+    U1["UI Strategy → Explain panel<br/>shows the stored row on load"]
+  end
+  subgraph run["Run (explicit)"]
+    C["CLI signals SYMBOL --explain<br/>[--no-search]"]
+    M["GraphQL mutation explainSignal(..., search=false)"]
+    U2["UI button ‘Explain latest signal’<br/>+ checkbox ‘search for news’"]
+  end
+  read --> X[("explanation")]
+  run --> E["explain()"]
+  E -->|"search allowed"| N["news.fetch_news<br/>(asset, UTC day) cache · budget · ledger"]
+  E --> R["retrieve (published_at ≤ bar)"]
+  E --> X
+  classDef free fill:#e8f5e9,stroke:#2e7d32
+  classDef spend fill:#fff3e0,stroke:#ef6c00
+  class Q1,Q2,U1 free
+  class N spend
+```
+
+| Surface | Reads | Runs | Spends | Where |
+|---|---|---|---|---|
+| CLI | — | `signals SYMBOL --explain [--at] [--reference]` | by default when `TAVILY_API_KEY` is set; `--no-search` refuses | `cli.py` → `knowledge/explain.py` |
+| GraphQL | `signalExplanation`, `signalExplanations` — the `explanation` table only, no network, no model | `explainSignal` mutation | only with `search: true` (default `false`) | `api/explanations.py` → `explain.explain_symbol` |
+| UI | the Strategy dashboard shows the latest stored explanation for the selected token and strategy | the **Explain latest signal** button | only when the "search for news" checkbox is ticked; disabled without a key | `ui/viewmodels.py` (`ExplanationView`, `run_explain_now`) |
+
+Decisions:
+
+- **The CLI and the API disagree on the search default on purpose.** The
+  CLI is an operator at a keyboard who configured the key and expects the
+  command to do its job; `--no-search` is the exception. The API and the
+  UI are called by code and by clicks, and a dashboard re-rendering or a
+  client retrying must never be the thing that spends the month's
+  credits, so there the default is off. Either way the `(asset, UTC day)`
+  cache bounds the worst case to one credit per token per day.
+- **The mutation returns the same type the query reads**, `SignalExplanation`,
+  with `newsStatus` saying what happened (`ok`, `cached`, `budget_refused`,
+  `skipped`, …) or `stored` when it was only read. A client can therefore
+  show a cached answer and a fresh one with one component.
+- **`numericContext` is a JSON scalar, not a typed object.** The context's
+  keys will grow with the models (stage 4) and a schema change per new
+  number would make the SDL churn; the keys are documented in
+  `knowledge/explain.py::numeric_context` and stored verbatim on the row.
+- **Nothing in the UI's render path touches the network.** The panel reads
+  the stored row on every re-run; only the button runs the pipeline, and
+  only the checkbox allows the search. This is the same rule the News
+  dashboard's fetch button and the Data dashboard's backfill follow.
+
 ## Integration with the agents
 
 **The run observer** gains one collect node, `collect_knowledge`, and four

@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Annotated, Any, TypedDict
 
 from candlegraph.agents.base import AgentReport, Finding
+from candlegraph.agents.stages import StageRecord
 from candlegraph.ingestion.quality import QualityReport
 from candlegraph.settings import Settings
 
@@ -127,4 +128,6 @@ class ObserverState(TypedDict, total=False):
     run_metrics: RunMetrics | None
     findings: Annotated[list[Finding], operator.add]
     errors: Annotated[list[str], operator.add]
+    stages: Annotated[list[StageRecord], operator.add]
+    """One record per node that ran, in order; `publish` appends the skipped ones."""
     report: AgentReport

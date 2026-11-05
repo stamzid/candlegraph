@@ -1,7 +1,8 @@
-"""The GraphQL surface: one query returning token metadata plus OHLC candles.
+"""The GraphQL surface: token metadata plus OHLC candles, and signal explanations.
 
 Candles of any width are built at read time by grouping the stored hourly rows
-into ``timeUnitInHours`` buckets.
+into ``timeUnitInHours`` buckets. The explanation fields live in
+:mod:`candlegraph.api.explanations` and are merged into the root types here.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from typing import Any
 
 import strawberry
 
+from candlegraph.api.explanations import ExplanationQuery, Mutation
 from candlegraph.api.formatting import empty_chart_data, format_chart_data
 from candlegraph.storage import DatabaseManager, get_db
 from candlegraph.tokens import TokenRegistry, get_token_registry
@@ -114,8 +116,8 @@ def build_chart_data(token_symbol: str, time_unit_in_hours: int) -> ChartData:
 
 
 @strawberry.type
-class Query:
-    """Root query type."""
+class Query(ExplanationQuery):
+    """Root query type: chart data, the token list, and stored explanations."""
 
     @strawberry.field
     def get_chart_data(self, token_symbol: str, time_unit_in_hours: int) -> ChartData:
@@ -137,4 +139,4 @@ class Query:
         return list(get_token_registry().symbols)
 
 
-chart_schema = strawberry.Schema(query=Query)
+chart_schema = strawberry.Schema(query=Query, mutation=Mutation)

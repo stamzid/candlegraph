@@ -378,6 +378,25 @@ explanation unchanged** while the next day cites it, two explanations on one
 asset-day make one `source_call`, an exhausted budget serves from cache with
 a `budget_refused` row, and re-explaining is an upsert.
 
+**Addendum (2026-11-04, same day).** Verification on a real stack found
+that every stack started with `make up` ran `--explain` on the lexical leg
+alone: Ollama was behind the `knowledge` compose profile from step 5, and
+`explain` never embedded the documents it had just fetched. Both fixed and
+written up in `docs/incidents/2026-11-04-explain-ran-lexical-only/`:
+Ollama is in the default stack (no app container depends on it;
+`make up-knowledge` is now an alias), and `explain` embeds up to 256
+pending chunks before retrieving, reporting the count. In the same change
+the explanation gained its other two surfaces — GraphQL (`signalExplanation`
+and `signalExplanations` read the table for free; the `explainSignal`
+mutation runs the pipeline and spends only with `search: true`) and the
+Strategy dashboard's Explain panel (stored row on load, a button to run,
+a checkbox to allow the search) — with the rule between them recorded in
+the graph document under "Serving explanations". `explain_symbol` is the
+shared entry point; `load_explanation` and the `get_latest_explanation`
+statement serve the reads. Statement count for step 8 is therefore four:
+`upsert_explanation`, `get_explanation`, `get_latest_explanation`,
+`get_recent_explanations`.
+
 ## Step 9 — Observer integration
 
 **Goal.** One `collect_knowledge` node and four findings:

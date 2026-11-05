@@ -51,10 +51,12 @@ cov: ## Run the suite with a coverage report
 
 check: fmt-check lint typecheck test ## Everything CI runs
 
-up: ## Build and start the stack, waiting until it is healthy; prints the API log if it does not get there
+up: ## Build and start the stack (including the ollama embedder; first start pulls the model), waiting until healthy
 	@$(COMPOSE) up -d --build --wait || { \
 		echo; echo "--- the stack did not become healthy; last lines of the API container: ---"; \
 		$(COMPOSE) logs --no-color --tail=40 candlegraph; \
+		echo "--- and of the ollama embedder (a first start pulls ~1.2 GB; a slow link may need another 'make up'): ---"; \
+		$(COMPOSE) logs --no-color --tail=20 ollama; \
 		echo "--- if the log names a migration or volume problem, 'make reset' rebuilds the volume ---"; \
 		exit 1; }
 
@@ -105,11 +107,11 @@ report: ## Print the data-quality report from the stack
 sync-assets: ## Load asset rows (addresses, symbols, aliases) from config/tokens.yaml into the stack
 	$(COMPOSE) exec worker python -m candlegraph knowledge sync-assets
 
-up-knowledge: ## Start the stack plus the ollama embedding service (pulls the model on first start)
-	COMPOSE_PROFILES=knowledge $(MAKE) up
+up-knowledge: ## Same as `make up` (kept for old notes): ollama is part of the default stack now
+	$(MAKE) up
 
 logs-ollama: ## Follow the embedding service log
-	$(COMPOSE) --profile knowledge logs -f ollama
+	$(COMPOSE) logs -f ollama
 
 fetch-news: ## One budgeted news search per token per UTC day, inside the stack
 	$(COMPOSE) exec worker python -m candlegraph knowledge fetch-news $(ARGS)
@@ -132,8 +134,8 @@ reembed: ## Re-encode every chunk with the configured EMBEDDING_MODEL (resumable
 runs: ## Show recent ingest runs from the ledger
 	$(COMPOSE) exec worker python -m candlegraph runs
 
-observe: ## Run the run-observer agent once inside the stack and print its report
-	$(COMPOSE) exec agents python -m candlegraph observe $(ARGS)
+observe: ## Run the run-observer agent once inside the stack, printing each stage as it finishes, then the report
+	$(COMPOSE) exec agents python -m candlegraph observe --progress $(ARGS)
 
 janitor: ## Run the CI janitor locally: make janitor ARGS="--open-pr --strict"
 	$(UV) run python -m candlegraph janitor $(ARGS)

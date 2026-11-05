@@ -7,6 +7,8 @@ down there is nothing to assess, so ``collect_ledger`` routes straight to
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from functools import partial
 from typing import Any
@@ -14,7 +16,7 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from candlegraph.agents.base import AgentReport, new_run_id, now_utc
+from candlegraph.agents.base import AgentReport, Severity, new_run_id, now_utc
 from candlegraph.agents.narrator import Narrator, TemplateNarrator
 from candlegraph.agents.observer.assess import assess
 from candlegraph.agents.observer.collect import (
@@ -26,14 +28,61 @@ from candlegraph.agents.observer.collect import (
 )
 from candlegraph.agents.observer.state import ObserverState, ObserverThresholds, SymbolMetrics
 from candlegraph.agents.reporting import Sink, build_sinks, finish_report, publish
+from candlegraph.agents.stages import StageHook, StageRecord, complete_stages, staged, stages_section
 from candlegraph.settings import Settings
 from candlegraph.storage import DatabaseManager, get_db
 from candlegraph.tokens import TokenRegistry, get_token_registry
 from candlegraph.utils.logging_utils import service_logger
 
 AGENT = "observer"
+# The nodes in the order they run; `publish` marks any that did not as skipped.
+STAGES: tuple[str, ...] = ("collect_ledger", "collect_quality", "collect_metrics", "assess")
 
 ObserverGraph = CompiledStateGraph[ObserverState, None, ObserverState, ObserverState]
+
+
+# --- what each stage reports about itself (pure) ----------------------------------
+
+
+def ledger_detail(_state: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str, Any]:
+    age = update.get("seconds_since_success")
+    return {
+        "database_up": bool(update.get("database_up", False)),
+        "runs": len(update.get("runs", [])),
+        "seconds_since_success": round(float(age)) if age is not None else None,
+    }
+
+
+def quality_detail(_state: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str, Any]:
+    quality = update.get("quality")
+    if quality is None:
+        return {"tokens": 0}
+    return {
+        "tokens": len(quality.tokens),
+        "missing_tokens": len(quality.missing_tokens),
+        "violations": len(quality.violations),
+    }
+
+
+def metrics_detail(_state: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str, Any]:
+    metrics: dict[str, SymbolMetrics] = update.get("metrics", {})
+    return {
+        "symbols": len(metrics),
+        "bars": sum(m.recent_bars + m.baseline_bars for m in metrics.values()),
+        "runs_judged": getattr(update.get("run_metrics"), "recent_runs", 0)
+        + getattr(update.get("run_metrics"), "baseline_runs", 0),
+    }
+
+
+def assess_detail(_state: Mapping[str, Any], update: Mapping[str, Any]) -> dict[str, Any]:
+    findings = update.get("findings", [])
+    return {
+        "findings": len(findings),
+        **{
+            level.label: sum(1 for f in findings if f.severity == level)
+            for level in (Severity.CRITICAL, Severity.WARNING, Severity.INFO, Severity.OK)
+        },
+    }
 
 
 def _ratio(a: float | None, b: float | None) -> str:
@@ -110,7 +159,14 @@ def ledger_section(state: ObserverState, limit: int = 8) -> str:
 
 
 def publish_node(deps: ObserverDeps, state: ObserverState) -> dict[str, Any]:
+    started = now_utc()
+    t0 = time.perf_counter()
+    # The stages that fed this report, with the short-circuited ones named
+    # as skipped rather than silently absent.
+    reason = "database unreachable" if not state.get("database_up", False) else "not run"
+    stages = complete_stages(state.get("stages", []), STAGES, reason)
     sections = [
+        ("Stages", stages_section(stages)),
         ("Coverage", coverage_section(state)),
         ("Drift", drift_section(state)),
         ("Recent ingest runs", ledger_section(state)),
@@ -120,6 +176,7 @@ def publish_node(deps: ObserverDeps, state: ObserverState) -> dict[str, Any]:
         "seconds_since_success": state.get("seconds_since_success"),
         "symbols_judged": len(state.get("metrics", {})),
         "errors": state.get("errors", []),
+        "stages": [s.to_dict() for s in stages],
     }
     report = finish_report(
         AGENT,
@@ -134,15 +191,32 @@ def publish_node(deps: ObserverDeps, state: ObserverState) -> dict[str, Any]:
     failed = publish(report, deps.sinks)
     if failed:
         report.detail["failed_sinks"] = failed
-    return {"report": report}
+    # Publish is a stage too; it can only record itself once the sinks have
+    # answered, so it lands in the ledger's detail and the hook, not the table.
+    posted = StageRecord(
+        "publish",
+        "error" if failed else "ok",
+        started,
+        round(time.perf_counter() - t0, 3),
+        {"sinks": [s.name for s in deps.sinks], "failed": failed},
+    )
+    report.detail["stages"].append(posted.to_dict())
+    if deps.on_stage is not None:
+        deps.on_stage(posted)
+    return {"report": report, "stages": [posted]}
 
 
 def build_observer_graph(deps: ObserverDeps) -> ObserverGraph:
     graph: StateGraph[ObserverState, None, ObserverState, ObserverState] = StateGraph(ObserverState)
-    graph.add_node("collect_ledger", partial(collect_ledger, deps))
-    graph.add_node("collect_quality", partial(collect_quality, deps))
-    graph.add_node("collect_metrics", partial(collect_metrics, deps))
-    graph.add_node("assess", assess)
+    hook = deps.on_stage
+    # Bound explicitly so the wrapper is typed over ObserverState, not `partial[...]`.
+    ledger_node: Callable[[ObserverState], dict[str, Any]] = partial(collect_ledger, deps)
+    quality_node: Callable[[ObserverState], dict[str, Any]] = partial(collect_quality, deps)
+    metrics_node: Callable[[ObserverState], dict[str, Any]] = partial(collect_metrics, deps)
+    graph.add_node("collect_ledger", staged("collect_ledger", ledger_node, ledger_detail, hook))
+    graph.add_node("collect_quality", staged("collect_quality", quality_node, quality_detail, hook))
+    graph.add_node("collect_metrics", staged("collect_metrics", metrics_node, metrics_detail, hook))
+    graph.add_node("assess", staged("assess", assess, assess_detail, hook))
     graph.add_node("publish", partial(publish_node, deps))
 
     graph.add_edge(START, "collect_ledger")
@@ -163,8 +237,13 @@ def run_observer(
     now: datetime | None = None,
     narrator: Narrator | None = None,
     sinks: list[Sink] | None = None,
+    on_stage: StageHook | None = None,
 ) -> AgentReport:
-    """One observer run, posted to the sinks. Never raises for a failing graph."""
+    """One observer run, posted to the sinks. Never raises for a failing graph.
+
+    ``on_stage`` is called with each node's :class:`StageRecord` as it
+    finishes — what ``observe --progress`` prints and the UI streams.
+    """
     db = db or get_db()
     registry = registry or get_token_registry()
     narrator = narrator or TemplateNarrator()
@@ -175,6 +254,7 @@ def run_observer(
         sinks=sinks if sinks is not None else build_sinks(settings, db=db),
         run_id=new_run_id(),
         started_at=started,
+        on_stage=on_stage,
     )
     initial: ObserverState = {
         "now": now or started,
@@ -182,6 +262,7 @@ def run_observer(
         "expected_symbols": tuple(registry.symbols),
         "findings": [],
         "errors": [],
+        "stages": [],
     }
     try:
         final = build_observer_graph(deps).invoke(initial)

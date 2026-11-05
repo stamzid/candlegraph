@@ -153,6 +153,7 @@ class KnowledgeStatements:
     # explanations (step 8)
     upsert_explanation: sql.Composed
     get_explanation: sql.Composed
+    get_latest_explanation: sql.Composed
     get_recent_explanations: sql.Composed
 
 
@@ -459,6 +460,17 @@ def knowledge_statements_for(schema: str) -> KnowledgeStatements:
         """
     ).format(ns=ns)
 
+    # The newest explained bar for a strategy and symbol — what the UI shows
+    # before anyone presses "explain", and the API's default when no bar is named.
+    get_latest_explanation = sql.SQL(
+        """
+        SELECT * FROM {ns}.explanation
+        WHERE strategy = %(strategy)s AND symbol = %(symbol)s
+        ORDER BY period_start_unix DESC
+        LIMIT 1
+        """
+    ).format(ns=ns)
+
     get_recent_explanations = sql.SQL(
         """
         SELECT strategy, symbol, period_start_unix, position, jsonb_array_length(citations) AS citations,
@@ -500,5 +512,6 @@ def knowledge_statements_for(schema: str) -> KnowledgeStatements:
         lexical_search=lexical_search,
         upsert_explanation=upsert_explanation,
         get_explanation=get_explanation,
+        get_latest_explanation=get_latest_explanation,
         get_recent_explanations=get_recent_explanations,
     )

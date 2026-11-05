@@ -280,6 +280,7 @@ def explain_cli(tokens_file: Path, monkeypatch: pytest.MonkeyPatch) -> FakeDatab
         get_price_history=price_rows("WBTC", 400) + price_rows("SHIB", 400, seed=12),
         hybrid_search=_explain_rows(),
         lexical_search=_explain_rows(),
+        count_embedding_backlog=[{"missing": 0, "stale": 0, "total": 0}],
     )
     set_db(db)
     return db

@@ -2,9 +2,12 @@
 # so several checkouts or git worktrees can run side by side. Override with
 # COMPOSE_PROJECT_NAME, and the published ports below, if you need two at once.
 #
-# Five services: the database, the API, the ingest worker, the UI, and the
-# agents — plus `ollama`, the embedding model server, behind the `knowledge`
-# profile so the default stack stays small. The API and the worker are separate processes so a long backfill
+# Six services: the database, the API, the ingest worker, the UI, the
+# agents, and `ollama`, the embedding model server. Ollama used to sit behind
+# a `knowledge` profile so the default stack stayed small; that left every
+# stack started with `make up` without an embedder, and `signals --explain`
+# silently fell back to lexical retrieval. See
+# docs/incidents/2026-11-04-explain-ran-lexical-only/. The API and the worker are separate processes so a long backfill
 # cannot compete with query traffic, and so either can be restarted or scaled
 # without the other. The agents only read and post reports.
 
@@ -174,11 +177,14 @@ services:
 
   ollama:
     # The local embedding model server (docs/knowledge/embeddings/DESIGN.md).
-    # Behind a profile: `make up` does not pull a gigabyte of weights for a
-    # stack that is only ingesting; `make up-knowledge` does. Pinned exactly,
-    # like every other image here. The app containers reach it as
-    # http://ollama:11434 (OLLAMA_URL); the host port is for local runs.
-    profiles: ["knowledge"]
+    # Part of the default stack: the first `make up` pulls ~1.2 GB of weights
+    # once into the `ollama` volume, and every later start is instant. No
+    # app container depends on it — the API and the worker start without it
+    # and retrieval degrades to the lexical leg, saying so — but `--wait`
+    # holds `make up` until the model is present so the first explanation
+    # is a real one. Pinned exactly, like every other image here. The app
+    # containers reach it as http://ollama:11434 (OLLAMA_URL); the host port
+    # is for local runs.
     image: ollama/ollama:0.40.13
     entrypoint: ["/bin/sh", "-c"]
     # Serve, wait until the API answers, pull the configured model once

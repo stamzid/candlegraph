@@ -176,6 +176,17 @@ A sink that fails is logged and skipped; it never fails the run (the same rule
 as the ingest ledger, invariant 12). Posting is the last node of every graph
 so a crash mid-graph still leaves a ledger row with status `error`.
 
+**Stage records.** `agents/stages.py` wraps a node (`staged(name, node,
+summarise, on_stage)`) so it appends a `StageRecord` — status, duration, a
+small dict of what it did — to a `stages` list in the state (reduced with
+`operator.add`, like `findings`). The publish node completes the list with
+`skipped` rows for nodes a short-circuit bypassed, renders a `## Stages`
+section, stores the records in `agent_run.detail`, and the optional
+`on_stage` hook lets a CLI print them live. They are facts about the run,
+never findings: status and exit code still come from the findings alone.
+The observer uses them (`docs/agents/observer/DESIGN.md`, "Stages"); a new
+graph should too.
+
 ### Narration
 
 The `Narrator` protocol turns a list of findings into a paragraph. The default

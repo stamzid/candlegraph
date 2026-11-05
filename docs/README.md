@@ -44,6 +44,7 @@ same step or it follows it.
 | [`agents/janitor/`](agents/janitor/DESIGN.md) | implemented | The CI janitor: run the checks, apply mechanical fixes, draft a PR. |
 | [`incidents/2026-10-28-stack-would-not-start/`](incidents/2026-10-28-stack-would-not-start/POSTMORTEM.md) | closed | Post-mortem: the stack would not start after the TimescaleDB move. Two faults in one volume, why neither named itself, and what changed. |
 | [`incidents/2026-10-29-compose-startup-robustness/`](incidents/2026-10-29-compose-startup-robustness/POSTMORTEM.md) | closed | Post-mortem: the API container sometimes would not start until Docker was cleaned. Five causes in the compose file; bounded restarts, one image per project, one migrator, TCP probe, one build. |
+| [`incidents/2026-11-04-explain-ran-lexical-only/`](incidents/2026-11-04-explain-ran-lexical-only/POSTMORTEM.md) | closed | Post-mortem: every default stack ran `signals --explain` on the lexical leg alone. Ollama was behind a compose profile and the pipeline never embedded what it fetched; Ollama joins the default stack, `explain` embeds first. |
 | [`incidents/2026-10-29-health-probe-cadence/`](incidents/2026-10-29-health-probe-cadence/POSTMORTEM.md) | closed | Post-mortem: the API log was nothing but health probes. By design, wasteful; start-up versus steady-state cadence, one round trip, quiet when healthy. |
 
 Read the document for an area before changing the code it describes, and

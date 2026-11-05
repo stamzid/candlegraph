@@ -33,7 +33,7 @@ a target, and never let CI run something that is not one either.
 | Data-quality report | `make report` |
 | Recent ingest runs | `make runs` |
 | Sync assets and aliases from `tokens.yaml` | `make sync-assets` (in the stack) or `candlegraph knowledge sync-assets` |
-| Stack plus the embedding model server | `make up-knowledge` (first start pulls `bge-m3`), `make logs-ollama` |
+| The embedding model server's log (Ollama is part of `make up`; the first start pulls `bge-m3`) | `make logs-ollama` |
 | Embed chunks / re-encode after a model change | `make embed` / `make reembed` (or `candlegraph knowledge embed\|reembed`) |
 | Fetch news (one budgeted search per token per UTC day) | `make fetch-news` (or `candlegraph knowledge fetch-news [--symbol S]`) |
 | Hybrid retrieval as of a bar | `make search ARGS='"WBTC unlock" --symbol WBTC'` (or `candlegraph knowledge search`) |
@@ -96,6 +96,7 @@ candlegraph/
     app.py             FastAPI app factory and health check.
     schema.py          Strawberry GraphQL types and resolvers.
     formatting.py      Database rows -> chart payload. Pure.
+    explanations.py    Signal explanations over GraphQL: two free reads, one mutation that spends only with search=true.
   ui/
     viewmodels.py      Everything the UI computes. Plain Python, fully tested.
     app.py             The Streamlit script: widgets and charts only.
@@ -117,6 +118,7 @@ candlegraph/
     base.py            Severity, Finding, AgentReport: the vocabulary every graph speaks.
     shell.py           Subprocess runner behind a Protocol, plus secret redaction.
     narrator.py        Findings -> summary paragraph. Template by default; Claude when configured.
+    stages.py          StageRecord per node: duration and what it read; the Stages report section, `--progress`, the UI strip.
     reporting.py       Markdown rendering and the sinks: log, ledger, file, webhook, github.
     ledger.py          The agent_run table.
     scheduler.py       APScheduler wiring and the `candlegraph agents` process.
@@ -165,7 +167,7 @@ in compose, in CI, and in the testcontainer), not plain PostgreSQL. The `-ha`
 image also ships pgvector (installed by the knowledge migration, which the
 stage-1 tables use for `chunk.embedding halfvec(1024)`) and pgvectorscale
 (available, not installed). Vectors come from the `ollama` compose service
-(`bge-m3`, profile `knowledge`); the column width is fixed at 1024 and a
+(`bge-m3`, in the default stack); the column width is fixed at 1024 and a
 model change is `make reembed`, never a migration. The three
 series tables are chunked monthly on `period_start_unix`; the state and
 ledger tables are deliberately ordinary tables. See invariant 24 and
@@ -306,6 +308,13 @@ unfalsifiable.
 | Deterministic analytics | Rolling statistics, mean-variance portfolios, Bollinger/crossover/ARIMA signals, the `signal` table, a costed and lagged backtester, the Streamlit UI. | `candlegraph signals WETH --store && candlegraph backtest WETH --strategy all` |
 | Agent layer | The run observer and the CI janitor as LangGraph graphs, the `agent_run` ledger, report sinks, the `agents` service and the janitor workflow. | `make observe && make agent-runs` |
 | Time-series storage | The three series tables as TimescaleDB hypertables; state and ledger tables deliberately plain. | `make test-integration` (`test_timescale.py`) |
+
+### In progress
+
+| Stage | Landed so far | Still to land | Exit criterion |
+|---|---|---|---|
+| **0. Descriptive statistics, deeper** | `candlegraph compare WETH WBTC` over aligned bars. | The `active` flag in `config/tokens.yaml`; the `FillPolicy` gap-filling seam with its no-look-ahead test. Paused while stage 1 finishes; resumes after it. | `compare` prints correlation, beta and relative performance (met); the stack ingests exactly the five active tokens; `FillPolicy` exists with a no-look-ahead test |
+| **1. Knowledge graph and signaller** | Rollout steps 1–8 (`docs/rollout/ROLLOUT.md`): `timescaledb-ha` with pgvector, the eight knowledge tables, assets and aliases, documents, embeddings (Ollama in the default stack), Tavily under a budget with the `source_call` ledger, hybrid retrieval with the no-look-ahead bound, and `signals --explain` with the citation validator — on the CLI, over GraphQL (`explainSignal`, `signalExplanation`) and on the Strategy dashboard. | Step 9, the observer's `collect_knowledge` node and four findings; step 10, the MCP server and the stage closeout. | `candlegraph signals WETH --strategy bollinger --explain` prints a rationale citing a retrieved document with a URL and a timestamp, stored with the signal, with no LLM key configured (**met**; the stage closes when 9 and 10 land) |
 
 ### Next
 

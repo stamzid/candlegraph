@@ -132,13 +132,20 @@ def test_a_failed_migration_still_stops_the_container(tmp_path: Path) -> None:
     assert "handed-off" not in result.stdout
 
 
-def test_the_embedding_service_is_optional_pinned_and_healthy_only_once_the_model_is_pulled() -> None:
-    """`make up` must not download a gigabyte of weights for a stack that only
-    ingests; `make up-knowledge` opts in. Health means an embed call can succeed."""
-    ollama = compose()["services"]["ollama"]
+def test_the_embedding_service_is_in_the_default_stack_pinned_and_healthy_only_once_the_model_is_pulled() -> (
+    None
+):
+    """Pins docs/incidents/2026-11-04-explain-ran-lexical-only/: behind a compose
+    profile, Ollama was never started by `make up`, every embed call failed and
+    `signals --explain` quietly ran lexical-only. Health means an embed call can
+    succeed, and no app container may depend on it (the API starts without it)."""
+    services = compose()["services"]
+    ollama = services["ollama"]
 
-    assert ollama["profiles"] == ["knowledge"]
+    assert "profiles" not in ollama, "a profile hides the embedder from `make up`"
     assert ollama["image"].startswith("ollama/ollama:") and "latest" not in ollama["image"]
+    for name, svc in app_services(services).items():
+        assert "ollama" not in svc.get("depends_on", {}), f"{name} must start without the embedder"
     assert "ollama show" in " ".join(ollama["healthcheck"]["test"])
     assert "ollama pull" in " ".join(ollama["command"])
     assert "ollama:/root/.ollama" in ollama["volumes"], "model weights must survive a recreate"

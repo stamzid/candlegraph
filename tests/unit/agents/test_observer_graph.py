@@ -108,6 +108,49 @@ def test_a_healthy_stack_produces_an_ok_report_and_records_it(registry: TokenReg
     assert report.detail["symbols_judged"] == 2
 
 
+def test_every_stage_is_recorded_in_order_and_reaches_the_report_and_the_ledger(
+    registry: TokenRegistry,
+) -> None:
+    """The run is no longer a black box: each node's duration and what it read is a fact of the report."""
+    db = healthy_db()
+    seen: list[str] = []
+
+    report = run_observer(
+        make_settings(),
+        db=db,
+        registry=registry,
+        now=NOW,
+        sinks=[LedgerSink(db)],
+        on_stage=lambda r: seen.append(r.name),
+    )
+
+    assert seen == ["collect_ledger", "collect_quality", "collect_metrics", "assess", "publish"]
+    stages = report.detail["stages"]
+    assert [s["name"] for s in stages] == seen
+    assert all(s["status"] == "ok" for s in stages)
+    assert stages[0]["detail"]["runs"] == 39 and stages[0]["detail"]["database_up"] is True
+    assert stages[1]["detail"]["tokens"] == 2
+    assert stages[2]["detail"]["symbols"] == 2
+    assert stages[3]["detail"]["findings"] == len(report.findings)
+    assert stages[4]["detail"]["sinks"] == ["ledger"]
+    assert "## Stages" in report.markdown and "| collect_metrics | ok |" in report.markdown
+    # And the ledger row carries them, which is what the UI's stage strip reads.
+    (_, params) = db.executed[0]
+    assert params is not None and '"stages"' in params["detail"]
+
+
+def test_a_down_database_marks_the_stages_it_skipped(registry: TokenRegistry) -> None:
+    report = run_observer(make_settings(), db=DownDatabase(), registry=registry, now=NOW, sinks=[])
+
+    by_name = {s["name"]: s for s in report.detail["stages"]}
+    assert by_name["collect_ledger"]["status"] == "error"
+    for name in ("collect_quality", "collect_metrics", "assess"):
+        assert by_name[name]["status"] == "skipped", name
+        assert by_name[name]["detail"] == {"reason": "database unreachable"}
+    assert by_name["publish"]["status"] == "ok"
+    assert "| collect_quality | skipped | - | reason=database unreachable |" in report.markdown
+
+
 def test_volume_drift_in_the_recent_window_is_found(registry: TokenRegistry) -> None:
     db = healthy_db(
         get_price_history=price_rows("WBTC", 192, NOW) + price_rows("SHIB", 192, NOW, recent_volume=6e6)

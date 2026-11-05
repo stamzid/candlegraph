@@ -133,7 +133,7 @@ see [`.env.example`](.env.example) for the full list.
 | `RISK_CONFIDENCE` / `RISK_HORIZON_BARS` / `RISK_VAR_METHOD` | 0.95 / 24 / `historical` | Value-at-Risk confidence, horizon in bars, and estimator (`historical`, `parametric`, `cornish_fisher`). |
 | `RISK_BENCHMARK` | `WETH` | Market proxy for the systematic/idiosyncratic split; empty disables it. |
 | `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` | `ollama` / `bge-m3` | Local embeddings by default; `openai` (`text-embedding-3-large`, needs `OPENAI_API_KEY`) or `fake` for development. One active model; changing it is `make reembed`. |
-| `OLLAMA_URL` | `http://ollama:11434` | The `ollama` compose service, started by `make up-knowledge`. |
+| `OLLAMA_URL` | `http://ollama:11434` | The `ollama` compose service, part of `make up` (the first start pulls the model once). |
 | `TAVILY_API_KEY` | unset | **Required for `fetch-news`.** Free tier ~1,000 credits/month; without it the news pipeline refuses and everything else still works. |
 | `TAVILY_MONTHLY_CREDITS` / `TAVILY_DAILY_CREDITS` / `TAVILY_RESERVE_CREDITS` | 1000 / 40 / 50 | The budget guard's caps: the plan, a daily smoothing cap, and a reserve kept for manual searches. |
 | `RETRIEVAL_BACKEND` / `RETRIEVAL_TOP_K` / `RETRIEVAL_CANDIDATES` | `postgres` / 8 / 40 | The hybrid pgvector + `tsvector` retrieval; `ragflow` is refused with a pointer to its evaluation. |
@@ -171,6 +171,26 @@ query {
   getChartData(tokenSymbol: "WBTC", timeUnitInHours: 24) {
     tokenMetadata { id name symbol totalSupply volumeUsd decimals }
     candles { time priceType value }
+  }
+}
+```
+
+Signal explanations follow one rule: **reads are free, the mutation spends only when asked.**
+`signalExplanation` and `signalExplanations` read the `explanation` table (no network, no model);
+`explainSignal` runs the strategy, explains a bar and stores it, and calls the news source only
+with `search: true` (at most one Tavily credit per token per UTC day, whoever asks).
+
+```graphql
+query {
+  signalExplanation(tokenSymbol: "WETH", strategy: "bollinger") {
+    bar positionLabel score rationale newsStatus
+    citations { n url publishedAt legs }
+  }
+}
+
+mutation {
+  explainSignal(tokenSymbol: "WETH", strategy: "bollinger", search: false) {
+    rationale rejectedCitations citations { url publishedAt }
   }
 }
 ```
@@ -354,6 +374,11 @@ dashboard opens with a metric strip, and every chart carries a title that says w
 - **Strategy** — equity vs buy-and-hold net of costs, exposure timeline, strategy drawdown, and a
   trade ledger of every position change.
 - **Forecast** — the ARIMA path with its confidence interval drawn at the horizon.
+- **Strategy → Explain** — the `signals --explain` surface: what is stored for the selected token
+  and strategy shows for free; **Explain latest signal** runs the pipeline, and a checkbox decides
+  whether the news source may be called (at most one Tavily credit per token per UTC day, disabled
+  without a key). The rationale may cite only documents published before the bar; anything the
+  narrator invented is stripped and flagged on screen.
 - **Agents** — the watchtower: a **Run observer now** button (one on-demand run, written to the
   agent ledger), the latest findings coloured by severity, ingest cadence, per-token coverage,
   the full run history, and a news-health strip (did the recent Tavily runs succeed, fail, or get
@@ -389,7 +414,11 @@ functions over a typed state; the design, with flowcharts, is in
 [`docs/agents/`](docs/agents/).
 
 **The run observer** (`candlegraph observe`) answers three questions in writing: is the data
-fresh, is it complete, and does it still look like the same market?
+fresh, is it complete, and does it still look like the same market? `--progress` (what
+`make observe` passes) prints each stage — `collect_ledger`, `collect_quality`, `collect_metrics`,
+`assess`, `publish` — to stderr as it finishes, with its duration and what it read; the same
+records land in a **Stages** section of the report, in the ledger row, and on the Agents
+dashboard, and a stage the database-down short-circuit skipped is listed as skipped.
 
 ```
 # observer — 2026-10-25 12:15 UTC — WARNING
@@ -469,7 +498,7 @@ Next, in order:
    (pgvector installed, eight knowledge tables), the asset sync
    (`candlegraph knowledge sync-assets`), the document pipeline (URL
    normalisation, `url_hash`, chunking), embeddings (`bge-m3` served by an
-   optional `ollama` compose service, `make up-knowledge && make embed`)
+   `ollama` compose service in the default stack, `make embed`)
    the Tavily news source (`make fetch-news`: one budgeted search per
    token per UTC day, every call ledgered) and hybrid retrieval
    (`make search`: pgvector + `tsvector` legs fused by reciprocal rank,

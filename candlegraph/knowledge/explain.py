@@ -33,14 +33,15 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 import pandas as pd
 
 from candlegraph.analytics.pairwise import align_pair, compare_pair
-from candlegraph.knowledge.embed import Embedder, EmbeddingError, build_embedder
+from candlegraph.analytics.prices import load_price_frame
+from candlegraph.knowledge.embed import Embedder, EmbeddingError, build_embedder, embed_pending
 from candlegraph.knowledge.news import NewsError, build_tavily_source, fetch_news
 from candlegraph.knowledge.retrieve import RetrievalConfig, RetrievedChunk, check_backend, retrieve
 from candlegraph.knowledge.sources.base import Source
@@ -48,12 +49,16 @@ from candlegraph.knowledge.statements import knowledge_statements_for
 from candlegraph.knowledge.validate import Validation, validate_rationale
 from candlegraph.settings import Settings
 from candlegraph.storage import DatabaseManager
-from candlegraph.strategies.base import StrategyResult
-from candlegraph.tokens import Token
+from candlegraph.strategies.base import StrategyResult, run_strategy
+from candlegraph.tokens import Token, TokenRegistry, get_token_registry
 from candlegraph.utils.logging_utils import service_logger
 
 POSITION_WORDS = {-1: "short", 0: "flat", 1: "long"}
 QUOTE_CHARS = 280
+# How many pending chunks one explanation will embed before retrieving, so
+# the news it just fetched is visible to the dense leg. Bounded: a long
+# backlog is `make embed`'s job, not a side effect of one command.
+EXPLAIN_EMBED_LIMIT = 256
 # Hours back from the bar the context reports a move over.
 MOVE_HORIZONS_HOURS: tuple[int, ...] = (1, 3, 24)
 
@@ -133,10 +138,61 @@ class Explanation:
     retrieval_note: str = ""
     rejected_citations: tuple[int, ...] = ()
     stripped_sentences: tuple[str, ...] = ()
+    chunks_embedded: int = 0
+    """Chunks embedded before retrieval so fresh news joined the dense leg."""
 
     @property
     def period_start_unix(self) -> int:
         return int(self.bar.timestamp())
+
+    @property
+    def position_label(self) -> str:
+        return POSITION_WORDS[self.position]
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> Explanation:
+        """Rebuild a stored explanation from its ``explanation`` row.
+
+        The row has no news or retrieval status — those described the run
+        that wrote it — so a re-read says ``stored`` and nothing more.
+        """
+        citations_raw = row.get("citations") or []
+        if isinstance(citations_raw, str):
+            citations_raw = json.loads(citations_raw)
+        context_raw = row.get("numeric_context") or {}
+        if isinstance(context_raw, str):
+            context_raw = json.loads(context_raw)
+        citations = tuple(
+            Citation(
+                n=int(c["n"]),
+                chunk_id=int(c["chunk_id"]),
+                document_id=int(c["document_id"]),
+                url=str(c["url"]),
+                title=c.get("title"),
+                published_at=datetime.fromisoformat(c["published_at"]) if c.get("published_at") else None,
+                retrieved_at=datetime.fromisoformat(c["retrieved_at"]),
+                quote=str(c.get("quote", "")),
+                legs=str(c.get("legs", "")),
+                score=float(c.get("score", 0.0)),
+            )
+            for c in citations_raw
+        )
+        bar = datetime.fromtimestamp(int(row["period_start_unix"]), tz=UTC)
+        return cls(
+            strategy=str(row["strategy"]),
+            symbol=str(row["symbol"]),
+            bar=bar,
+            position=int(row["position"]),
+            score=_finite(context_raw.get("score")),
+            numeric_context=dict(context_raw),
+            citations=citations,
+            rationale=str(row.get("rationale") or ""),
+            model=row.get("model"),
+            generated_at=row["generated_at"],
+            news_status="stored",
+            news_message="read from the explanation table",
+            dense_used=any(c.legs in ("dense", "both") for c in citations),
+        )
 
     @property
     def cited(self) -> bool:
@@ -343,9 +399,9 @@ class TemplateExplanationNarrator:
 
         if citations:
             markers = "".join(f"[{c.n}]" for c in citations)
-            noun = "document" if len(citations) == 1 else "documents"
+            noun, verb = ("document", "was") if len(citations) == 1 else ("documents", "were")
             sentences.append(
-                f"{len(citations)} {noun} published before the bar were retrieved for context {markers}."
+                f"{len(citations)} {noun} published before the bar {verb} retrieved for context {markers}."
             )
         else:
             sentences.append(
@@ -485,6 +541,25 @@ def explain(
         elif outcome.status == "budget_refused":
             news_message = f"budget refused ({outcome.message}); serving stored documents"
 
+    # What the search just stored has no vector yet; without this the dense
+    # leg could never cite today's news and the explanation would quietly
+    # rest on the lexical leg (docs/incidents/2026-11-04-explain-ran-lexical-only/).
+    chunks_embedded = 0
+    embed_note = ""
+    if embedder is not None:
+        try:
+            chunks_embedded = embed_pending(
+                db,
+                embedder,
+                batch_size=settings.embedding_batch_size,
+                limit=EXPLAIN_EMBED_LIMIT,
+                dimensions=settings.embedding_dimensions,
+            ).embedded
+        except EmbeddingError as exc:
+            embed_note = f"embedding unavailable ({exc}); lexical only"
+            service_logger.warning("explain: %s", embed_note)
+            embedder = None
+
     top_k = settings.retrieval_top_k
     result = retrieve(
         db,
@@ -547,10 +622,109 @@ def explain(
         retrieval_note=result.note,
         rejected_citations=validation.rejected,
         stripped_sentences=validation.stripped,
+        chunks_embedded=chunks_embedded,
     )
+    if embed_note:
+        # The embed failure is the specific reason; "no embedder" would hide it.
+        explanation = replace(explanation, retrieval_note=embed_note)
     statements = knowledge_statements_for(db.schema)
     db.execute(statements.upsert_explanation, explanation.to_row())
     return explanation
+
+
+# --- reading what is stored --------------------------------------------------------------
+
+
+def load_explanation(
+    db: DatabaseManager, strategy: str, symbol: str, bar: datetime | None = None
+) -> Explanation | None:
+    """The stored explanation of one bar, or the latest stored for the pair.
+
+    Read-only and free: this is what the API query and the UI show before
+    anyone presses the button that runs the pipeline.
+    """
+    statements = knowledge_statements_for(db.schema)
+    if bar is None:
+        rows = db.fetch_all(statements.get_latest_explanation, {"strategy": strategy, "symbol": symbol})
+    else:
+        rows = db.fetch_all(
+            statements.get_explanation,
+            {
+                "strategy": strategy,
+                "symbol": symbol,
+                "period_start_unix": int(bar.astimezone(UTC).timestamp()),
+            },
+        )
+    return Explanation.from_row(rows[0]) if rows else None
+
+
+def recent_explanations(
+    db: DatabaseManager, symbol: str | None = None, limit: int = 20
+) -> list[dict[str, Any]]:
+    """Summary rows of the newest explanations, optionally for one symbol."""
+    statements = knowledge_statements_for(db.schema)
+    return db.fetch_all(statements.get_recent_explanations, {"symbol": symbol, "limit": limit})
+
+
+# --- the shared entry point for the API and the UI --------------------------------------------
+
+
+def explain_symbol(
+    db: DatabaseManager,
+    settings: Settings,
+    symbol: str,
+    strategy: str = "bollinger",
+    *,
+    at: datetime | None = None,
+    days: int | None = None,
+    search: bool = False,
+    reference_symbol: str | None = None,
+    strategy_config: Any | None = None,
+    registry: TokenRegistry | None = None,
+    now: datetime | None = None,
+) -> Explanation:
+    """Run ``strategy`` over stored prices and explain one of its bars.
+
+    What the GraphQL mutation and the UI button call; the CLI reaches the
+    same :func:`explain` with its own flag-built strategy config.
+
+    Args:
+        search: Whether the metered news source may be called. **False by
+            default**: a credit is spent only when a caller says so, and a
+            caller that did not gets the stored corpus and a status that
+            says ``skipped``.
+        reference_symbol: Defaults to ``KNOWLEDGE_REFERENCE_SYMBOL``.
+
+    Raises:
+        ExplainError: an untracked symbol, no stored prices, or no bar at ``at``.
+    """
+    registry = registry or get_token_registry()
+    token = registry.by_symbol(symbol)
+    if token is None:
+        raise ExplainError(f"unknown token {symbol!r}; tracked: {', '.join(registry.symbols)}")
+    reference_symbol = reference_symbol or settings.knowledge_reference_symbol
+    reference_token = registry.by_symbol(reference_symbol)
+    wanted = [token.symbol]
+    if reference_token is not None and reference_token.symbol != token.symbol:
+        wanted.append(reference_token.symbol)
+
+    window = days if days is not None else settings.analytics_lookback_days
+    frame = load_price_frame(db, wanted, days=window, now=now)
+    if frame.empty or token.symbol not in frame.columns:
+        raise ExplainError(f"no stored price history for {token.symbol} in the last {window} days")
+    prices = frame[token.symbol].dropna()
+    prices.name = token.symbol
+    reference = None
+    if len(wanted) > 1 and wanted[1] in frame.columns:
+        reference = frame[wanted[1]].dropna()
+        reference.name = wanted[1]
+
+    result = run_strategy(strategy, prices, strategy_config)
+    request = request_for(result, token, at=at, reference=reference)
+    source, embedder, _notes = services_for(settings)
+    if not search:
+        source = None
+    return explain(db, settings, request, source=source, embedder=embedder, now=now)
 
 
 def bar_of(result: StrategyResult, at: datetime | None = None) -> datetime:
@@ -644,7 +818,10 @@ def format_explanation(explanation: Explanation) -> str:
     if not explanation.citations:
         lines.append("  no documents published before the bar were retrieved")
     legs = "hybrid" if explanation.dense_used else "lexical only"
-    lines.append(f"  news: {explanation.news_status} — {explanation.news_message}; retrieval: {legs}")
+    embedded = f"; embedded {explanation.chunks_embedded} new chunks" if explanation.chunks_embedded else ""
+    lines.append(
+        f"  news: {explanation.news_status} — {explanation.news_message}{embedded}; retrieval: {legs}"
+    )
     if explanation.retrieval_note:
         lines[-1] += f" ({explanation.retrieval_note})"
     if explanation.rejected_citations:

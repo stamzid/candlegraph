@@ -706,6 +706,40 @@ def test_run_news_fetch_now_turns_a_missing_key_into_a_readable_error(tokens_fil
         run_news_fetch_now(settings, FakeDatabase())
 
 
+def test_the_agents_view_reads_the_latest_runs_stages_in_order() -> None:
+    row = agent_run_row()
+    row["detail"] = {
+        "stages": [
+            {
+                "name": "collect_ledger",
+                "status": "ok",
+                "started_at": None,
+                "duration_seconds": 0.05,
+                "detail": {"runs": 39},
+            },
+            {
+                "name": "assess",
+                "status": "skipped",
+                "started_at": None,
+                "duration_seconds": None,
+                "detail": {"reason": "x"},
+            },
+        ]
+    }
+    view = build_agents_view(FakeDatabase(get_recent_agent_runs=[row]))
+
+    assert list(view.stages["stage"]) == ["collect_ledger", "assess"]
+    assert list(view.stages["status"]) == ["ok", "skipped"]
+    assert view.stages["seconds"].iloc[0] == 0.05 and pd.isna(view.stages["seconds"].iloc[1])
+    assert view.stages["detail"].iloc[0] == "runs=39"
+
+
+def test_a_run_recorded_before_stages_existed_gives_an_empty_frame_not_an_error() -> None:
+    view = build_agents_view(FakeDatabase(get_recent_agent_runs=[agent_run_row()]))
+
+    assert view.stages.empty and list(view.stages.columns) == ["stage", "status", "seconds", "detail"]
+
+
 def test_the_agents_view_summarises_the_news_runs() -> None:
     db = FakeDatabase(
         get_recent_source_calls=[source_call_row("rate_limited"), source_call_row("ok")],
@@ -722,3 +756,116 @@ def test_the_agents_view_without_news_calls_says_none() -> None:
 
     assert view.news_status == "none"
     assert view.news_counts == {}
+
+
+# --- explanations on the strategy dashboard ----------------------------------------
+
+
+def _explanation_row() -> dict[str, Any]:
+    return {
+        "strategy": "bollinger",
+        "symbol": "WETH",
+        "period_start_unix": 1_792_850_400,
+        "position": -1,
+        "numeric_context": {
+            "score": 2.31,
+            "move_24h": 0.08,
+            "reference": {"symbol": "WBTC", "move_24h": 0.004},
+        },
+        "citations": [
+            {
+                "n": 1,
+                "chunk_id": 5,
+                "document_id": 9,
+                "url": "https://news.example/unlock",
+                "title": "Unlock",
+                "published_at": "2026-10-24T09:12:00+00:00",
+                "retrieved_at": "2026-10-24T14:03:00+00:00",
+                "quote": "WETH moved on an unlock.",
+                "legs": "both",
+                "score": 0.03,
+            }
+        ],
+        "rationale": "WETH rose on an unlock [1].",
+        "model": None,
+        "generated_at": datetime(2026, 11, 4, 9, 30, tzinfo=UTC),
+    }
+
+
+def test_the_stored_explanation_view_shapes_the_headline_citations_and_status() -> None:
+    from candlegraph.ui.viewmodels import load_stored_explanation
+
+    view = load_stored_explanation(
+        FakeDatabase(get_latest_explanation=[_explanation_row()]), "bollinger", "WETH"
+    )
+
+    assert view is not None
+    head = view.headline
+    assert head["position"] == "short" and head["score"] == 2.31 and head["move_24h"] == 0.08
+    assert head["reference_symbol"] == "WBTC" and head["citations"] == 1
+    frame = view.citations_frame
+    assert list(frame.columns) == ["n", "published", "title", "url", "legs", "quote"]
+    assert frame.iloc[0]["published"] == "2026-10-24 09:12 UTC" and frame.iloc[0]["url"].startswith(
+        "https://"
+    )
+    assert view.status_line.startswith("news: stored")
+    assert view.validator_note is None
+
+
+def test_no_stored_explanation_is_none_and_an_empty_citation_frame_keeps_its_columns() -> None:
+    from candlegraph.knowledge.explain import Explanation
+    from candlegraph.ui.viewmodels import ExplanationView, load_stored_explanation
+
+    assert load_stored_explanation(FakeDatabase(), "bollinger", "WETH") is None
+    bare = Explanation.from_row({**_explanation_row(), "citations": [], "numeric_context": {}})
+    view = ExplanationView(bare)
+    assert view.citations_frame.empty and list(view.citations_frame.columns) == [
+        "n",
+        "published",
+        "title",
+        "url",
+        "legs",
+        "quote",
+    ]
+    assert view.headline["reference_symbol"] is None
+
+
+def test_run_explain_now_explains_the_screen_strategy_and_spends_nothing_unless_asked(
+    db: FakeDatabase, tokens_file: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from candlegraph.ui.viewmodels import run_explain_now
+
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    db.reads["hybrid_search"] = []
+    db.reads["lexical_search"] = []
+    db.reads["count_embedding_backlog"] = [{"missing": 0, "stale": 0, "total": 0}]
+    strategy = build_strategy_view(db, "WBTC", "bollinger", 30, BollingerConfig(window=20), FREE).strategy
+    settings = make_settings(
+        tokens_file=str(tokens_file),
+        embedding_provider="fake",
+        tavily_api_key="tvly-x",
+        knowledge_reference_symbol="WBTC",
+    )
+
+    view = run_explain_now(settings, db, strategy, "WBTC", search=False)
+
+    assert view.explanation.news_status == "skipped"
+    assert view.explanation.numeric_context["reference"] is None, "a token is not its own market"
+    assert any(label == "upsert_explanation" for label, _ in db.executed)
+    assert all(label != "insert_source_call" for label, _ in db.executed)
+    assert "numbers alone" in view.explanation.rationale
+
+
+def test_run_explain_now_turns_a_bad_bar_into_a_view_error(
+    db: FakeDatabase, tokens_file: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from candlegraph.ui.viewmodels import run_explain_now
+
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    strategy = build_strategy_view(db, "WBTC", "bollinger", 30, None, FREE).strategy
+    settings = make_settings(tokens_file=str(tokens_file), embedding_provider="fake")
+
+    with pytest.raises(ViewError, match="no bollinger bar"):
+        run_explain_now(settings, db, strategy, "WBTC", search=False, at=datetime(2031, 1, 1, tzinfo=UTC))
+    with pytest.raises(ViewError, match="unknown token"):
+        run_explain_now(settings, db, strategy, "DOGE", search=False)

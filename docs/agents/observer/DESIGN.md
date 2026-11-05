@@ -34,7 +34,61 @@ pins this node and edge set.
 | `collect_quality` | `quality.build_report` over `OBSERVER_BASELINE_DAYS` | `quality` |
 | `collect_metrics` | `prices.load_price_history` for every tracked symbol over baseline + recent window | `metrics` (per-symbol recent vs baseline numbers) |
 | `assess` | state only — pure | `findings` |
-| `publish` | — | `report`, posted to the sinks |
+| `publish` | — | `report`, posted to the sinks; `stages` completed with any skipped node |
+
+Every node except `publish` is wrapped by `agents/stages.py::staged`, which
+appends a `StageRecord` to `stages` (see below); `publish` records itself
+after the sinks have answered.
+
+## Stages: what the run did, visibly
+
+Before 2026-11-04 a run was a black box until its Markdown arrived. When
+`collect_metrics` took a minute over ten tokens and a week of baseline,
+nothing said which node was running; the report did not record how long
+each read took or what it read; and the database-down short-circuit left
+no trace of the nodes it skipped. An operator could not tell a slow run
+from a hung one, or a quiet report from one that never looked.
+
+Each node now leaves a `StageRecord`: name, status (`ok`, `error` when the
+node recorded an error and the graph went on, `skipped`), start time,
+duration, and a small dict of what it did. The records are **facts about
+the run, not findings**: severity still comes from the findings alone
+(invariant 22), and a slow stage is information, never a warning.
+
+| Stage | Detail recorded |
+|---|---|
+| `collect_ledger` | `database_up`, `runs` read, `seconds_since_success` |
+| `collect_quality` | `tokens` judged, `missing_tokens`, `violations` |
+| `collect_metrics` | `symbols` with metrics, `bars` loaded, `runs_judged` |
+| `assess` | `findings` and the count per severity |
+| `publish` | `sinks` posted to, `failed` |
+
+They go three places, so the same record answers the question wherever it
+is asked:
+
+- **The report** gains a `## Stages` table, first after the findings, with
+  skipped stages named and their reason (`database unreachable`).
+- **The ledger row** carries them in `agent_run.detail.stages`, which is
+  what the Agents dashboard's stage strip reads (one metric per stage:
+  status, seconds, detail), so a run recorded before this feature shows an
+  empty strip rather than an error.
+- **Live**: `candlegraph observe --progress` (what `make observe` passes)
+  prints one line per stage to **stderr** as it finishes, so `--json` on
+  stdout stays machine-readable; the UI's **Run observer now** button
+  streams the same lines into its status box.
+
+```
+observer stages:
+ok   collect_ledger     0.04s  database_up=True, runs=2016, seconds_since_success=241
+ok   collect_quality    0.31s  tokens=9, missing_tokens=0, violations=0
+ok   collect_metrics    1.87s  symbols=9, bars=1612, runs_judged=2016
+ok   assess             0.00s  findings=7, critical=0, warning=3, info=0, ok=4
+ok   publish            0.02s  sinks=log,ledger, failed=-
+```
+
+The wrapper is generic (`agents/stages.py`) and the janitor can adopt it
+without changing its nodes; it has not yet, because its stages are already
+visible as the shell commands it runs.
 
 `assess` is a set of pure functions in `observer/assess.py`, each taking the
 collected facts and the thresholds and returning findings. They are the part
@@ -155,6 +209,10 @@ GNO: coverage 47.5% is below 80% (thin token; likely the market)
 | ok       | ledger   | ingest  | 2016 finished runs in the window: 2015 succeeded, 1 partial, 0 failed |
 | ok       | drift    | all     | no volume or volatility drift across 9 symbols (limits x4 / x3) |
 
+## Stages
+| stage | status | seconds | detail |
+| collect_ledger | ok | 0.04 | database_up=True, runs=2016, seconds_since_success=241 |
+| ...
 ## Coverage
 | symbol | rows | coverage | gaps | longest | mean hourly volume |
 | ...
@@ -193,7 +251,10 @@ stale `CRITICAL`; a seven-hour gap on WETH is `WARNING` while the same gap on
 GNO is not; volume x5 is drift and x2 is not; a thin window yields `INFO`,
 never drift; backfills are excluded from run metrics.
 `tests/unit/agents/test_observer_graph.py` runs the compiled graph against
-`FakeDatabase`, including the database-down short-circuit and a crashing
-graph posting an `error` report. `tests/integration/test_agents.py` seeds a
+`FakeDatabase`, including the database-down short-circuit (which must mark
+the three unrun stages `skipped`), a crashing graph posting an `error`
+report, and the stage records reaching the report, the ledger row and the
+`on_stage` hook in order. `tests/unit/agents/test_stages.py` covers the
+wrapper and the renderings on their own. `tests/integration/test_agents.py` seeds a
 real database with a stale ledger and an eight-hour hole on both a liquid and
 a thin token, and asserts only the liquid one is a finding.

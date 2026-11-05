@@ -9,9 +9,63 @@ type ChartData {
   candles: [[Candle!]!]!
 }
 
+type Citation {
+  n: Int!
+  chunkId: Int!
+  documentId: Int!
+  url: String!
+  title: String
+  publishedAt: String
+  retrievedAt: String!
+  quote: String!
+  legs: String!
+  score: Float!
+}
+
+type ExplanationSummary {
+  strategy: String!
+  symbol: String!
+  bar: String!
+  periodStartUnix: Int!
+  position: Int!
+  citations: Int!
+  model: String
+  generatedAt: String!
+}
+
+"""
+The `JSON` scalar type represents JSON values as specified by [ECMA-404](https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf).
+"""
+scalar JSON @specifiedBy(url: "https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf")
+
+type Mutation {
+  explainSignal(tokenSymbol: String!, strategy: String! = "bollinger", at: String = null, search: Boolean! = false, days: Int = null): SignalExplanation!
+}
+
 type Query {
+  signalExplanation(tokenSymbol: String!, strategy: String! = "bollinger", at: String = null): SignalExplanation
+  signalExplanations(tokenSymbol: String = null, limit: Int! = 20): [ExplanationSummary!]!
   getChartData(tokenSymbol: String!, timeUnitInHours: Int!): ChartData!
   supportedTokens: [String!]!
+}
+
+type SignalExplanation {
+  strategy: String!
+  symbol: String!
+  bar: String!
+  periodStartUnix: Int!
+  position: Int!
+  positionLabel: String!
+  score: Float
+  rationale: String!
+  model: String
+  generatedAt: String!
+  numericContext: JSON!
+  citations: [Citation!]!
+  newsStatus: String!
+  newsMessage: String!
+  denseUsed: Boolean!
+  rejectedCitations: [Int!]!
 }
 
 type TokenMetadata {

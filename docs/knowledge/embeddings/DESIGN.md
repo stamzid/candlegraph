@@ -135,13 +135,14 @@ flowchart TD
 | `embedding_backlog` | same | `missing` (never embedded, or text changed) and `stale` (another model) — what the observer's `embedding_backlog` finding will read in step 9 |
 | `similar_chunks` | `knowledge/statements.py` | cosine `<=>` over the active model's rows, `ORDER BY … LIMIT`, the shape the HNSW index answers; proven with `EXPLAIN` in the integration tier |
 | CLI | `candlegraph knowledge embed` / `reembed` | print the backlog, embed, print what remains; `make embed` / `make reembed` inside the stack |
-| Service | `docker-compose.yaml` → `ollama` | `ollama/ollama:0.40.13`, profile `knowledge`, pulls `${EMBEDDING_MODEL}` once into the `ollama` volume, healthy only when `ollama show <model>` succeeds; `make up-knowledge` |
+| Service | `docker-compose.yaml` → `ollama` | `ollama/ollama:0.40.13`, **in the default stack** since 2026-11-04 (it was behind a `knowledge` profile; see `docs/incidents/2026-11-04-explain-ran-lexical-only/`), pulls `${EMBEDDING_MODEL}` once into the `ollama` volume, healthy only when `ollama show <model>` succeeds; no app container depends on it |
 
-Two consequences for operators: the default stack (`make up`) does not
-start Ollama and `make embed` will fail with a message naming
-`OLLAMA_URL` and `make up-knowledge`; and the first `make up-knowledge`
-downloads about 1.2 GB of weights, which the 15-minute `start_period`
-on the health check is sized for.
+Two consequences for operators: the first `make up` downloads about
+1.2 GB of weights, which the 15-minute `start_period` on the health check
+is sized for, and every later start is instant because the weights live
+in their own volume (`make reset` does not touch it); and if Ollama is
+down, `make embed` fails with a message naming `OLLAMA_URL`, while
+`signals --explain` degrades to the lexical leg and says so.
 
 ## Chunking
 

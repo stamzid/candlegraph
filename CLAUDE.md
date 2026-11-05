@@ -114,9 +114,12 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   compare vectors from two models, and never widen the column to fit a
   model — pick a 1024-dimension model or set `EMBEDDING_TRUNCATE` for a
   Matryoshka one. Tests use `EMBEDDING_PROVIDER=fake` (`HashEmbedder`);
-  nothing in the test suite downloads a model. The Ollama service is
-  behind the `knowledge` compose profile: `make up` does not start it,
-  `make up-knowledge` does, and the first start pulls ~1.2 GB.
+  nothing in the test suite downloads a model. The Ollama service is part
+  of the default stack (it was behind a profile once, and every default
+  stack ran `--explain` lexical-only — see
+  `docs/incidents/2026-11-04-explain-ran-lexical-only/`); the first
+  `make up` pulls ~1.2 GB once, and an explanation that says
+  "lexical only" means the embedder is down, not that this is normal.
 - Retrieval always takes the bar it is explaining and never returns text
   published after it; `mode="strategy"` is the only thing a backtest may
   read. The asset filter joins alias `mention` rows, so a document that
@@ -135,3 +138,9 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   own worktree. Use a unique `COMPOSE_PROJECT_NAME` and host ports, and put
   scratch files under a session-unique path in `/tmp`; two sessions writing
   the same `/tmp/<repo>-*.log` have overwritten each other's results before.
+  "Unique" means a suffix only this session has (`cg-<worktree>-$(date +%s)`),
+  not a descriptive name: two sessions on the same feature both picked
+  `cg-oak-explain` on 2026-11-05 and the second `make up` silently replaced
+  the first's containers with the other worktree's image. Before `make down`,
+  check `docker ps --format '{{.Label "com.docker.compose.project.working_dir"}}'`
+  points at your worktree — `down` deletes the shared volume.
