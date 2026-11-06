@@ -36,6 +36,12 @@ def _parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report", help="print the data-quality report")
     report.add_argument("--days", type=int, default=None, help="only consider the last N days")
     report.add_argument("--strict", action="store_true", help="exit non-zero when the report is not clean")
+    report.add_argument(
+        "--json",
+        action="store_true",
+        help="print the report as JSON instead of the table; the same structure the "
+        "data_quality_report MCP tool returns",
+    )
 
     runs = sub.add_parser("runs", help="show recent ingest runs from the ledger")
     runs.add_argument("--limit", type=int, default=10)
@@ -190,6 +196,25 @@ def _parser() -> argparse.ArgumentParser:
     agent_runs.add_argument("--agent", default=None, help="only this agent")
     agent_runs.add_argument("--show", action="store_true", help="print the newest matching report in full")
 
+    # --- tools over MCP ---
+    mcp = sub.add_parser(
+        "mcp",
+        help="serve candlegraph's read-only tools over the Model Context Protocol",
+        description="Serve the read-only tool surface. A client (Claude Code, an IDE) launches "
+        "this over stdio and calls the same functions the other subcommands do. No tool writes "
+        "market data; `explain_signal` is the only one that can spend a search credit, and only "
+        "when it is asked to.",
+    )
+    mcp.add_argument(
+        "--transport",
+        choices=["stdio", "http"],
+        default="stdio",
+        help="stdio (default) is a client launching this process; http serves the same tools "
+        "over streamable HTTP for a client in another container",
+    )
+    mcp.add_argument("--host", default="127.0.0.1", help="with --transport http: bind address")
+    mcp.add_argument("--port", type=int, default=8900, help="with --transport http: port")
+
     # --- knowledge ---
     knowledge = sub.add_parser("knowledge", help="operate the knowledge layer (stage 1)")
     knowledge_sub = knowledge.add_subparsers(dest="knowledge_command", required=True)
@@ -310,8 +335,10 @@ def _ingest(settings: Settings, days: int | None, trigger: str) -> int:
     return 0 if result.ok else 1
 
 
-def _report(settings: Settings, days: int | None, strict: bool) -> int:
-    from candlegraph.ingestion.quality import build_report, format_report
+def _report(settings: Settings, days: int | None, strict: bool, as_json: bool = False) -> int:
+    import json
+
+    from candlegraph.ingestion.quality import build_report, format_report, report_dict
     from candlegraph.ingestion.runner import lookback_start
     from candlegraph.storage import get_db
     from candlegraph.tokens import get_token_registry
@@ -323,7 +350,7 @@ def _report(settings: Settings, days: int | None, strict: bool) -> int:
         start_unix=start_unix,
         min_expected_coverage=settings.min_expected_coverage,
     )
-    print(format_report(report))
+    print(json.dumps(report_dict(report), indent=2, default=str) if as_json else format_report(report))
     return 0 if report.ok or not strict else 1
 
 
@@ -394,22 +421,15 @@ def build_strategy_config(name: str, args: argparse.Namespace) -> object | None:
 
 def _prices_for(settings: Settings, symbol: str, days: int | None) -> Any:
     """Load one token's USD price series, or exit with a useful message."""
-    from candlegraph.analytics.prices import load_price_frame
+    from candlegraph.analytics.prices import PriceError, load_symbol_series
     from candlegraph.storage import get_db
     from candlegraph.tokens import get_token_registry
 
-    registry = get_token_registry()
-    if registry.by_symbol(symbol) is None:
-        raise SystemExit(f"unknown token {symbol!r}; tracked: {', '.join(registry.symbols)}")
-
     window = days if days is not None else settings.analytics_lookback_days
-    frame = load_price_frame(get_db(), [symbol], days=window)
-    if frame.empty or symbol not in frame.columns:
-        raise SystemExit(f"no stored price history for {symbol} in the last {window} days")
-
-    series = frame[symbol].dropna()
-    series.name = symbol
-    return series
+    try:
+        return load_symbol_series(get_db(), get_token_registry(), symbol, days=window)
+    except PriceError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _ui(settings: Settings, args: argparse.Namespace) -> int:
@@ -868,6 +888,23 @@ def _agent_runs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _mcp(args: argparse.Namespace) -> int:
+    """Serve the tools. Blocks until the client disconnects or the process stops."""
+    try:
+        from candlegraph.mcp.server import run_server
+    except ImportError:
+        raise SystemExit(
+            "the MCP server needs the `mcp` extra. Install it with `uv sync --extra mcp`, "
+            "or run it with `make mcp`."
+        ) from None
+
+    # Nothing may write to stdout under the stdio transport: it is the
+    # protocol channel. `configure_logging` attaches a stderr handler and no
+    # tool prints, so there is nothing further to redirect here.
+    run_server(transport=args.transport, host=args.host, port=args.port)
+    return 0
+
+
 def _knowledge(settings: Settings, args: argparse.Namespace) -> int:
     from candlegraph.knowledge.assets import sync_assets
     from candlegraph.knowledge.embed import EmbeddingError, build_embedder, embed_pending, embedding_backlog
@@ -1000,7 +1037,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         case "backfill":
             return _ingest(settings, args.days, "backfill")
         case "report":
-            return _report(settings, args.days, args.strict)
+            return _report(settings, args.days, args.strict, args.json)
         case "runs":
             return _runs(args.limit)
         case "strategies":
@@ -1029,6 +1066,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _agents(settings)
         case "agent-runs":
             return _agent_runs(args)
+        case "mcp":
+            return _mcp(args)
         case "knowledge":
             return _knowledge(settings, args)
         case _:  # pragma: no cover - argparse rejects anything else

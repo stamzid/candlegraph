@@ -181,6 +181,48 @@ def build_report(
     return report
 
 
+def report_dict(report: QualityReport) -> dict[str, Any]:
+    """The report as plain JSON-able data. Pure.
+
+    One structure, two callers: ``candlegraph report --json`` prints it and
+    the ``data_quality_report`` MCP tool returns it, so a client reasoning
+    over the tool result and an operator reading the pipe see the same
+    fields (``docs/knowledge/mcp/DESIGN.md``, the exit criterion).
+
+    Every derived figure the fixed-width table shows is included, because a
+    caller that has to recompute coverage from two integers will eventually
+    recompute it differently.
+    """
+    return {
+        "generated_at": report.generated_at.isoformat(),
+        "min_expected_coverage": report.min_expected_coverage,
+        "ok": report.ok,
+        "total_rows": report.total_rows,
+        "tokens": [
+            {
+                "token_id": token.token_id,
+                "symbol": token.symbol,
+                "stored_hours": token.stored_hours,
+                "expected_hours": token.expected_hours,
+                "missing_hours": token.missing_hours,
+                "coverage": token.coverage,
+                "under_covered": token.coverage < report.min_expected_coverage,
+                "first": token.first.isoformat() if token.first else None,
+                "last": token.last.isoformat() if token.last else None,
+                "gaps": len(token.gaps),
+                "longest_gap_hours": token.longest_gap.hours if token.longest_gap else None,
+            }
+            for token in sorted(report.tokens, key=lambda t: t.symbol)
+        ],
+        "missing_tokens": list(report.missing_tokens),
+        "under_covered": [token.symbol for token in report.under_covered],
+        "violations": len(report.violations),
+        # Every column of the completeness query is a COUNT; coerced here so
+        # a psycopg2 Decimal never reaches a JSON encoder that cannot take one.
+        "completeness": {str(k): (None if v is None else int(v)) for k, v in report.completeness.items()},
+    }
+
+
 def format_report(report: QualityReport) -> str:
     """Render a report as a fixed-width table for the CLI and CI logs."""
     lines = [

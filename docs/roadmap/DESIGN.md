@@ -1,6 +1,6 @@
 # Roadmap
 
-**Status:** living document — last revised 2026-10-29
+**Status:** living document — last revised 2026-11-06
 **Scope:** what candlegraph is, what has been built, and what comes next.
 
 `AGENTS.md` carries a condensed copy of the stage list; this is the
@@ -10,8 +10,9 @@ feeling — because "the agent layer is done" is otherwise unfalsifiable.
 
 ## Where this stands
 
-candlegraph is a market-data service with an analytics layer and an agent
-layer on top. Five pieces of work are delivered and in the test suite:
+candlegraph is a market-data service with an analytics layer, an agent
+layer and a knowledge layer on top. Six pieces of work are delivered and in
+the test suite:
 
 | Delivered | What it added | Proven by |
 |---|---|---|
@@ -20,14 +21,14 @@ layer on top. Five pieces of work are delivered and in the test suite:
 | **Deterministic analytics** | Rolling statistics, mean-variance optimisation, Bollinger and crossover and walk-forward ARIMA signals, the `signal` table, a cost- and lag-aware backtester, and a Streamlit UI. | `candlegraph signals WETH --store && candlegraph backtest WETH --strategy all` |
 | **Agent layer** | Two LangGraph graphs — a run observer (stale data, gaps on liquid tokens, metric drift) and a CI janitor (checks, mechanical fixes, draft PRs) — plus the `agent_run` ledger and report sinks. | `make observe && make agent-runs`, and the janitor's daily workflow |
 | **Time-series storage** | The three series tables are TimescaleDB hypertables chunked on `period_start_unix`; the state and ledger tables deliberately are not. | `make test-integration` (`test_timescale.py`) |
+| **Knowledge graph and signaller** (stage 1, 2026-11-06) | The eight corpus tables on pgvector, assets and aliases from `tokens.yaml`, the document pipeline, local embeddings, Tavily under a budget with the `source_call` ledger, hybrid retrieval bounded by `published_at <= bar`, `signals --explain` with its citation validator on the CLI, GraphQL and the UI, four observer findings, and the read-only MCP server. | `candlegraph signals WETH --strategy bollinger --explain`, with no LLM key; `make mcp` |
 
-Two stages are open. Stage 0 is paused with its first deliverable landed;
-stage 1 is at rollout step 8 of 10 and its exit criterion already holds:
+One stage is open — stage 0, paused with its first deliverable landed and
+now next in line:
 
 | In progress | Landed | Remaining | Exit criterion |
 |---|---|---|---|
-| **0. Descriptive statistics, deeper** | `candlegraph compare` over aligned bars. | The `active` token flag; the `FillPolicy` seam. Resumes after stage 1. | met for `compare`; the five active tokens and the no-look-ahead fill test remain |
-| **1. Knowledge graph and signaller** | Steps 1–8 of `../rollout/ROLLOUT.md`: schema, assets, documents, embeddings, Tavily, retrieval, `signals --explain` (CLI, GraphQL, UI). | Step 9 (observer knowledge findings), step 10 (MCP, closeout). | `signals WETH --explain` cites a stored document with URL and timestamp, no LLM key — met 2026-11-04 |
+| **0. Descriptive statistics, deeper** | `candlegraph compare` over aligned bars. | The `active` token flag; the `FillPolicy` seam. | met for `compare`; the five active tokens and the no-look-ahead fill test remain |
 
 What that adds up to, and where the next stages attach:
 
@@ -42,40 +43,42 @@ flowchart TB
     DB --> API["GraphQL API"]
     DB --> UI["Streamlit UI"]
     DB --> AG["agents<br/>observer · janitor"]
+    DB --> KG["knowledge<br/>pgvector · Tavily · explain"]
+    KG --> MCP["mcp<br/>read-only tools"]
   end
 
   subgraph next["Next"]
     direction TB
-    DS["0 · Descriptive statistics, deeper<br/>pairwise comparison · active tokens · gap policy"]
-    KG["1 · Knowledge graph<br/>pgvector · Tavily · news"]
+    DS["0 · Descriptive statistics, deeper<br/>active tokens · gap policy"]
     H["2 · Harness<br/>pipelines · event bus · OTel"]
     TM["3 · Traditional markets<br/>NASDAQ · NYSE"]
     MS["4 · Models and strategies<br/>momentum · more models"]
     MA["5 · Market-watch agents<br/>RSS observer · alerting"]
-    DS --> KG --> H --> TM --> MS --> MA
+    DS --> H --> TM --> MS --> MA
   end
 
   AN -.-> DS
-  DB -.-> KG
-  ST -.->|"signals gain<br/>explanations"| KG
+  ST -.->|"signals carry<br/>explanations"| KG
   ING -.-> H
+  MCP -.->|"a pipeline<br/>becomes a tool"| H
+  KG -.->|"feeds build the corpus<br/>as of each bar"| MA
   AG -.-> MA
 
   classDef done fill:#e8f5e9,stroke:#2e7d32
   classDef todo fill:#e3f2fd,stroke:#1565c0
-  class G,ING,DB,AN,ST,API,UI,AG done
-  class DS,KG,H,TM,MS,MA todo
+  class G,ING,DB,AN,ST,API,UI,AG,KG,MCP done
+  class DS,H,TM,MS,MA todo
 ```
 
-The ordering is not arbitrary. Stage 0 deepens the descriptive layer that
-already exists and settles the gap-handling policy that every later stage
-will inherit — cheaper to decide now than to retrofit under a knowledge
-graph. After that, the knowledge graph comes first because it is
-the only remaining piece of the *original* design and because the harness in
-stage 2 is much more useful once there is a second kind of pipeline to
-orchestrate than when there is only ingestion. Everything from stage 3 on
-widens the system rather than deepening it, and each of those stages is
-cheaper once the harness exists to run it.
+The ordering is not arbitrary. The knowledge graph was taken before stage
+0 finished because it was the last piece of the *original* design and
+because the harness in stage 2 is much more useful once there is a second
+kind of pipeline to orchestrate than when there is only ingestion. Stage 0
+is next: it deepens the descriptive layer that already exists and settles
+the gap-handling policy that stages 3 and 4 will inherit, which is cheaper
+to decide now than to retrofit under a set of models. Everything from
+stage 3 on widens the system rather than deepening it, and each of those
+stages is cheaper once the harness exists to run it.
 
 ---
 
@@ -174,7 +177,7 @@ data after the bar they score, even across filled gaps.
 
 ---
 
-## 1. Knowledge graph and signaller
+## 1. Knowledge graph and signaller — **delivered 2026-11-06**
 
 **Goal.** Signals stop being a number and start being an argument. A
 `bollinger` short on WETH should be able to say *what else was true* at that
@@ -232,14 +235,38 @@ image, so the stage begins with a pinned switch to `timescaledb-ha` and a
 rebuilt volume, done with the lessons of
 `docs/incidents/2026-10-28-stack-would-not-start/`; and the knowledge
 tables' placement is already recorded in
-`docs/storage/table-placement/DESIGN.md`. The build order is
-`docs/rollout/ROLLOUT.md` — ten sequential steps with a progress table —
+`docs/storage/table-placement/DESIGN.md`. The build order was
+ten sequential steps with a progress table, archived at
+`docs/rollout/archive/2026-11-06-stage-1-knowledge-graph.md`,
 and `docs/storage/pgvector-coexistence/DESIGN.md` draws how the corpus
 tables share the instance with the hypertables.
 
 **Exit criterion.** `candlegraph signals WETH --strategy bollinger --explain`
 prints a signal whose rationale cites at least one retrieved document with a
 URL and a timestamp, and the citation is stored alongside the signal.
+
+**Delivered (2026-11-06).** All ten steps, in order, each with its own
+tests; the archived rollout has the per-step outcomes. What is worth
+carrying forward:
+
+- The exit criterion holds **without any API key** — the deterministic
+  template narrator is a first-class mode, and the citation validator
+  strips a sentence citing a document retrieval never returned.
+- Two decisions were overturned by reality and written up as incidents
+  rather than quietly fixed: Ollama behind a compose profile meant every
+  default stack explained on the lexical leg alone
+  (`docs/incidents/2026-11-04-explain-ran-lexical-only/`), and the image
+  switch that opens the stage is the same class of change as
+  `docs/incidents/2026-10-28-stack-would-not-start/`.
+- RAGFlow was evaluated as a second retrieval backend and declined, with
+  the triggers that would change the call recorded
+  (`docs/knowledge/ragflow/DESIGN.md`).
+- Step 10 added the read-only MCP server, which is how an assistant in the
+  terminal reads this system's state — and the first thing stage 2's
+  harness can expose a pipeline through.
+- Not built, and recorded as such: the embeddings evaluation set
+  (`knowledge eval`), and the janitor's optional incident-similarity
+  finding from `docs/knowledge/graph/DESIGN.md`.
 
 ---
 

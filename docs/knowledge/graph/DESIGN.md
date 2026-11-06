@@ -1,6 +1,6 @@
 # Knowledge graph: schema, retrieval, and how it attaches to what exists
 
-**Status:** in progress — 2026-11-04. The schema (all eight tables, pgvector
+**Status:** implemented — 2026-11-06. The schema (all eight tables, pgvector
 installed, revision `f399ca0770a0`), the asset sync
 (`candlegraph knowledge sync-assets`, aliases in `config/tokens.yaml`) and
 the document pipeline (`knowledge/documents.py`: URL normalisation,
@@ -13,12 +13,13 @@ retrieval with the no-look-ahead bound (`knowledge/retrieve.py`) and
 sequence below, the `explanation` upsert, template-first narration) are
 implemented — rollout steps 2–9, the observer's `collect_knowledge`
 node and four findings included (`docs/agents/observer/DESIGN.md` has the
-rules). Still design only: the MCP server (step 10). RAGFlow
+rules), and step 10's read-only MCP server over the whole surface
+(`../mcp/DESIGN.md`). The stage is delivered. RAGFlow
 as an alternative retrieval backend was evaluated and declined for now
 (`../ragflow/DESIGN.md`).
-**Area (when built):** `candlegraph/knowledge/`, `alembic/versions/`,
-`candlegraph/cli.py` (`signals --explain`, `knowledge *`),
-`candlegraph/agents/observer/` (one new collect node)
+**Area:** `candlegraph/knowledge/`, `alembic/versions/`,
+`candlegraph/cli.py` (`signals --explain`, `knowledge *`, `mcp`),
+`candlegraph/agents/observer/` (one collect node), `candlegraph/mcp/`
 **Companions:** [`../vector-store/`](../vector-store/DESIGN.md) (which store),
 [`../embeddings/`](../embeddings/DESIGN.md) (which model),
 [`../tavily/`](../tavily/DESIGN.md) (the web source under a rate limit),

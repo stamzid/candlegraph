@@ -24,8 +24,15 @@ def fetch_chart_data(
     time_unit_in_hours: int,
     db: DatabaseManager | None = None,
     registry: TokenRegistry | None = None,
+    start_unix: int | None = None,
+    end_unix: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Aggregated buckets for a token, or an empty list for an unknown symbol."""
+    """Aggregated buckets for a token, or an empty list for an unknown symbol.
+
+    ``start_unix``/``end_unix`` bound the hours considered; ``None`` on both
+    is every stored hour, which is what the GraphQL resolver asks for. The
+    ``candles`` MCP tool is what passes a window.
+    """
     registry = registry or get_token_registry()
     token = registry.by_symbol(token_symbol)
     if token is None:
@@ -35,8 +42,8 @@ def fetch_chart_data(
     params = {
         "interval": time_unit_in_hours * 3600,
         "token_id": token.address,
-        "start_unix": None,
-        "end_unix": None,
+        "start_unix": start_unix,
+        "end_unix": end_unix,
     }
     return db.fetch_all(db.sql.chart_query, params)
 

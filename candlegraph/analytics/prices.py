@@ -20,11 +20,22 @@ from typing import Any, Literal
 import pandas as pd
 
 from candlegraph.storage import DatabaseManager
+from candlegraph.tokens import TokenRegistry
 
 PriceColumn = Literal["close", "price_usd", "open", "high", "low"]
 FillPolicy = Literal["ffill", "drop", "none"]
 
 HOUR = 3600
+
+
+class PriceError(LookupError):
+    """There is no usable stored series for the request.
+
+    Carries a message written for a person: an unknown symbol lists the
+    tracked ones, an empty window says how long it was. Each surface maps
+    it to its own failure — the CLI to ``SystemExit``, the MCP tools to a
+    tool error — so the wording is written once.
+    """
 
 
 @dataclass(frozen=True)
@@ -178,3 +189,33 @@ def load_price_frame(
     start_unix, end_unix = window_bounds(days, now=now)
     history = load_price_history(db, symbols, start_unix, end_unix)
     return to_wide(history, column=column, fill=fill)
+
+
+def load_symbol_series(
+    db: DatabaseManager,
+    registry: TokenRegistry,
+    symbol: str,
+    days: int | None = None,
+    column: PriceColumn = "price_usd",
+    fill: FillPolicy = "ffill",
+    now: datetime | None = None,
+) -> pd.Series:
+    """One tracked token's price series, or a :class:`PriceError` saying why not.
+
+    The registry lookup is case-insensitive but the stored ``symbol`` column
+    is not, so the query always uses the registry's own spelling.
+
+    Raises:
+        PriceError: the symbol is not tracked, or nothing is stored for it
+            inside the window.
+    """
+    token = registry.by_symbol(symbol)
+    if token is None:
+        raise PriceError(f"unknown token {symbol!r}; tracked: {', '.join(registry.symbols)}")
+    frame = load_price_frame(db, [token.symbol], days=days, column=column, fill=fill, now=now)
+    if frame.empty or token.symbol not in frame.columns or frame[token.symbol].dropna().empty:
+        window = "the stored history" if days is None else f"the last {days} days"
+        raise PriceError(f"no stored price history for {token.symbol} in {window}")
+    series = frame[token.symbol].dropna()
+    series.name = token.symbol
+    return series

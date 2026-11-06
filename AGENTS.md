@@ -30,7 +30,7 @@ a target, and never let CI run something that is not one either.
 | Start over from a bad volume | `make reset` (drops the volume and this project's image, then `make up`) |
 | One ingest pass | `make ingest` |
 | Backfill 90 days | `make backfill days=90` |
-| Data-quality report | `make report` |
+| Data-quality report | `make report` (`candlegraph report [--json]`) |
 | Recent ingest runs | `make runs` |
 | Sync assets and aliases from `tokens.yaml` | `make sync-assets` (in the stack) or `candlegraph knowledge sync-assets` |
 | The embedding model server's log (Ollama is part of `make up`; the first start pulls `bge-m3`) | `make logs-ollama` |
@@ -51,6 +51,7 @@ a target, and never let CI run something that is not one either.
 | CI janitor, once | `make janitor ARGS="--open-pr --strict"` |
 | Agent reports | `make agent-runs` / `make logs-agents` |
 | Agents on a schedule | the `agents` compose service (`candlegraph agents`); the janitor's schedule is `.github/workflows/janitor.yml` |
+| Serve the read-only tools over MCP (stdio; needs `uv sync --extra mcp`) | `make mcp` (or `candlegraph mcp [--transport http]`) |
 | End-to-end against the stack | `make e2e` |
 | New migration | `make revision m="description"` |
 | Apply migrations | `make migrate` |
@@ -94,13 +95,19 @@ candlegraph/
     store.py           Upserting signals into the signal table.
   api/
     app.py             FastAPI app factory and health check.
+    status.py          The GET /status body, shared with the `status` MCP tool. One round trip.
     schema.py          Strawberry GraphQL types and resolvers.
     formatting.py      Database rows -> chart payload. Pure.
     explanations.py    Signal explanations over GraphQL: two free reads, one mutation that spends only with search=true.
+  mcp/                 The tool surface for an MCP client. Optional extra; wraps what exists, adds nothing.
+    tools.py           The fourteen tools: clean signatures and docstrings (that is the schema), every result redacted.
+    payloads.py        Domain objects -> JSON-able data. Pure; NaN becomes null, never 0.
+    resources.py       docs/**/DESIGN.md and incidents/**/POSTMORTEM.md addressed as candlegraph:// URIs. Pure.
+    server.py          The only module that imports `mcp`: registration, annotations, prompts, transports.
   ui/
     viewmodels.py      Everything the UI computes. Plain Python, fully tested.
     app.py             The Streamlit script: widgets and charts only.
-  knowledge/           Stage 1, growing with docs/rollout/ROLLOUT.md. So far: schema, assets, documents, embeddings, Tavily, retrieval, explain.
+  knowledge/           Stage 1, delivered: schema, assets, documents, embeddings, Tavily, retrieval, explain.
     statements.py      Every SQL statement for the knowledge tables, built per schema.
     assets.py          tokens.yaml aliases -> asset rows. Pure transform + one upsert.
     documents.py       URL normalisation -> url_hash, sentence-boundary chunking (pure), document/chunk upserts.
@@ -132,9 +139,9 @@ docs/<area>/<topic>/DESIGN.md   Design documents. Why, not how; `docs/README.md`
   roadmap/           Delivered stages, next stages, and each exit criterion.
   storage/           TimescaleDB adoption, which tables are hypertables, and how pgvector coexists.
   analytics/         The statistics and models with their equations; risk management and the rate seam.
-  rollout/ROLLOUT.md The one current rollout plan: ordered steps and a progress table.
+  rollout/ROLLOUT.md The one current rollout plan: ordered steps and a progress table. Finished ones are in rollout/archive/.
   agents/            The agent framework, the observer, and the janitor.
-  knowledge/         Stage 1: schema, vector store, embeddings, Tavily (implemented); MCP (proposed); sources, ragflow (surveys).
+  knowledge/         Stage 1, delivered: schema, vector store, embeddings, Tavily, MCP; sources and ragflow are surveys.
   incidents/<date>-<slug>/POSTMORTEM.md   What went down, why, and what changed so it cannot again.
 tests/unit/          Offline. No database, no network. Mirrors the package layout.
 tests/integration/   Throwaway TimescaleDB (testcontainers, or TEST_DATABASE_URL).
@@ -232,7 +239,13 @@ Each of these has a test. Breaking one should break the build, not production.
     `agent_run` table and the configured report sinks. A graph that fails
     still posts a report with status `error`; a sink that fails is logged
     and skipped, never raised. Output that reaches a report is redacted
-    first.
+    first. **The same holds for the MCP tools**, which are the other
+    surface that speaks to something outside the process: the only writers
+    in the listing are `observe` (an `agent_run` row) and `explain_signal`
+    (an `explanation`, plus `document`/`source_call` when it is asked to
+    search), both declared in `candlegraph/mcp/tools.py::TOOLS` and both
+    annotated so a client can see it; every result is redacted on the way
+    out.
 22. **Findings are computed; prose is optional.** An agent's status and exit
     code come from its findings alone. The optional model narrator sees the
     findings and nothing else, and cannot add, remove, or re-grade one.
@@ -308,13 +321,13 @@ unfalsifiable.
 | Deterministic analytics | Rolling statistics, mean-variance portfolios, Bollinger/crossover/ARIMA signals, the `signal` table, a costed and lagged backtester, the Streamlit UI. | `candlegraph signals WETH --store && candlegraph backtest WETH --strategy all` |
 | Agent layer | The run observer and the CI janitor as LangGraph graphs, the `agent_run` ledger, report sinks, the `agents` service and the janitor workflow. | `make observe && make agent-runs` |
 | Time-series storage | The three series tables as TimescaleDB hypertables; state and ledger tables deliberately plain. | `make test-integration` (`test_timescale.py`) |
+| Knowledge graph and signaller | The eight corpus tables on pgvector, assets and aliases, the document pipeline, embeddings (`bge-m3` via the `ollama` service), Tavily under a budget with the `source_call` ledger, hybrid retrieval with the no-look-ahead bound, `signals --explain` with its citation validator on three surfaces, the observer's four knowledge findings, and the read-only MCP server. | `candlegraph signals WETH --strategy bollinger --explain` prints a rationale citing a retrieved document with a URL and a timestamp, stored with the signal, with no LLM key configured |
 
 ### In progress
 
 | Stage | Landed so far | Still to land | Exit criterion |
 |---|---|---|---|
-| **0. Descriptive statistics, deeper** | `candlegraph compare WETH WBTC` over aligned bars. | The `active` flag in `config/tokens.yaml`; the `FillPolicy` gap-filling seam with its no-look-ahead test. Paused while stage 1 finishes; resumes after it. | `compare` prints correlation, beta and relative performance (met); the stack ingests exactly the five active tokens; `FillPolicy` exists with a no-look-ahead test |
-| **1. Knowledge graph and signaller** | Rollout steps 1–9 (`docs/rollout/ROLLOUT.md`): `timescaledb-ha` with pgvector, the eight knowledge tables, assets and aliases, documents, embeddings (Ollama in the default stack), Tavily under a budget with the `source_call` ledger, hybrid retrieval with the no-look-ahead bound, `signals --explain` with the citation validator — on the CLI, over GraphQL (`explainSignal`, `signalExplanation`) and on the Strategy dashboard — and the observer's knowledge findings (`source_budget`, `source_errors`, `embedding_backlog`, `uncited_explanations`). | Step 10, the MCP server and the stage closeout. | `candlegraph signals WETH --strategy bollinger --explain` prints a rationale citing a retrieved document with a URL and a timestamp, stored with the signal, with no LLM key configured (**met**; the stage closes when 9 and 10 land) |
+| **0. Descriptive statistics, deeper** | `candlegraph compare WETH WBTC` over aligned bars. | The `active` flag in `config/tokens.yaml`; the `FillPolicy` gap-filling seam with its no-look-ahead test. Was paused while stage 1 finished; it is next. | `compare` prints correlation, beta and relative performance (met); the stack ingests exactly the five active tokens; `FillPolicy` exists with a no-look-ahead test |
 
 ### Next
 
@@ -331,17 +344,13 @@ unfalsifiable.
    relative performance over aligned bars (met); the stack ingests exactly
    the five active tokens; the fill policy exists behind `FillPolicy` with
    a no-look-ahead test.
-1. **Knowledge graph and signaller.** Entities for assets, pools, sources
-   and documents in Postgres with pgvector; Tavily for web search; news and
-   text augmentation attached to the prices already stored. Paper trading
-   only. *Designed* in `docs/knowledge/` (five documents: graph, vector
-   store, embeddings, Tavily, MCP) and sequenced in
-   `docs/rollout/ROLLOUT.md`, the step-by-step plan the build follows;
-   read both and the `extend-knowledge-graph` skill before writing code.
-   The stage opens with a pinned image switch to `timescaledb-ha` for
-   pgvector, which is a volume rebuild.
-   *Exit:* `candlegraph signals WETH --explain` prints a rationale citing a
-   retrieved document with a URL and a timestamp, stored with the signal.
+1. ~~**Knowledge graph and signaller.**~~ *Delivered 2026-11-06.* Assets,
+   sources, documents and chunks in Postgres with pgvector; Tavily for web
+   search under a budget; news attached to the prices already stored, so a
+   signal can cite *why*; and the read-only MCP server over the whole
+   surface. Paper trading only. The five documents in `docs/knowledge/`
+   describe what was built; the step-by-step plan it followed is archived
+   at `docs/rollout/archive/2026-11-06-stage-1-knowledge-graph.md`.
 2. **Harness.** YAML pipeline specs, an event bus, OpenTelemetry metrics,
    and the continuous aggregates deferred from the TimescaleDB migration.
    *Exit:* one `candlegraph run pipelines/hourly.yaml` executes ingest →

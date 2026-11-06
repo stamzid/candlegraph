@@ -4,8 +4,8 @@ candlegraph turns raw on-chain trading activity into something you can reason ab
 hourly Uniswap v3 prices from The Graph into TimescaleDB, serves them as OHLC candles over GraphQL,
 and layers deterministic analytics — rolling statistics, mean-variance portfolios, trading signals,
 costed backtests and tail-risk measures — on top of that stored history. LangGraph agents watch the
-pipeline and report on it, and a knowledge layer (in progress) will let a signal cite the news that
-was true when it fired.
+pipeline and report on it, a knowledge layer lets a signal cite the news that was already public
+when it fired, and the whole surface is available to an assistant as MCP tools.
 
 In more detail: a separate ingest worker discovers the deepest pools for each tracked token and
 stores hourly OHLC, USD price, volume, TVL and fees per token, plus pool-level volume, fees,
@@ -222,7 +222,7 @@ a failing one always is.
 | `worker` | Run the ingest loop until stopped |
 | `ingest` | One ingest pass, then exit |
 | `backfill --days 90` | One pass over a longer window, rewinding past stored history |
-| `report [--days N] [--strict]` | Data-quality report; `--strict` exits non-zero when dirty |
+| `report [--days N] [--strict] [--json]` | Data-quality report; `--strict` exits non-zero when dirty, `--json` prints it as data |
 | `runs [--limit N]` | Recent rows from the ingest ledger |
 | `strategies` | List the registered strategies |
 | `stats SYMBOL [--window N]` | Rolling mean and annualised volatility |
@@ -242,6 +242,7 @@ a failing one always is.
 | `knowledge fetch-news [--symbol S]` | One budgeted Tavily news search per token per UTC day; cached days cost nothing, refusals are ledgered |
 | `knowledge search QUERY [--symbol S] [--at ISO] [--mode display\|strategy] [--lexical-only]` | Hybrid retrieval over stored news as of a bar: dense + lexical legs fused by reciprocal rank, nothing published after the bar |
 | `knowledge link-mentions` | Link stored chunks to the assets their aliases name (idempotent backfill) |
+| `mcp [--transport stdio\|http]` | Serve the read-only tools over the Model Context Protocol (needs `uv sync --extra mcp`) |
 
 ## Data quality
 
@@ -458,6 +459,47 @@ paragraph; the findings, the status, and the exit code are computed and are the 
 Add a graph by following [`docs/agents/framework/DESIGN.md`](docs/agents/framework/DESIGN.md)
 and the `add-agent` skill.
 
+## Tools over MCP
+
+`candlegraph mcp` serves the same functions the CLI calls as **Model Context Protocol** tools, so
+an assistant already open in your terminal can answer "what state is this thing in" from typed
+results instead of a scraped log. It is an optional extra:
+
+```sh
+uv sync --extra mcp
+make mcp                 # stdio, against the stack's database on localhost
+```
+
+To register it with Claude Code, point the client at the same command:
+
+```sh
+claude mcp add candlegraph -- uv run --extra mcp python -m candlegraph mcp
+```
+
+Give it `DB_HOST=localhost` and `OLLAMA_URL=http://localhost:11434` (with `DB_PORT` and the
+Ollama port adjusted if you moved them) so it reaches the compose services from outside their
+network, exactly as `make mcp` does. Both matter: the in-compose hostnames do not resolve on
+the host, and an unreachable embedder leaves retrieval on the lexical leg alone — which it will
+say, rather than failing.
+
+Fourteen tools, all reading what already exists: `status`, `recent_ingest_runs`,
+`data_quality_report`, `candles`, `stats`, `compare`, `signals`, `backtest`, `agent_runs`,
+`latest_agent_report`, `observe`, `search_knowledge`, `explain_signal` and `knowledge_budget`.
+The design documents and post-mortems are served as resources
+(`candlegraph://docs/roadmap`, `candlegraph://incidents/<slug>`), and two prompts package the
+reading order the skills describe.
+
+**No tool writes market data.** The only writers in the listing are `observe`, which records one
+`agent_run` row because that is what an agent run is, and `explain_signal`, which upserts an
+`explanation` — and which spends a search credit only when called with `search: true`, under the
+same budget guard as everything else, so at most one credit per token per UTC day. Both are
+annotated so a client can see it before calling. Every result is redacted on the way out with the
+same function the agent reports use. `--transport http` serves the same tools over streamable
+HTTP for a client in another container; there is no compose service for it yet.
+
+The reasoning, including why there is deliberately no MCP *client* for Tavily, is in
+[`docs/knowledge/mcp/DESIGN.md`](docs/knowledge/mcp/DESIGN.md).
+
 ## Tests
 
 | Tier | Needs | Command |
@@ -473,7 +515,7 @@ so check the skip count before reading a green run as proof.
 
 ## Status and what comes next
 
-Five pieces of work are delivered and covered by the test suite:
+Six pieces of work are delivered and covered by the test suite:
 
 - **Stabilisation** — a clean clone that builds, lints, type-checks and comes up.
 - **Data model and ingestion** — hourly token and pool data, idempotent upserts,
@@ -483,6 +525,9 @@ Five pieces of work are delivered and covered by the test suite:
 - **Agent layer** — the run observer and the CI janitor, with their ledger and
   report sinks.
 - **Time-series storage** — the series tables as TimescaleDB hypertables.
+- **Knowledge graph and signaller** — the corpus on pgvector, local embeddings,
+  Tavily under a credit budget, hybrid retrieval that never looks past the bar,
+  `signals --explain` with its citation validator, and the read-only MCP server.
 
 Next, in order:
 
@@ -492,23 +537,12 @@ Next, in order:
    a recorded policy for filling ingestion gaps on thin tokens —
    interpolation for display only, a causal estimator for anything a
    strategy consumes, nothing written to the database.
-1. **Knowledge graph and signaller** — assets, pools, sources and documents in
-   Postgres with pgvector, Tavily for web search, and news attached to prices,
-   so a signal can cite *why*. Paper trading only. In progress: the schema
-   (pgvector installed, eight knowledge tables), the asset sync
-   (`candlegraph knowledge sync-assets`), the document pipeline (URL
-   normalisation, `url_hash`, chunking), embeddings (`bge-m3` served by an
-   `ollama` compose service in the default stack, `make embed`)
-   the Tavily news source (`make fetch-news`: one budgeted search per
-   token per UTC day, every call ledgered) and hybrid retrieval
-   (`make search`: pgvector + `tsvector` legs fused by reciprocal rank,
-   bounded by `published_at <= bar`) and `signals --explain` (`make explain`:
-   the numeric context plus a rationale that may cite only the documents
-   retrieved for the bar — an invented citation is stripped — stored in
-   `explanation`, no LLM key required) are in; the observer's knowledge
-   findings and the MCP server are next. RAGFlow
-   was evaluated as a second retrieval backend and declined for now
-   (`docs/knowledge/ragflow/DESIGN.md`). See `docs/knowledge/` and `docs/rollout/ROLLOUT.md`.
+1. ~~**Knowledge graph and signaller**~~ — *delivered 2026-11-06*. Assets,
+   sources and documents in Postgres with pgvector, Tavily for web search,
+   and news attached to prices, so a signal can cite *why*. Paper trading
+   only. RAGFlow was evaluated as a second retrieval backend and declined
+   for now (`docs/knowledge/ragflow/DESIGN.md`). See `docs/knowledge/` and
+   the archived plan under `docs/rollout/archive/`.
 2. **Harness** — YAML pipeline specs, an event bus, OpenTelemetry, and the
    continuous aggregates deferred from the TimescaleDB migration.
 3. **Traditional markets** — NASDAQ and NYSE equities alongside crypto, which

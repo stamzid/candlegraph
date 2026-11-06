@@ -105,3 +105,14 @@ so a volume at an unknown revision fails the same way afterwards.
 
 Never add `name:` to `docker-compose.yaml`: the project name is left to default
 to the directory so several worktrees can run at once.
+
+## Reading the stack's state as tools
+
+`make mcp` serves the same reads this skill describes — `status`,
+`recent_ingest_runs`, `data_quality_report`, `latest_agent_report` — over
+MCP on stdio, pointed at the stack's database on `localhost`. It needs
+`uv sync --extra mcp` once. Nothing in the listing writes market data, and
+the one tool that can spend a search credit (`explain_signal`) does so
+only when asked. It is a convenience over the commands above, not a
+replacement: when something is actually broken, `make up`'s own output and
+`make logs` say more than any tool result.

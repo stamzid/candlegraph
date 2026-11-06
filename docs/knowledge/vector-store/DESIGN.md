@@ -1,6 +1,9 @@
 # Vector store: pgvector in the database we have, and what would change that
 
-**Status:** proposed — 2026-10-29
+**Status:** implemented — 2026-11-06. pgvector is installed by revision
+`f399ca0770a0` and `chunk.embedding halfvec(1024)` with its HNSW cosine
+index is what hybrid retrieval reads. No second store was added. The
+revisit triggers at the end still stand.
 **Decision:** pgvector (with pgvectorscale available) inside the existing
 PostgreSQL/TimescaleDB. No second store. Revisit triggers are listed at the
 end so this is a decision with an expiry condition, not a preference.

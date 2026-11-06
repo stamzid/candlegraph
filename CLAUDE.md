@@ -19,10 +19,8 @@ reconstructing the steps:
   tell a real finding from an expected one.
 - `add-agent` — add a new LangGraph graph that follows the framework.
 - `release-check` — the full pre-merge gate.
-- `extend-knowledge-graph` — stage 1, mostly built (schema through the
-  observer's knowledge findings; only MCP and the closeout remain): the
-  order to build the rest in, and how to add a source, an entity, or a
-  retriever.
+- `extend-knowledge-graph` — stage 1, built: how to add a source, an
+  entity, a retriever, or an MCP tool without reversing a decision.
 
 `docs/` holds the design documents, arranged the same way — one directory per
 topic, with a `DESIGN.md` inside and a flowchart in most of them:
@@ -34,15 +32,17 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
 - `docs/agents/framework/`, `.../observer/`, `.../janitor/` — read before
   touching `candlegraph/agents/`.
 - `docs/knowledge/` — the stage 1 design (graph, vector store, embeddings,
-  Tavily, MCP) plus `sources/`, a survey of free text and fundamentals
-  APIs for later stages. Each document's Status line says whether it
-  describes code or an idea; read before starting any of it, and keep the
-  Status lines truthful as it lands.
-- `docs/rollout/ROLLOUT.md` — **the current rollout plan.** When the user
-  refers to "the rollout", "the plan", or "step N", this is the document:
-  find the step, read its "Read first" pointers, do it, and update the
-  progress table in the same change. One current rollout at a time;
-  finished ones are archived under `docs/rollout/archive/`.
+  Tavily, MCP), all implemented, plus `sources/`, a survey of free text
+  and fundamentals APIs for later stages. Each document's Status line says
+  whether it describes code or an idea; read before changing the code it
+  describes, and keep the Status lines truthful.
+- `docs/rollout/ROLLOUT.md` — **the current rollout plan**, when there is
+  one. When the user refers to "the rollout", "the plan", or "step N",
+  this is the document: find the step, read its "Read first" pointers, do
+  it, and update the progress table in the same change. One at a time;
+  finished ones are archived under `docs/rollout/archive/`. Stage 1's is
+  archived and **there is no current rollout** — the file says so and
+  points at the roadmap for what is next.
 - `docs/incidents/` — post-mortems. Read the two from October 2026 before
   changing the database image, a migration id, or a compose health check.
 
@@ -127,6 +127,15 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   was never linked is invisible to it — `make link-mentions` backfills.
   `RETRIEVAL_BACKEND=ragflow` is refused on purpose; the evaluation is in
   `docs/knowledge/ragflow/DESIGN.md` and lists what would change the call.
+- The MCP server wraps what exists and adds nothing. A tool lives in
+  `candlegraph/mcp/tools.py`, takes no `db` or `settings` argument (its
+  signature and docstring are the schema a model reads), carries
+  `@boundary` so its result and any escaping error are redacted, and gets
+  a `ToolSpec` in `TOOLS` declaring truthfully whether it writes — the
+  "writes nothing" test reads that registry, so a missing entry fails the
+  build. If a tool would have no CLI subcommand behind it, the capability
+  is missing from the CLI and that is the thing to fix. Its tests skip
+  without `uv sync --extra mcp`; check the skip count.
 - The UI's units are fixed: rates in **percent per year**, trading costs
   in **basis points**; the CLI and `.env` take rates as decimal fractions
   (`0.04` = 4%) and say so in their help. Do not add an input that leaves

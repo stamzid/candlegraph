@@ -16,27 +16,27 @@ timeline, the root causes, and the follow-ups, and its Status closes when
 every follow-up has landed or been explicitly declined.
 
 The rollout plan is the other exception: it is *how and in what order*,
-sequencing decisions that the design documents already made. There is one
-current rollout (`rollout/ROLLOUT.md`, Status `current`); its progress
-table is updated every working session, and a finished rollout is archived
-under `rollout/archive/` when the next one takes its place. A rollout step
-never changes a design silently — it changes the design document in the
-same step or it follows it.
+sequencing decisions that the design documents already made. There is at
+most one current rollout (`rollout/ROLLOUT.md`, Status `current`); its
+progress table is updated every working session, and a finished rollout is
+archived under `rollout/archive/`. A rollout step never changes a design
+silently — it changes the design document in the same step or it follows
+it. Between stages there is no current rollout, and `ROLLOUT.md` says so.
 
 | Document | Status | Covers |
 |---|---|---|
 | [`roadmap/`](roadmap/DESIGN.md) | living | What has been delivered, what comes next, and the exit criterion for each stage. |
 | [`storage/timescaledb/`](storage/timescaledb/DESIGN.md) | implemented | Adopting the TimescaleDB extension: the image, the migration, and the policies deliberately left off. |
 | [`storage/table-placement/`](storage/table-placement/DESIGN.md) | implemented | Which tables are hypertables and which stay plain, with the rule for deciding the next one. |
-| [`storage/pgvector-coexistence/`](storage/pgvector-coexistence/DESIGN.md) | in progress: image switch and corpus tables done | How pgvector sits beside TimescaleDB in the one instance: the four table families, the query paths side by side, and what changes operationally. |
-| [`rollout/`](rollout/ROLLOUT.md) | current | **The current rollout plan** — ordered, turn-sized steps for stage 1 with a progress table. One current rollout at a time; finished ones move to `rollout/archive/`. |
-| [`knowledge/graph/`](knowledge/graph/DESIGN.md) | in progress: schema through the observer's knowledge findings (steps 2–9) done | Stage 1: the knowledge schema, time-series versus relational placement, the retrieval and explanation flow, and how it attaches to the observer and janitor. |
-| [`knowledge/vector-store/`](knowledge/vector-store/DESIGN.md) | proposed | pgvector in the existing database, compared with Qdrant, Chroma, Neo4j and Apache AGE; the image change it implies and the triggers that would revisit it. |
+| [`storage/pgvector-coexistence/`](storage/pgvector-coexistence/DESIGN.md) | implemented | How pgvector sits beside TimescaleDB in the one instance: the four table families, the query paths side by side, and what changes operationally. |
+| [`rollout/`](rollout/ROLLOUT.md) | none current | **The current rollout plan**, when there is one — ordered, turn-sized steps with a progress table. One at a time; finished ones move to `rollout/archive/`. |
+| [`knowledge/graph/`](knowledge/graph/DESIGN.md) | implemented | Stage 1: the knowledge schema, time-series versus relational placement, the retrieval and explanation flow, and how it attaches to the observer and janitor. |
+| [`knowledge/vector-store/`](knowledge/vector-store/DESIGN.md) | implemented | pgvector in the existing database, compared with Qdrant, Chroma, Neo4j and Apache AGE; the image change it implied and the triggers that would revisit it. |
 | [`knowledge/embeddings/`](knowledge/embeddings/DESIGN.md) | implemented (eval set pending) | Embedding models compared (OpenAI, Voyage, Cohere, Gemini, bge-m3, Qwen3, nomic, …); 1024 dimensions fixed; a local free default; reuse in the harness. |
 | [`knowledge/tavily/`](knowledge/tavily/DESIGN.md) | implemented (including the explain() wiring, step 8) | Web search as a metered source: credit budget guard, `(asset, day)` cache, the `source_call` ledger, REST rather than MCP. |
-| [`knowledge/mcp/`](knowledge/mcp/DESIGN.md) | proposed |
+| [`knowledge/mcp/`](knowledge/mcp/DESIGN.md) | implemented (stage-2 `run_pipeline` tool excepted) | A read-only MCP server over existing functions, useful now for operating the stack; agents as MCP clients later; not for Tavily. |
 | [`knowledge/ragflow/`](knowledge/ragflow/DESIGN.md) | evaluated, not adopted | RAGFlow as a second retrieval backend: what it is, cost, head-to-head with the step-7 hybrid retrieval, why it is overkill for this corpus, the triggers that would change that, and how it would plug in. |
-| [`knowledge/sources/`](knowledge/sources/DESIGN.md) | exploration | Where the text and fundamentals would come from: a survey of free APIs for filings, news, macro rates and on-chain context, ranked by cost and fit, with the order to adopt them. No code. | A read-only MCP server over existing functions, useful now for operating the stack; agents as MCP clients later; not for Tavily. |
+| [`knowledge/sources/`](knowledge/sources/DESIGN.md) | exploration | Where the text and fundamentals would come from: a survey of free APIs for filings, news, macro rates and on-chain context, ranked by cost and fit, with the order to adopt them. No code. |
 | [`analytics/models/`](analytics/models/DESIGN.md) | implemented | The statistics and models, with equations: returns and annualisation, rolling statistics, Bollinger, crossover, ARIMA, pairwise correlation and beta, Sharpe/Sortino/drawdown, Markowitz portfolios and the frontier, the backtester. |
 | [`analytics/risk/`](analytics/risk/DESIGN.md) | implemented; Tavily rate source planned | Risk management: systematic versus idiosyncratic risk, VaR and CVaR (three estimators), how to tune them, and the nominal/real risk-free rate seam. |
 | [`agents/framework/`](agents/framework/DESIGN.md) | implemented | The conventions every LangGraph agent follows: state, nodes, findings, narration, sinks, scheduling, testing. |

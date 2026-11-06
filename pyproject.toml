@@ -37,6 +37,11 @@ ui = [
 llm = [
     "anthropic>=0.40.0",
 ]
+# Optional: serves the read-only tool surface (`candlegraph mcp`) to an MCP
+# client. Nothing else imports it, so a core install is unaffected.
+mcp = [
+    "mcp>=2.3.0",
+]
 
 [dependency-groups]
 dev = [

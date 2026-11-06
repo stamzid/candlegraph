@@ -5,15 +5,20 @@ description: Build or extend candlegraph's knowledge layer (stage 1) — the pgv
 
 # Extend the knowledge graph
 
-The layer is **mostly built**: the schema, the asset sync, the document
-pipeline, embeddings, the Tavily source with its budget guard and ledger,
-alias entity linking, hybrid retrieval, `signals --explain` with its
-citation validator, and the observer's knowledge findings (rollout steps
-1–9) exist; only the MCP server and the closeout (step 10) do not. Read
+The layer is **built** (stage 1, delivered 2026-11-06): the schema, the
+asset sync, the document pipeline, embeddings, the Tavily source with its
+budget guard and ledger, alias entity linking, hybrid retrieval,
+`signals --explain` with its citation validator, the observer's knowledge
+findings, and the read-only MCP server. Read
 `docs/knowledge/graph/DESIGN.md` first and the four companions as you reach
-them. Every step below exists
+them. Every rule below exists
 because of a decision recorded there; do not reverse one in code without
 updating the document and its Status line.
+
+Two pieces were deliberately left unbuilt and are recorded as such: the
+embeddings evaluation set (`knowledge eval`, in
+`docs/knowledge/embeddings/DESIGN.md`) and the janitor's optional
+incident-similarity finding (in `docs/knowledge/graph/DESIGN.md`).
 
 ## 0. Before the first line of code
 
@@ -30,13 +35,12 @@ updating the document and its Status line.
   tables need no `period_start_unix` in their keys because they are not
   hypertables.
 
-## 1. Build order
+## 1. How it was built, and what proves each part
 
-**`docs/rollout/ROLLOUT.md` is the authoritative sequence** — it carries
-the progress table, per-step entry/exit criteria, and which steps may be
-combined in one session. Update its table when a step lands. The summary
-below maps the same work; if the two ever disagree, the rollout document
-wins and this summary gets fixed.
+The sequence and the per-step outcomes are in
+`docs/rollout/archive/2026-11-06-stage-1-knowledge-graph.md`. Read the row
+for the part you are changing: it says what landed, what was tested, and
+what was deliberately left out.
 
 | Step | Lands | Proven by |
 |---|---|---|
@@ -47,7 +51,26 @@ wins and this summary gets fixed.
 | e | `retrieve.py`: hybrid ANN + `tsvector`, RRF, `published_at ≤ bar` | integration on a seeded corpus; the no-look-ahead test |
 | f | `explain.py` + `validate.py` + `explanation` table; `signals --explain` | the exit criterion; the invented-citation rejection test |
 | g | observer `collect_knowledge` node and four findings | `add-agent` skill rules: pure assess, graph shape test updated |
-| h | `candlegraph mcp` (optional extra) | tools listed; `data_quality_report` matches `report --json` |
+| h | `candlegraph mcp` (optional extra) | tools listed over stdio; `data_quality_report` matches `report --json`; no listed tool writes market data |
+
+## 1b. Adding a tool to the MCP server
+
+`candlegraph/mcp/tools.py`, and nowhere else. A tool is a plain function
+whose **signature and docstring are its JSON schema**: no `db` or
+`settings` parameter (resolve them inside, as the Streamlit script does),
+units spelled out, and a note wherever a number is easy to misread. Put
+the `@boundary` decorator on it — that redacts the result and every
+escaping error — return a JSON-able dict built in `payloads.py` (where
+`NaN` becomes `null`), and add a `ToolSpec` to `TOOLS` saying truthfully
+whether it writes and what. A read-only tool is then checked by
+`test_no_read_only_tool_writes_anything`, which is driven off that
+registry, so skipping the entry fails the build rather than slipping
+through.
+
+Two rules from `docs/knowledge/mcp/DESIGN.md` do not bend: a tool must
+wrap something that already has a CLI subcommand behind it — if it does
+not, the capability is missing from the CLI and that is the bug — and no
+tool writes market data.
 
 ## 2. Adding a source
 
@@ -136,9 +159,15 @@ prices and a corpus and prove the exit criterion and the no-look-ahead rule.
 - **Secrets stay in `.env`.** `TAVILY_API_KEY` is a `SecretStr`, redacted
   before it can reach a report, and `.env.example` documents it empty.
 
+- **No tool writes market data either.** The MCP surface inherits the same
+  rule (invariant 21): `observe` writes an `agent_run` row,
+  `explain_signal` writes an `explanation`, and nothing else writes at all.
+
 ## 6. Finish
 
-`docs/knowledge/*/DESIGN.md` Status lines → `implemented` as each lands;
-`docs/README.md`, `AGENTS.md` (commands, layout, data model, invariants),
-`README.md`, `.env.example`; then `make check` and the `release-check`
-skill.
+Keep `docs/knowledge/*/DESIGN.md` Status lines truthful as things change;
+update `docs/README.md`, `AGENTS.md` (commands, layout, data model,
+invariants), `README.md` and `.env.example` in the same change; then
+`make check` and the `release-check` skill. Anything touching the MCP
+surface needs `uv sync --extra mcp` locally, or its tests skip rather than
+fail — check the skip count before reading a green run as proof.

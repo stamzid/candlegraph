@@ -1,6 +1,9 @@
 # MCP: exposing candlegraph as tools, now and later
 
-**Status:** proposed — 2026-10-29
+**Status:** implemented — 2026-11-06 (rollout step 10). `candlegraph mcp`
+serves the fourteen "now" and stage-1 tools over stdio (or streamable HTTP),
+plus the design documents as resources and two prompts. The stage-2
+`run_pipeline` tool is the only row below still unbuilt.
 **Decision:** a read-only MCP **server** over the functions the CLI already
 calls, worth building early because it is cheap and it would have
 shortened both incidents in `docs/incidents/`. Not an MCP **client** for
@@ -44,27 +47,51 @@ write are marked and gated.
 
 | Tool | Wraps | Stage | Writes? |
 |---|---|---|---|
-| `status()` | `GET /status` body | now | no |
-| `recent_ingest_runs(limit)` | `ledger.recent_runs` | now | no |
-| `data_quality_report(days)` | `quality.build_report` | now | no |
-| `candles(symbol, hours, start, end)` | `api.schema` resolver / `formatting` | now | no |
-| `stats(symbol, window)`, `compare(a, b, window)` | `analytics.rolling`, `analytics.pairwise` | now | no |
-| `signals(symbol, strategy)` | `strategies` | now | no |
-| `backtest(symbol, strategy, …)` | `strategies.backtest` | now | no |
-| `agent_runs(agent, limit)`, `latest_agent_report(agent)` | `agents.ledger` | now | no |
-| `observe()` | `run_observer` | now | ledger row only (it is an agent run) |
-| `explain_signal(symbol, strategy, bar)` | `knowledge.explain` | stage 1 | `explanation`, `document` rows; **may spend credits under the budget guard** |
-| `search_knowledge(query, asset, before)` | `knowledge.retrieve` | stage 1 | no (database only; never calls Tavily) |
-| `knowledge_budget()` | `source_call` sums | stage 1 | no |
+| `status()` | `api.status.status_body` — the `GET /status` body | built | no |
+| `recent_ingest_runs(limit)` | `ledger.recent_runs` | built | no |
+| `data_quality_report(days)` | `quality.build_report` → `report_dict` | built | no |
+| `candles(symbol, hours, start, end)` | `api.schema.fetch_chart_data` / `formatting` | built | no |
+| `stats(symbol, window, days)`, `compare(a, b, window, days)` | `analytics.rolling`, `analytics.pairwise` | built | no |
+| `signals(symbol, strategy, days, tail)` | `strategies` | built | no |
+| `backtest(symbol, strategy, …)` | `strategies.backtest` | built | no |
+| `agent_runs(agent, limit)`, `latest_agent_report(agent)` | `agents.ledger` | built | no |
+| `observe()` | `run_observer` | built | ledger row only (it is an agent run) |
+| `explain_signal(symbol, strategy, at, search)` | `knowledge.explain_symbol` | built | `explanation`, and `document`/`source_call` with `search=true`; **may spend credits under the budget guard** |
+| `search_knowledge(query, symbol, before, …)` | `knowledge.retrieve` | built | no (database only; never calls Tavily) |
+| `knowledge_budget()` | `source_call` sums + `budget` grading | built | no |
 | `run_pipeline(spec)` | the harness | stage 2 | yes; gated by a setting, off by default |
+
+Each tool's signature and docstring **are** its JSON schema, which is why
+they live in `candlegraph/mcp/tools.py` with no `db` or `settings`
+parameter and with the units spelled out. Two decisions worth recording
+because they only show up at the boundary:
+
+- **`report --json` was added in this step** so `data_quality_report()` has
+  something to be identical to. Both call `quality.report_dict`, and a unit
+  test compares them field for field; without that the exit criterion is
+  unfalsifiable.
+- **`NaN` is not JSON.** Pandas returns it for "not computable yet", so
+  every number goes through `payloads.finite`, which maps it to `null` —
+  invariant 11's rule, enforced at the one place a non-finite float would
+  otherwise produce output no parser accepts.
 
 Resources (read-only, URI-addressed) suit the design documents and the
 incident post-mortems: `candlegraph://docs/roadmap`,
 `candlegraph://incidents/2026-10-28-stack-would-not-start`. A client can
 pull the relevant document into context instead of the operator pasting
-it. Prompts can package the reading order the skills describe ("to judge a
-coverage finding, call `data_quality_report`, then check average hourly
-volume for the token, then…").
+it. Prompts package the reading order the skills describe.
+
+As built: the URI **is** the directory layout —
+`docs/<area>/<topic>/DESIGN.md` is `candlegraph://docs/<area>/<topic>`,
+`docs/incidents/<slug>/POSTMORTEM.md` is `candlegraph://incidents/<slug>`,
+and `docs/rollout/ROLLOUT.md` is `candlegraph://docs/rollout`. A document
+added to `docs/` is served without anyone editing the server, and each
+resource's description carries the document's own **Status** line, because
+"does this describe code or an idea" is the first thing a reader needs.
+Each reader is bound to one path, so there is no parameter to traverse
+with. The two prompts are `judge_coverage` (is this token's low coverage a
+fault or a thin market?) and `triage_stack` (what order to read things in),
+both copies of judgement already written down in `.claude/skills/`.
 
 ## Where it runs
 
@@ -100,9 +127,10 @@ flowchart LR
 
 - **A sixth compose service is not needed for the local case.** Claude
   Code launches `candlegraph mcp` over stdio with `DB_HOST=localhost` and
-  the published port. For the stack-internal case (agents calling tools in
-  stage 2) the same command runs with `--transport http` inside the
-  `agents` container.
+  the published port — which is what `make mcp` sets. For the
+  stack-internal case (agents calling tools in stage 2) the same command
+  runs with `--transport http` inside the `agents` container. No compose
+  service was added in step 10, and none is needed until stage 2 wants one.
 - **The server imports the same modules the CLI does**, so there is one
   implementation of each capability. If a function exists only as an MCP
   tool and not as a CLI subcommand, that is a smell: the Makefile is the
@@ -153,9 +181,18 @@ wants to search by hand from Claude Code, they can add Tavily's own MCP
 server to their client under their own key; the pipeline's budget is not
 touched.
 
-## Exit criterion (when built)
+## Exit criterion
 
 `candlegraph mcp` starts over stdio; a client lists at least the
 "now" tools; `data_quality_report()` returns the same structure
 `candlegraph report --json` prints; and no tool in the listing can write
 market data.
+
+**Met, 2026-11-06.** `tests/integration/test_mcp.py` starts the real
+process, lists fourteen tools, calls `data_quality_report` and compares it
+with a direct `build_report` on the same database, and asserts that the
+only two tools without `readOnlyHint` are `observe` and `explain_signal`.
+In the unit tier, `test_tools.py` compares the tool against the parsed
+output of `report --json`, and drives the "writes nothing" check off the
+tool registry rather than a hand-kept list, so a tool added without a
+placement decision fails the build.

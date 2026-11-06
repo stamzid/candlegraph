@@ -15,24 +15,19 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import psycopg2
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from strawberry.fastapi import GraphQLRouter
 
 from candlegraph.api.schema import chart_schema
-from candlegraph.ingestion.ledger import seconds_since_last_success
+from candlegraph.api.status import STALE_AFTER_INTERVALS, status_body
 from candlegraph.ingestion.worker import INGEST_JOB_ID, build_scheduler, ingest_tick
 from candlegraph.settings import Settings, get_settings
 from candlegraph.storage import get_db, set_db
-from candlegraph.tokens import get_token_registry
 from candlegraph.utils.logging_utils import configure_logging, quiet_health_probes, service_logger
 
-__all__ = ["INGEST_JOB_ID", "build_scheduler", "create_app", "ingest_job"]
-
-# Data is called stale after this many missed poll intervals.
-STALE_AFTER_INTERVALS = 3
+__all__ = ["INGEST_JOB_ID", "STALE_AFTER_INTERVALS", "build_scheduler", "create_app", "ingest_job"]
 
 
 def ingest_job(settings: Settings) -> None:
@@ -77,34 +72,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def status() -> JSONResponse:
         """Liveness, a real database round-trip, and ingest freshness.
 
-        One round trip, not two: the freshness read *is* the liveness probe.
-        A separate ``SELECT 1`` before it doubled the queries of the most
-        frequent request this service answers — the compose health probe —
-        and proved nothing the ledger read does not.
+        The body is built by :func:`candlegraph.api.status.status_body`, which
+        the ``status`` MCP tool also calls, so both surfaces report the same
+        thing. Only the HTTP status code is decided here.
         """
-        db = get_db()
-        try:
-            age: float | None = seconds_since_last_success(db)
-            database_up = True
-        except psycopg2.Error as exc:
-            service_logger.warning("Database unreachable from /status: %s", exc)
-            age, database_up = None, False
-
-        body: dict[str, object] = {
-            "status": "ok" if database_up else "degraded",
-            "database": "up" if database_up else "down",
-            "ingest": "enabled" if settings.ingest_enabled else "disabled",
-            "tokens": list(get_token_registry().symbols),
-        }
-
-        if database_up:
-            # Reported, never fatal: the API serving stale data is still the
-            # API working. Alerting on staleness is the observer's job.
-            body["last_ingest_seconds_ago"] = None if age is None else round(age)
-            body["data_fresh"] = (
-                age is not None and age <= settings.data_poll_interval * STALE_AFTER_INTERVALS
-            )
-
+        body, database_up = status_body(get_db(), settings)
         return JSONResponse(body, status_code=200 if database_up else 503)
 
     app.include_router(GraphQLRouter(chart_schema), prefix="/graphql")

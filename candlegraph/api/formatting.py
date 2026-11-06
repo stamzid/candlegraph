@@ -63,6 +63,28 @@ def format_chart_data(data: list[dict[str, Any]]) -> list[list[list[Any]]]:
     return [series[price_type] for price_type in PRICE_TYPES]
 
 
+def format_candle_rows(data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reshape the same bucket rows into one record per candle.
+
+    The five parallel series :func:`format_chart_data` builds are the shape
+    the chart library wants. A caller reasoning about a bar — the ``candles``
+    MCP tool — wants the bar instead, so this folds the same fields the other
+    way. Both read the identical rows and the identical keys, so a bucket
+    cannot mean one thing here and another there.
+    """
+    return [
+        {
+            "time": to_utc_iso(record["interval_start"]),
+            "open": _as_float((record.get("opens") or [None])[0]),
+            "high": _as_float(record.get("max_high")),
+            "low": _as_float(record.get("min_low")),
+            "close": _as_float((record.get("closes") or [None])[0]),
+            "price_usd": _as_float(record.get("avg_price_usd")),
+        }
+        for record in data
+    ]
+
+
 def empty_chart_data() -> list[list[list[Any]]]:
     """The placeholder payload returned when a token has no stored rows."""
     return [[["", price_type, 0.0]] for price_type in PRICE_TYPES]

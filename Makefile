@@ -12,7 +12,7 @@ E2E_URL ?= http://localhost:$${APP_HOST_PORT:-8000}
 .PHONY: help install lock fmt fmt-check lint typecheck test test-unit test-integration \
         cov check up down reset logs logs-worker ps migrate revision e2e sdl clean \
         ingest backfill report runs ui logs-ui observe janitor agent-runs logs-agents sync-assets \
-        up-knowledge logs-ollama embed reembed fetch-news search link-mentions explain
+        up-knowledge logs-ollama embed reembed fetch-news search link-mentions explain mcp
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -81,6 +81,15 @@ logs-agents: ## Follow the agents log (observer reports land here)
 
 ui: ## Run the Streamlit UI locally against the stack's database
 	$(UV) run --extra ui python -m candlegraph ui
+
+mcp: ## Serve the read-only tools over MCP on stdio, against the stack's database
+	@# The published ports, not the compose network names: this process runs on
+	@# the host. OLLAMA_URL matters as much as DB_HOST — pointing it at the
+	@# in-compose name leaves retrieval on the lexical leg alone, which is the
+	@# fault docs/incidents/2026-11-04-explain-ran-lexical-only/ is about.
+	DB_HOST=$${DB_HOST:-localhost} DB_PORT=$${POSTGRES_HOST_PORT:-5432} \
+		OLLAMA_URL=$${OLLAMA_URL:-http://localhost:$${OLLAMA_HOST_PORT:-11434}} \
+		$(UV) run --extra mcp python -m candlegraph mcp $(ARGS)
 
 ps: ## Show the stack's status
 	$(COMPOSE) ps

@@ -160,6 +160,27 @@ def test_strict_report_passes_on_a_clean_database(
     assert "OK:" in capsys.readouterr().out
 
 
+def test_report_json_prints_the_structure_the_mcp_tool_returns(
+    cli_env: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``report --json`` is the reference the MCP exit criterion names."""
+    import json
+
+    assert main(["report", "--json"]) == 0
+    parsed = json.loads(capsys.readouterr().out)
+
+    assert parsed["missing_tokens"] == ["WBTC", "SHIB"]
+    assert parsed["ok"] is False
+    assert parsed["tokens"] == []
+
+
+def test_report_json_and_strict_compose(cli_env: FakeDatabase, capsys: pytest.CaptureFixture[str]) -> None:
+    import json
+
+    assert main(["report", "--json", "--strict"]) == 1
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+
+
 def test_report_window_is_passed_through(cli_env: FakeDatabase, capsys: pytest.CaptureFixture[str]) -> None:
     main(["report", "--days", "7"])
 
@@ -411,3 +432,50 @@ def test_knowledge_link_mentions_backfills_and_reports(
 
     assert "linked 1 documents, 1 new mentions" in capsys.readouterr().out
     assert [label for label, _ in cli_env.upserts] == ["upsert_asset", "upsert_mentions"]
+
+
+# --- mcp -------------------------------------------------------------------
+
+
+def test_mcp_serves_over_stdio_by_default(cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr("candlegraph.mcp.server.run_server", lambda **kwargs: captured.update(kwargs))
+
+    assert main(["mcp"]) == 0
+
+    assert captured == {"transport": "stdio", "host": "127.0.0.1", "port": 8900}
+
+
+def test_mcp_can_serve_over_http_for_a_client_in_another_container(
+    cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr("candlegraph.mcp.server.run_server", lambda **kwargs: captured.update(kwargs))
+
+    assert main(["mcp", "--transport", "http", "--host", "0.0.0.0", "--port", "9100"]) == 0
+
+    assert captured == {"transport": "http", "host": "0.0.0.0", "port": 9100}
+
+
+def test_mcp_without_the_extra_says_how_to_install_it(
+    cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `ui` command's rule: an optional extra explains itself, never traces."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def refuse(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "candlegraph.mcp.server":
+            raise ImportError("No module named 'mcp'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse)
+
+    with pytest.raises(SystemExit, match=r"uv sync --extra mcp"):
+        main(["mcp"])
+
+
+def test_an_unknown_mcp_transport_is_rejected_by_the_parser(cli_env: FakeDatabase) -> None:
+    with pytest.raises(SystemExit):
+        main(["mcp", "--transport", "carrier-pigeon"])
