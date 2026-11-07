@@ -6,6 +6,12 @@ unit tests can assert on it without a connection.
 
 Nothing in this module deletes market data. That is an invariant, not an
 oversight: stored history is the input to the analytics phases.
+
+The three ``DELETE`` statements here all target ``token_hours_fill``, which
+is a cache of *derived* prices for hours that were never ingested — not
+market data, and provisional by design. Invariant 4 is about observations;
+an estimate that has been superseded by a real row is not merely stale but
+wrong, and keeping it would be the bug.
 """
 
 from __future__ import annotations
@@ -156,6 +162,28 @@ _SIGNAL_TEMPLATE = (
 )
 
 
+# --- token_hours_fill ------------------------------------------------------
+#
+# The derived-fill cache. Only hours that have no `token_hours_data` row ever
+# land here, and `method` is part of the key so two estimators can coexist.
+
+FILL_COLUMNS = (
+    "token_id",
+    "symbol",
+    "period_start_unix",
+    "method",
+    "price_usd",
+    "close",
+    "gap_hours",
+    "computed_at",
+)
+
+_FILL_TEMPLATE = (
+    "(%(token_id)s,%(symbol)s,%(period_start_unix)s,%(method)s,"
+    "%(price_usd)s,%(close)s,%(gap_hours)s,%(computed_at)s)"
+)
+
+
 @dataclass(frozen=True)
 class Statements:
     """Every SQL statement, bound to a schema name.
@@ -197,6 +225,13 @@ class Statements:
     missing_hours: sql.Composed
     ohlc_violations: sql.Composed
     field_completeness: sql.Composed
+    # the derived-fill cache (not market data; see the module docstring)
+    insert_token_hours_fill: sql.Composed
+    insert_token_hours_fill_template: str
+    get_token_hours_fill: sql.Composed
+    delete_superseded_fills: sql.Composed
+    delete_fills_for_method: sql.Composed
+    fill_cache_summary: sql.Composed
     # agents
     insert_agent_run: sql.Composed
     get_recent_agent_runs: sql.Composed
@@ -516,6 +551,83 @@ def statements_for(schema: str) -> Statements:
         """
     ).format(ns=ns)
 
+    # --- the derived-fill cache --------------------------------------------
+    #
+    # The only statements in this module that DELETE, and they delete
+    # estimates rather than observations. See the module docstring.
+
+    insert_token_hours_fill = sql.SQL(
+        """
+        INSERT INTO {ns}.token_hours_fill ({cols})
+        VALUES %s
+        ON CONFLICT (token_id, period_start_unix, method) DO UPDATE SET
+            {updates}
+        RETURNING id
+        """
+    ).format(
+        ns=ns,
+        cols=sql.SQL(_columns(*FILL_COLUMNS)),
+        updates=sql.SQL(_excluded(FILL_COLUMNS, key=("token_id", "period_start_unix", "method"))),
+    )
+
+    get_token_hours_fill = sql.SQL(
+        """
+        SELECT
+            symbol,
+            token_id,
+            period_start_unix,
+            method,
+            price_usd,
+            close,
+            gap_hours,
+            computed_at
+        FROM {ns}.token_hours_fill
+        WHERE symbol = ANY(%(symbols)s)
+          AND method = %(method)s
+          AND (%(start_unix)s::bigint IS NULL OR period_start_unix >= %(start_unix)s)
+          AND (%(end_unix)s::bigint IS NULL OR period_start_unix < %(end_unix)s)
+        ORDER BY symbol, period_start_unix
+        """
+    ).format(ns=ns)
+
+    # A cached fill is a statement about an hour that had no row. The moment
+    # ingestion supplies that hour, the estimate is not merely stale, it is
+    # wrong — so it goes, whatever produced it.
+    delete_superseded_fills = sql.SQL(
+        """
+        DELETE FROM {ns}.token_hours_fill f
+        USING {ns}.token_hours_data d
+        WHERE f.token_id = d.token_id
+          AND f.period_start_unix = d.period_start_unix
+        """
+    ).format(ns=ns)
+
+    # Recomputing a method wholesale: the cap or the estimator changed, so
+    # every row it produced is suspect.
+    delete_fills_for_method = sql.SQL(
+        """
+        DELETE FROM {ns}.token_hours_fill
+        WHERE method = %(method)s
+          AND (%(symbols)s::text[] IS NULL OR symbol = ANY(%(symbols)s))
+        """
+    ).format(ns=ns)
+
+    fill_cache_summary = sql.SQL(
+        """
+        SELECT
+            symbol,
+            method,
+            COUNT(*) AS filled_hours,
+            MAX(gap_hours) AS longest_gap_hours,
+            MIN(period_start_unix) AS first_unix,
+            MAX(period_start_unix) AS last_unix,
+            MAX(computed_at) AS computed_at
+        FROM {ns}.token_hours_fill
+        GROUP BY symbol, method
+        ORDER BY symbol, method
+        """
+    ).format(ns=ns)
+
     # --- agents ------------------------------------------------------------
 
     # One row per graph run. Agents never write market data; this table and
@@ -572,6 +684,12 @@ def statements_for(schema: str) -> Statements:
         missing_hours=missing_hours,
         ohlc_violations=ohlc_violations,
         field_completeness=field_completeness,
+        insert_token_hours_fill=insert_token_hours_fill,
+        insert_token_hours_fill_template=_FILL_TEMPLATE,
+        get_token_hours_fill=get_token_hours_fill,
+        delete_superseded_fills=delete_superseded_fills,
+        delete_fills_for_method=delete_fills_for_method,
+        fill_cache_summary=fill_cache_summary,
         insert_agent_run=insert_agent_run,
         get_recent_agent_runs=get_recent_agent_runs,
     )

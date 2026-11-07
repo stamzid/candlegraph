@@ -35,7 +35,13 @@ from candlegraph.analytics.portfolio import (
     efficient_frontier,
     optimise_portfolio,
 )
-from candlegraph.analytics.prices import load_price_frame, load_price_history, to_wide, window_bounds
+from candlegraph.analytics.prices import (
+    DEFAULT_MAX_FILL,
+    load_price_frame,
+    load_price_history,
+    to_wide,
+    window_bounds,
+)
 from candlegraph.analytics.risk import (
     METHODS,
     RiskConfig,
@@ -54,6 +60,14 @@ from candlegraph.analytics.rolling import (
     periods_per_year,
     rolling_summary,
     simple_returns,
+)
+from candlegraph.ingestion.fills import (
+    LINEAR,
+    FillSummary,
+    fill_cache_summary,
+    load_fills,
+    method_is_causal,
+    refresh_fill_cache,
 )
 from candlegraph.ingestion.quality import (
     HOUR,
@@ -96,6 +110,11 @@ DEFAULT_SYMBOL = "WBTC"
 # A dollar: the natural reference for "how did this do", and a stable leg for
 # the relative-value ratio.
 DEFAULT_BENCHMARK = "USDT"
+# Compare opens on two volatile majors instead. Pricing a token in USDT is a
+# dollar chart, which the Token dashboard already draws; the question this
+# screen answers — do these two move together, and which one leads — needs a
+# second asset that actually moves.
+DEFAULT_PAIR = ("WETH", "WBTC")
 # USD-pegged assets have near-zero variance and swallow any minimum-risk
 # objective, so a default book leaves them out. They are one click away.
 STABLECOINS = frozenset({"USDC", "USDT", "DAI"})
@@ -114,6 +133,80 @@ def default_index(options: list[str], preferred: str = DEFAULT_SYMBOL, exclude: 
         if option != exclude:
             return position
     return 0
+
+
+# --- remembering what the user picked ----------------------------------------
+
+# Streamlit drops a widget's state as soon as a rerun does not instantiate
+# it, so switching dashboard and coming back resets every control on the page
+# you left. Mirroring the choices into a plain namespace under this prefix is
+# what survives the round trip; the widgets re-open on the mirror.
+PREFIX = "pref:"
+
+
+class Preferences:
+    """The last choice made on each control, kept across dashboard switches.
+
+    Wraps any mutable mapping — ``st.session_state`` in the app, a plain
+    ``dict`` in the tests — so the remembering logic is ordinary Python and
+    carries its own coverage. It stores only what the user picked, never a
+    derived number: a stale *result* would be a bug, a stale *selection* is
+    the point.
+    """
+
+    def __init__(self, store: Any) -> None:
+        self._store = store
+
+    def _key(self, name: str) -> str:
+        return f"{PREFIX}{name}"
+
+    def get(self, name: str, fallback: Any = None) -> Any:
+        """What was chosen for ``name`` last time, or ``fallback``."""
+        try:
+            return self._store[self._key(name)]
+        except KeyError:
+            return fallback
+
+    def remember(self, name: str, value: Any) -> Any:
+        """Record ``value`` as the current choice and hand it straight back."""
+        self._store[self._key(name)] = value
+        return value
+
+    def index(self, name: str, options: list[str], fallback: int = 0) -> int:
+        """Where a remembered option sits in ``options`` today.
+
+        Falls back when the remembered value is gone — a token can leave the
+        list between visits, and a stale index would silently select the
+        wrong one rather than failing.
+        """
+        remembered = self.get(name)
+        if isinstance(remembered, str) and remembered in options:
+            return options.index(remembered)
+        return fallback if 0 <= fallback < len(options) else 0
+
+    def multiselect(self, name: str, options: list[str], fallback: list[str]) -> list[str]:
+        """Remembered multi-selection, narrowed to what is still available."""
+        remembered = self.get(name)
+        if isinstance(remembered, list):
+            kept = [value for value in remembered if value in options]
+            if kept:
+                return kept
+        return [value for value in fallback if value in options]
+
+    def names(self) -> list[str]:
+        return sorted(str(k)[len(PREFIX) :] for k in list(self._store) if str(k).startswith(PREFIX))
+
+    def reset(self) -> int:
+        """Forget every remembered choice. Returns how many were cleared.
+
+        Only the ``pref:`` namespace goes: a pending backfill confirmation or
+        a news fetch in flight is not a preference, and clearing those would
+        turn a harmless button into a surprising one.
+        """
+        keys = [k for k in list(self._store) if str(k).startswith(PREFIX)]
+        for key in keys:
+            del self._store[key]
+        return len(keys)
 
 
 def default_portfolio_symbols(symbols: list[str], limit: int = 5) -> list[str]:
@@ -200,6 +293,38 @@ def observed_gaps(unix_hours: Any) -> list[Gap]:
     seen = set(present)
     missing = [unix for unix in range(present[0], present[-1] + HOUR, HOUR) if unix not in seen]
     return group_missing_hours(missing)
+
+
+def fill_overlay(prices: pd.Series, fills: pd.DataFrame) -> pd.Series:
+    """Interpolated hours plus the observed bar either side of each run. Pure.
+
+    Anchoring on the neighbours is what makes the overlay readable: a bare
+    scatter of filled points inside a gap says nothing about what it was
+    drawn between, and a line that starts and ends on a real bar says
+    exactly that.
+    """
+    if fills.empty or prices.empty:
+        return pd.Series(dtype="float64")
+
+    observed = prices.dropna().astype("float64")
+    estimates = pd.Series(
+        fills["price_usd"].to_numpy(dtype="float64"),
+        index=pd.DatetimeIndex(fills["timestamp"]),
+    )
+    combined = pd.concat([observed, estimates]).sort_index()
+    combined = combined[~combined.index.duplicated(keep="first")]
+
+    keep = pd.Series(False, index=combined.index)
+    keep.loc[estimates.index] = True
+    positions = [combined.index.get_loc(moment) for moment in estimates.index]
+    for position in positions:
+        # The observation on each side of a filled hour anchors the segment.
+        for neighbour in (position - 1, position + 1):
+            if 0 <= neighbour < len(combined):
+                keep.iloc[neighbour] = True
+
+    overlay: pd.Series = combined.where(keep)
+    return overlay
 
 
 def longest_gaps(gaps: list[Gap], limit: int) -> list[Gap]:
@@ -299,6 +424,33 @@ class TokenView:
     (invariant 19) — Uniswap emits no row for an hour with no swaps — but a
     reader comparing two charts deserves to know which one has holes in it.
     """
+    fills: pd.DataFrame = field(default_factory=pd.DataFrame)
+    """Cached estimates for those hours, read rather than recomputed.
+
+    Empty when the cache has not been refreshed, which is a normal state and
+    not an error. These are **display only**: the stored method is linear
+    interpolation, which reads the gap's right endpoint, so nothing that
+    trades may consume them.
+    """
+
+    @property
+    def filled_hours(self) -> int:
+        return len(self.fills)
+
+    @property
+    def fill_method(self) -> str | None:
+        return str(self.fills.iloc[0]["method"]) if self.filled_hours else None
+
+    @property
+    def fill_overlay(self) -> pd.Series:
+        """The interpolated path, anchored to the real bar on either side.
+
+        Each run of filled hours is drawn as one connected segment that
+        starts and ends on an observation, so the line visibly bridges the
+        hole rather than floating inside it. Everything outside a run is
+        ``NaN``, which is what keeps the segments separate.
+        """
+        return fill_overlay(self.prices, self.fills)
 
     @property
     def bars(self) -> int:
@@ -348,6 +500,7 @@ def build_token_view(
     window: int,
     num_std: float = 2.0,
     interval_hours: int = 1,
+    fill_method: str = LINEAR,
 ) -> TokenView:
     """Candles plus every per-token statistic the token dashboard plots."""
     start_unix, end_unix = window_bounds(days)
@@ -383,6 +536,10 @@ def build_token_view(
         # The rows that were actually read, not a reindexed grid: this is the
         # one place that knows which hours the subgraph really emitted.
         gaps=observed_gaps(history.for_symbol(symbol)["period_start_unix"]),
+        # Read, never recomputed: `candlegraph fill` (or the Quality page's
+        # button) is what populates this, so a widget change costs one
+        # indexed select rather than an interpolation over the whole window.
+        fills=load_fills(db, [symbol], method=fill_method, start_unix=start_unix, end_unix=end_unix),
     )
 
 
@@ -561,6 +718,27 @@ class QualityView:
     completeness: pd.DataFrame
     violations: pd.DataFrame
     generated_at: datetime
+    fill_cache: pd.DataFrame = field(default_factory=pd.DataFrame)
+    """One row per (symbol, method): how many hours are cached and how old."""
+
+    @property
+    def cached_hours(self) -> int:
+        if self.fill_cache.empty:
+            return 0
+        return int(self.fill_cache["filled_hours"].astype("int64").sum())
+
+    @property
+    def fillable_hours(self) -> int:
+        """Missing hours short enough to be worth estimating, per the cap."""
+        if self.gaps.empty:
+            return 0
+        within = self.gaps[self.gaps["hours"] <= DEFAULT_MAX_FILL]
+        return int(within["hours"].sum())
+
+    @property
+    def cache_is_stale(self) -> bool:
+        """Whether a refresh would change anything a reader can see."""
+        return self.cached_hours != self.fillable_hours
 
     @property
     def min_expected_coverage(self) -> float:
@@ -625,7 +803,23 @@ def build_quality_view(
         completeness=completeness_frame(report.completeness),
         violations=pd.DataFrame(report.violations),
         generated_at=report.generated_at,
+        fill_cache=fill_cache_summary(db),
     )
+
+
+def run_fill_refresh_now(db: DatabaseManager, symbols: list[str], method: str = LINEAR) -> FillSummary:
+    """Recompute and store the display-only fills. The one write this page makes.
+
+    Behind an explicit button, because Streamlit re-runs the whole script on
+    every widget change and this writes rows. It touches no market data —
+    only ``token_hours_fill`` — so coverage and every observer finding are
+    unaffected by pressing it.
+    """
+    if not symbols:
+        raise ViewError("No tokens with stored history to fill.")
+    if method_is_causal(method):  # pragma: no cover - no causal method exists yet
+        raise ViewError(f"{method!r} is causal and belongs in the strategy path, not this cache.")
+    return refresh_fill_cache(db, symbols, method=method)
 
 
 # --- risk dashboard ----------------------------------------------------------

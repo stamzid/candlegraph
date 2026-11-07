@@ -16,7 +16,7 @@ Run it with ``candlegraph ui`` (or ``streamlit run candlegraph/ui/app.py``).
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -24,9 +24,10 @@ import streamlit as st
 
 from candlegraph.agents.stages import format_stage
 from candlegraph.analytics.arima import ArimaConfig
-from candlegraph.analytics.portfolio import OBJECTIVES, PortfolioConfig
+from candlegraph.analytics.portfolio import OBJECTIVES, Objective, PortfolioConfig
+from candlegraph.analytics.prices import DEFAULT_MAX_FILL
 from candlegraph.analytics.rates import real_rate
-from candlegraph.analytics.risk import METHODS, RiskConfig
+from candlegraph.analytics.risk import METHODS, Method, RiskConfig
 from candlegraph.settings import Settings, get_settings
 from candlegraph.storage import DatabaseManager, get_db
 from candlegraph.strategies import available
@@ -36,9 +37,10 @@ from candlegraph.strategies.bollinger import BollingerConfig
 from candlegraph.strategies.crossover import CrossoverConfig
 from candlegraph.ui.viewmodels import (
     BACKFILL_CHOICES,
-    DEFAULT_BENCHMARK,
+    DEFAULT_PAIR,
     MAX_SHADED_GAPS,
     MAX_WEIGHT_STEP,
+    Preferences,
     ViewError,
     available_symbols,
     build_agents_view,
@@ -62,6 +64,7 @@ from candlegraph.ui.viewmodels import (
     range_lane_segments,
     run_backfill,
     run_explain_now,
+    run_fill_refresh_now,
     run_news_fetch_now,
     run_observer_now,
 )
@@ -98,6 +101,33 @@ def _symbols(_db: DatabaseManager) -> list[str]:
     return available_symbols(_db)
 
 
+def _prefs() -> Preferences:
+    """The remembered choices for this browser session."""
+    return Preferences(st.session_state)
+
+
+def _pick(container: Any, label: str, options: list[str], name: str, fallback: int = 0, **kwargs: Any) -> str:
+    """A selectbox that reopens on whatever was chosen last time.
+
+    Streamlit discards a widget's own state as soon as a rerun does not
+    render it, so a dashboard switch would otherwise reset every control on
+    the page you left. The mirror in :class:`Preferences` is what survives,
+    and the widget's index is read back out of it.
+    """
+    index = _prefs().index(name, options, fallback)
+    chosen = container.selectbox(label, options, index=index, key=f"w_{name}", **kwargs)
+    return str(_prefs().remember(name, chosen))
+
+
+def _pick_many(
+    container: Any, label: str, options: list[str], name: str, fallback: list[str], **kwargs: Any
+) -> list[str]:
+    """:func:`_pick` for a multiselect."""
+    default = _prefs().multiselect(name, options, fallback)
+    chosen = container.multiselect(label, options, default=default, key=f"w_{name}", **kwargs)
+    return list(_prefs().remember(name, list(chosen)))
+
+
 def _title(text: str, caption: str | None = None) -> None:
     """One chart, one headline. The caption is the footnote, not the title."""
     st.markdown(f"##### {text}")
@@ -118,8 +148,11 @@ def _sidebar(settings: Settings, symbols: list[str]) -> dict[str, Any]:
     st.sidebar.title("candlegraph")
     st.sidebar.caption("Uniswap v3 hourly market data · deterministic analytics")
 
-    page = st.sidebar.radio("Dashboard", PAGES, label_visibility="collapsed")
-    label = st.sidebar.selectbox("History", list(WINDOW_CHOICES), index=2)
+    # These two are rendered on every run, so Streamlit keeps their state by
+    # itself; they need no mirror, and counting them would report selections
+    # the user never made.
+    page = st.sidebar.radio("Dashboard", PAGES, label_visibility="collapsed", key="nav_page")
+    label = st.sidebar.selectbox("History", list(WINDOW_CHOICES), index=2, key="nav_history")
 
     st.sidebar.divider()
     st.sidebar.subheader("Rates — percent per year")
@@ -164,6 +197,28 @@ def _sidebar(settings: Settings, symbols: list[str]) -> dict[str, Any]:
         settings.backtest_slippage_bps,
         1.0,
         help="Basis points of extra cost per unit traded: 100 bps = 1%.",
+    )
+
+    st.sidebar.divider()
+    remembered = len(_prefs().names())
+    if st.sidebar.button(
+        "↺ Reset to defaults",
+        width="stretch",
+        disabled=remembered == 0,
+        help="Forget the tokens, windows and strategies picked this session and reopen "
+        "every dashboard on its default. Stored data is not touched.",
+    ):
+        _prefs().reset()
+        # The widgets themselves hold a copy; clearing only the mirror would
+        # let them re-seed it on the very next run. `nav_` keys are left
+        # alone so the reset does not also throw you off the current page.
+        for key in [k for k in list(st.session_state) if str(k).startswith("w_")]:
+            del st.session_state[key]
+        st.rerun()
+    st.sidebar.caption(
+        f"{remembered} selection(s) remembered this session."
+        if remembered
+        else "Selections you make are remembered while this tab is open."
     )
 
     return {
@@ -253,7 +308,7 @@ def _market_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -
 
 def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
     left, mid, right = st.columns(3)
-    symbol = left.selectbox("Token", ctx["symbols"], index=default_index(ctx["symbols"]), key="token_symbol")
+    symbol = _pick(left, "Token", ctx["symbols"], "token_symbol", default_index(ctx["symbols"]))
     window = int(mid.number_input("Rolling window (bars)", 2, 2000, settings.rolling_window, 1))
     num_std = float(right.number_input("Band width (std)", 0.5, 5.0, 2.0, 0.25))
 
@@ -324,8 +379,40 @@ def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) ->
             line_width=0,
             layer="below",
         )
+
+    # The cached estimate, drawn as a dashed bridge anchored on the real bars
+    # either side. Dashed and separately named because it is not an
+    # observation and must never read as one.
+    overlay = view.fill_overlay
+    if not overlay.empty:
+        figure.add_trace(
+            go.Scatter(
+                x=overlay.index,
+                y=overlay.to_numpy(),
+                mode="lines",
+                connectgaps=False,
+                line={"color": "#ffab00", "width": 2, "dash": "dash"},
+                name=f"estimated ({view.fill_method})",
+            )
+        )
     figure.update_layout(xaxis_rangeslider_visible=False)
     _plot(figure, height=420)
+
+    if view.gaps:
+        if view.filled_hours:
+            st.caption(
+                f"{view.filled_hours} of {view.missing_hours} missing hour(s) are drawn from the "
+                f"**{view.fill_method}** fill cache (dashed). Display only: linear interpolation "
+                "uses the price *after* the gap, so no strategy or backtest reads it, and a "
+                "filled stretch understates realised volatility — the bands above are drawn "
+                "from observations alone."
+            )
+        else:
+            st.caption(
+                f"{view.missing_hours} missing hour(s) are shown as gaps only. "
+                "Run `make fill` (or the Quality dashboard's refresh) to cache an estimate for "
+                "the short ones."
+            )
 
     _title("Volume Pulse — USD traded per candle")
     _plot(go.Figure(go.Bar(x=candles.index, y=candles["volume_usd"], marker_color="#607d8b")), height=160)
@@ -470,6 +557,48 @@ def _quality_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) 
         )
 
     _title(
+        "Fill Cache — estimates for the short gaps, computed once",
+        "Linear interpolation, stored in `token_hours_fill` so a dashboard reads it instead of "
+        "recomputing on every widget change. It never touches `token_hours_data`, so the "
+        "coverage above is unaffected by anything here, and it is display only — no strategy "
+        "or backtest reads these rows.",
+    )
+    cache_cols = st.columns([1, 1, 2])
+    cache_cols[0].metric("Hours cached", f"{view.cached_hours:,}")
+    cache_cols[1].metric(
+        "Fillable hours",
+        f"{view.fillable_hours:,}",
+        help=f"Missing hours whose run is {DEFAULT_MAX_FILL}h or shorter. A longer gap is left "
+        "alone: beyond the cap a straight line is fiction.",
+    )
+    with cache_cols[2]:
+        if st.button(
+            "↻ Recompute fill cache",
+            type="primary" if view.cache_is_stale else "secondary",
+            help="Writes to token_hours_fill only. No market data is touched and no network is used.",
+        ):
+            try:
+                with st.spinner("Interpolating…"):
+                    done = run_fill_refresh_now(db, list(view.tokens["symbol"]))
+            except ViewError as exc:
+                st.error(str(exc))
+            else:
+                st.success(
+                    f"Cached {done.rows_written} estimated hour(s) across "
+                    f"{len(done.runs)} token(s) using `{done.method}`."
+                )
+                st.rerun()
+        elif view.cache_is_stale:
+            st.caption("The cache does not match the gaps above — recompute to refresh it.")
+
+    if not view.fill_cache.empty:
+        st.dataframe(
+            view.fill_cache.style.format({"computed_at": "{:%Y-%m-%d %H:%M}"}, na_rep="—"),
+            width="stretch",
+            hide_index=True,
+        )
+
+    _title(
         "Gap Map — where the hours are missing",
         "One lane per token, thinnest coverage first. Green is stored, amber is a run of hours "
         "with no row. A short lane is a short history, not a gap.",
@@ -550,15 +679,20 @@ def _quality_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) 
 
 def _risk_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
     a, b, c, d, e = st.columns(5)
-    symbol = a.selectbox("Token", ctx["symbols"], index=default_index(ctx["symbols"]), key="risk_symbol")
+    symbol = _pick(a, "Token", ctx["symbols"], "risk_symbol", default_index(ctx["symbols"]))
     default_benchmark = settings.risk_benchmark if settings.risk_benchmark in ctx["symbols"] else None
     others = ["(none)"] + [s for s in ctx["symbols"] if s != symbol]
-    benchmark_pick = b.selectbox(
-        "Benchmark", others, index=others.index(default_benchmark) if default_benchmark in others else 0
+    benchmark_pick = _pick(
+        b,
+        "Benchmark",
+        others,
+        "risk_benchmark",
+        others.index(default_benchmark) if default_benchmark in others else 0,
     )
     confidence = float(c.slider("Confidence", 0.90, 0.99, settings.risk_confidence, 0.01))
-    horizon_label = d.selectbox("Horizon", list(HORIZON_CHOICES), index=2)
-    method = e.selectbox("Estimator", METHODS, index=0)
+    horizon_label = _pick(d, "Horizon", list(HORIZON_CHOICES), "risk_horizon", 2)
+    # The picker speaks strings; the config speaks the literal union it came from.
+    method = cast(Method, _pick(e, "Estimator", list(METHODS), "risk_method", 0))
 
     config = RiskConfig(
         confidence=confidence,
@@ -647,12 +781,11 @@ def _risk_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> 
 
 
 def _compare_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+    first, second = DEFAULT_PAIR
     a, b, c = st.columns(3)
-    symbol_a = a.selectbox("Token A", ctx["symbols"], index=default_index(ctx["symbols"]), key="pair_a")
+    symbol_a = _pick(a, "Token A", ctx["symbols"], "pair_a", default_index(ctx["symbols"], first))
     others = [s for s in ctx["symbols"] if s != symbol_a] or ctx["symbols"]
-    symbol_b = b.selectbox(
-        "Token B", others, index=default_index(others, DEFAULT_BENCHMARK, exclude=symbol_a), key="pair_b"
-    )
+    symbol_b = _pick(b, "Token B", others, "pair_b", default_index(others, second, exclude=symbol_a))
     window = int(c.number_input("Rolling window (bars)", 2, 2000, settings.rolling_window * 7, 1))
 
     view = build_pair_view(
@@ -734,15 +867,17 @@ def _compare_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) 
 
 
 def _portfolio_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
-    chosen = st.multiselect(
+    chosen = _pick_many(
+        st,
         "Tokens",
         ctx["symbols"],
-        default=default_portfolio_symbols(ctx["symbols"]),
+        "portfolio_symbols",
+        default_portfolio_symbols(ctx["symbols"]),
         help="Majors first, stablecoins left out by default: "
         "a USD-pegged token swallows any minimum-risk objective.",
     )
     left, right, third, fourth = st.columns(4)
-    objective = left.selectbox("Objective", OBJECTIVES, index=0)
+    objective = cast(Objective, _pick(left, "Objective", list(OBJECTIVES), "portfolio_objective", 0))
     max_weight = right.slider(
         "Max weight per token",
         MAX_WEIGHT_STEP,
@@ -970,10 +1105,8 @@ def _explanation_panel(db: DatabaseManager, settings: Settings, view: Any, symbo
 
 def _strategy_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
     left, right = st.columns(2)
-    symbol = left.selectbox(
-        "Token", ctx["symbols"], index=default_index(ctx["symbols"]), key="strategy_symbol"
-    )
-    name = right.selectbox("Strategy", available(), index=1)
+    symbol = _pick(left, "Token", ctx["symbols"], "strategy_symbol", default_index(ctx["symbols"]))
+    name = _pick(right, "Strategy", list(available()), "strategy_name", 1)
 
     config = _strategy_config(name)
     if name == "arima":
@@ -1020,7 +1153,7 @@ def _strategy_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any])
 
 def _forecast_page(db: DatabaseManager, ctx: dict[str, Any]) -> None:
     a, b, c, d = st.columns(4)
-    symbol = a.selectbox("Token", ctx["symbols"], index=default_index(ctx["symbols"]), key="forecast_symbol")
+    symbol = _pick(a, "Token", ctx["symbols"], "forecast_symbol", default_index(ctx["symbols"]))
     p = int(b.number_input("p", 0, 5, 1, 1, key="f_p"))
     q = int(c.number_input("q", 0, 5, 1, 1, key="f_q"))
     steps = int(d.number_input("Steps ahead", 1, 168, 24, 1))

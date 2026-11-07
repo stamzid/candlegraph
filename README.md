@@ -232,6 +232,7 @@ a failing one always is.
 | `portfolio [--objective X] [--risk-free-rate R]` | Mean-variance allocation |
 | `forecast SYMBOL [--auto-order]` | ARIMA point forecast and interval |
 | `risk SYMBOL [--benchmark X] [--confidence C] [--horizon N] [--method M]` | VaR, CVaR, drawdown, and the systematic/idiosyncratic split |
+| `fill [SYMBOLS…] [--days N] [--max-fill N] [--clear] [--status]` | Recompute the display-only fill cache for hours with no stored row. Writes `token_hours_fill` only; no strategy reads it |
 | `ui` | Run the Streamlit UI |
 | `observe [--strict] [--json] [--sinks X]` | Run the run-observer agent once and post its report |
 | `janitor [--open-pr] [--strict] [--checks X]` | Run the CI janitor once: checks, mechanical fixes, draft PR |
@@ -352,6 +353,40 @@ fees plus slippage are charged on every position change. Both matter: on hourly 
 strategy at 35bps per side pays more in costs than it makes in edge, and the reports say so
 rather than hiding it.
 
+## Gaps, and what may be done about them
+
+Uniswap emits no row for an hour with no swaps, so a thin token's history has holes in it. What
+may be drawn in their place depends entirely on **who is asking**, and that rule is code rather
+than convention: every fill policy declares whether it is *causal*.
+
+| Policy | Uses | Causal | Who may consume it |
+|---|---|---|---|
+| `none` | nothing — the hole stays | yes | anyone; the honest default for aligned-bar statistics |
+| `drop` | only hours every symbol has | yes | anyone |
+| `ffill` | the last price before the gap | yes | anyone, including strategies |
+| `interpolate` | a line between the bars **either side** | **no** | display only |
+
+Linear interpolation reads the price *after* the gap, so a strategy consuming it would trade on
+information it could not have had. `load_symbol_series` — the loader every strategy, signal and
+backtest goes through — **refuses** a non-causal policy rather than quietly downgrading it, and
+`apply_fill` returns a `synthetic` mask so a filled cell stays distinguishable wherever it
+travels. A gap longer than the cap (24h) is left alone entirely, not partly filled.
+
+The estimates are cached so a dashboard does not recompute them on every widget change:
+
+```sh
+make fill                # recompute for every token with stored history
+make fill-status         # what is cached, per token and method
+candlegraph fill WETH --max-fill 12 --clear
+```
+
+They go in `token_hours_fill` — **never** in `token_hours_data`. Only missing hours are stored,
+each with the length of the run it belongs to, so the data-quality report keeps measuring what
+was actually ingested and coverage can still be falsified. It is the one table in the database
+that is deleted from: an estimate for an hour that has since been ingested is wrong, not stale.
+The reasoning is in [`docs/roadmap/DESIGN.md`](docs/roadmap/DESIGN.md) §0 and
+[`docs/storage/table-placement/DESIGN.md`](docs/storage/table-placement/DESIGN.md).
+
 ## UI
 
 ```sh
@@ -366,19 +401,23 @@ dashboard opens with a metric strip, and every chart carries a title that says w
 - **Token** — hourly candlesticks with the Bollinger envelope, volume, rolling volatility,
   the z-score stretch gauge, the drawdown-from-peak curve, band width (the squeeze) and %B.
   Hours with no stored row are shaded on the candles and counted as a coverage figure, so a
-  chart with holes in it cannot be mistaken for a continuous one.
+  chart with holes in it cannot be mistaken for a continuous one; where the fill cache has an
+  estimate, it is drawn as a **dashed** bridge anchored on the real bars either side.
 - **Quality** — can this history be trusted, and where is it thin? A **gap map** (one lane per
   token: green where hours are stored, amber where they are missing), the distribution of gap
   lengths (constant drizzle is a quiet market; one long bar is an ingestion failure), field
   completeness (a blank field is `NULL` — *not collected* — never a real zero), per-token
-  coverage and staleness, the longest gaps, and any impossible rows. It reads the same
+  coverage and staleness, the longest gaps, any impossible rows, and the **fill cache** with a
+  button to recompute it. It reads the same
   `quality.build_report` that `candlegraph report` and the `data_quality_report` MCP tool read,
   so the three cannot disagree. Read-only: nothing here fills a gap or writes a row.
 - **Risk** — VaR and CVaR at a chosen confidence, horizon and estimator; the return histogram
   with the VaR cut; the three estimators side by side as a fat-tail check; and the
   systematic-vs-idiosyncratic split against a benchmark.
 - **Compare** — the A/B price ratio, the rolling correlation regime, and the beta cloud with its
-  fitted slope. Pearson and Spearman correlation sit side by side (a wide gap between them means
+  fitted slope. It opens on WETH against WBTC — two assets that actually move, since pricing a
+  token in a stablecoin is a dollar chart the Token dashboard already draws. Pearson and
+  Spearman correlation sit side by side (a wide gap between them means
   a few extreme hours are driving the linear number), and each leg's own total return,
   volatility and Sharpe are tabled over the same aligned bars — the twelve numbers
   `candlegraph compare` prints, rather than only the joint five.
@@ -405,8 +444,14 @@ dashboard opens with a metric strip, and every chart carries a title that says w
   writes rows. The default first fetch is `LOOKBACK_DAYS` (7); backfills reach further and never
   delete.
 
-**Defaults a trader expects.** Every single-token page opens on WBTC, Compare opens on WBTC
-against USDT, and the Portfolio opens on the majors with stablecoins left out and a 25% cap per
+**Your selections are remembered.** Pick WBTC against DAI on Compare, go and look at something
+else, come back: it is as you left it. Streamlit discards a widget's state as soon as a rerun
+does not render it, so each choice is mirrored into the session and the widget reopens on the
+mirror. **↺ Reset to defaults** in the sidebar forgets them all; it leaves an action in flight
+(a backfill awaiting confirmation) alone, because that is not a preference.
+
+**Defaults a trader expects.** Every single-token page opens on WBTC, Compare opens on WETH
+against WBTC, and the Portfolio opens on the majors with stablecoins left out and a 25% cap per
 token (or the smallest cap the chosen tokens can satisfy). An annualised expected return that
 falls below −100% is shown as −100% and flagged; a VaR or CVaR is never reported above 100%,
 because a long position cannot lose more than everything.

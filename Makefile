@@ -113,6 +113,12 @@ backfill: ## Backfill a longer window in the stack: make backfill days=90
 report: ## Print the data-quality report from the stack
 	$(COMPOSE) exec worker python -m candlegraph report
 
+fill: ## Recompute the display-only fill cache for hours with no stored row
+	$(COMPOSE) exec worker python -m candlegraph fill $(ARGS)
+
+fill-status: ## Show what the fill cache holds, per token and method
+	$(COMPOSE) exec worker python -m candlegraph fill --status
+
 sync-assets: ## Load asset rows (addresses, symbols, aliases) from config/tokens.yaml into the stack
 	$(COMPOSE) exec worker python -m candlegraph knowledge sync-assets
 

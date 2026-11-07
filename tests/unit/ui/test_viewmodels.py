@@ -22,6 +22,7 @@ from candlegraph.ingestion.quality import Gap
 from candlegraph.strategies.backtest import BacktestConfig
 from candlegraph.strategies.bollinger import BollingerConfig
 from candlegraph.ui.viewmodels import (
+    Preferences,
     ViewError,
     available_symbols,
     build_agents_view,
@@ -39,6 +40,7 @@ from candlegraph.ui.viewmodels import (
     default_index,
     default_max_weight,
     default_portfolio_symbols,
+    fill_overlay,
     forecast_frame,
     gap_lane_segments,
     load_prices,
@@ -46,6 +48,7 @@ from candlegraph.ui.viewmodels import (
     observed_gaps,
     range_lane_segments,
     run_backfill,
+    run_fill_refresh_now,
     run_news_fetch_now,
     run_observer_now,
 )
@@ -1117,3 +1120,183 @@ def test_the_compare_screen_shows_each_leg_on_its_own(db: FakeDatabase) -> None:
     assert list(legs.columns) == ["token", "total_return", "volatility", "sharpe"]
     assert legs.iloc[0]["total_return"] == pytest.approx(view.comparison.total_return_a)
     assert legs.iloc[1]["sharpe"] == pytest.approx(view.comparison.sharpe_b)
+
+
+# --- remembering what the user picked ---------------------------------------
+
+
+def test_a_choice_survives_a_dashboard_switch() -> None:
+    """The bug this exists for: pick WBTC/DAI, leave, come back to defaults.
+
+    Streamlit drops a widget's own state as soon as a rerun does not render
+    it, so the mirror is what carries the choice across pages.
+    """
+    store: dict[str, Any] = {}
+    prefs = Preferences(store)
+
+    prefs.remember("pair_b", "DAI")
+
+    assert Preferences(store).get("pair_b") == "DAI"
+    assert Preferences(store).index("pair_b", ["WBTC", "DAI", "WETH"], fallback=0) == 1
+
+
+def test_an_unremembered_control_opens_on_its_default() -> None:
+    prefs = Preferences({})
+
+    assert prefs.index("pair_a", ["WBTC", "WETH"], fallback=1) == 1
+    assert prefs.get("pair_a", "WBTC") == "WBTC"
+
+
+def test_a_remembered_token_that_has_gone_falls_back_instead_of_misselecting() -> None:
+    """A stale index would quietly select a different token, which is worse
+    than forgetting: the screen would look right and be wrong."""
+    prefs = Preferences({"pref:token_symbol": "GONE"})
+
+    assert prefs.index("token_symbol", ["WBTC", "WETH"], fallback=1) == 1
+
+
+def test_an_out_of_range_fallback_does_not_crash_the_widget() -> None:
+    prefs = Preferences({})
+
+    assert prefs.index("x", ["WBTC"], fallback=7) == 0
+    assert prefs.index("x", [], fallback=0) == 0
+
+
+def test_a_remembered_multiselect_drops_tokens_that_are_gone() -> None:
+    prefs = Preferences({"pref:portfolio_symbols": ["WBTC", "GONE"]})
+
+    assert prefs.multiselect("portfolio_symbols", ["WBTC", "WETH"], ["WETH"]) == ["WBTC"]
+    # Nothing remembered survives: fall back, narrowed to what exists.
+    assert Preferences({}).multiselect("p", ["WBTC"], ["WBTC", "GONE"]) == ["WBTC"]
+
+
+def test_reset_forgets_selections_and_nothing_else() -> None:
+    """A pending backfill confirmation is not a preference.
+
+    Clearing it would turn a harmless "back to defaults" button into one
+    that cancels an action the user was halfway through.
+    """
+    store: dict[str, Any] = {
+        "pref:pair_a": "WETH",
+        "pref:pair_b": "DAI",
+        "backfill_pending": 90,
+        "news_pending": ["WBTC"],
+    }
+    prefs = Preferences(store)
+
+    assert prefs.names() == ["pair_a", "pair_b"]
+    assert prefs.reset() == 2
+    assert store == {"backfill_pending": 90, "news_pending": ["WBTC"]}
+    assert prefs.reset() == 0, "resetting twice is harmless"
+
+
+# --- the fill cache on the token screen -------------------------------------
+
+
+def test_the_token_view_reads_cached_fills_rather_than_interpolating() -> None:
+    """The whole point of the table: a widget change is one indexed select."""
+    rows = price_rows("WETH", 60)
+    del rows[30:32]
+    db = FakeDatabase(
+        get_price_history=rows,
+        coverage_report=[coverage_row("WETH")],
+        get_token_hours_fill=[
+            {
+                "symbol": "WETH",
+                "token_id": "0xweth",
+                "period_start_unix": BASE + i * HOUR,
+                "method": "linear",
+                "price_usd": Decimal("123"),
+                "close": None,
+                "gap_hours": 2,
+                "computed_at": datetime(2026, 11, 7, tzinfo=UTC),
+            }
+            for i in (30, 31)
+        ],
+    )
+
+    view = build_token_view(db, "WETH", None, window=5)
+
+    assert view.filled_hours == 2
+    assert view.fill_method == "linear"
+    assert any(label == "get_token_hours_fill" for label, _ in db.fetches)
+
+
+def test_an_empty_fill_cache_is_a_normal_state_not_an_error() -> None:
+    rows = price_rows("WETH", 60)
+    del rows[30:32]
+    db = FakeDatabase(get_price_history=rows, coverage_report=[coverage_row("WETH")])
+
+    view = build_token_view(db, "WETH", None, window=5)
+
+    assert view.filled_hours == 0
+    assert view.fill_method is None
+    assert view.fill_overlay.empty
+    assert view.missing_hours == 2, "the gap is still reported"
+
+
+def test_the_overlay_anchors_each_filled_run_on_the_real_bars_beside_it() -> None:
+    """A bare scatter inside a gap says nothing about what it was drawn
+    between; a line that starts and ends on an observation says exactly that."""
+    index = pd.date_range("2026-01-01", periods=6, freq="h", tz="UTC")
+    prices = pd.Series([10.0, 11.0, 14.0, 15.0], index=index[[0, 1, 4, 5]], name="WBTC")
+    fills = pd.DataFrame(
+        {
+            "symbol": ["WBTC", "WBTC"],
+            "timestamp": [index[2], index[3]],
+            "period_start_unix": [0, 0],
+            "price_usd": [12.0, 13.0],
+            "gap_hours": [2, 2],
+            "method": ["linear", "linear"],
+        }
+    )
+
+    overlay = fill_overlay(prices, fills)
+
+    drawn = overlay.dropna()
+    assert list(drawn.index) == list(index[1:5]), "the two fills plus one real bar each side"
+    assert list(drawn) == [11.0, 12.0, 13.0, 14.0]
+    assert pd.isna(overlay.loc[index[0]]), "bars away from the run are not drawn"
+
+
+def test_the_overlay_is_empty_when_there_is_nothing_to_draw() -> None:
+    prices = pd.Series([1.0, 2.0], index=pd.date_range("2026-01-01", periods=2, freq="h", tz="UTC"))
+
+    assert fill_overlay(prices, pd.DataFrame()).empty
+    assert fill_overlay(pd.Series(dtype="float64"), pd.DataFrame({"a": [1]})).empty
+
+
+# --- the quality page's view of the cache -----------------------------------
+
+
+def test_the_quality_view_knows_when_the_cache_is_behind_the_gaps(
+    tokens_file: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    settings = make_settings(tokens_file=str(tokens_file), min_expected_coverage=0.95)
+
+    view = build_quality_view(quality_db(), settings)
+
+    assert view.cached_hours == 0
+    assert view.fillable_hours == 10, "one 10-hour gap, inside the 24h cap"
+    assert view.cache_is_stale is True
+
+
+def test_a_gap_longer_than_the_cap_is_not_counted_as_fillable(
+    tokens_file: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Beyond the cap a straight line is fiction, so it is not work pending."""
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    db = FakeDatabase(
+        coverage_report=[coverage_row("WBTC", stored=60, expected=100)],
+        missing_hours=[{"period_start_unix": BASE + i * HOUR} for i in range(10, 50)],
+    )
+
+    view = build_quality_view(db, make_settings(tokens_file=str(tokens_file)))
+
+    assert view.fillable_hours == 0, "a 40-hour run is past the cap"
+
+
+def test_refreshing_the_cache_from_the_ui_refuses_an_empty_selection() -> None:
+    with pytest.raises(ViewError, match="No tokens"):
+        run_fill_refresh_now(FakeDatabase(), [])

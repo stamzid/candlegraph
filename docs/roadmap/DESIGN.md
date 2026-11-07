@@ -169,10 +169,31 @@ The two candidates, and what each trades away:
    build item, behind a new `FillPolicy` value so the default behaviour
    does not move.
 
-**What was rejected.** Writing filled rows into the database (breaks the
-`NULL`-means-not-collected contract and corrupts coverage); zero-filling
-(a zero is a price, and a wrong one); filling without a cap (a 3-week gap
-on a delisted pool should look like absence, not a confident line).
+**What was rejected.** Writing filled rows **into `token_hours_data`**
+(breaks the `NULL`-means-not-collected contract and corrupts coverage,
+which would read 100% by construction); zero-filling (a zero is a price,
+and a wrong one); filling without a cap (a 3-week gap on a delisted pool
+should look like absence, not a confident line).
+
+**Refined, 2026-11-07 (rollout step 3).** The rejection above is about the
+market table, and it stands. Caching the estimates in a **separate** table
+does not touch it: `token_hours_fill` holds one row per *missing* hour,
+keyed by `(token_id, period_start_unix, method)`, and `coverage_report`,
+`missing_hours` and every observer finding keep measuring what was
+actually ingested — there is an integration test asserting the coverage
+report is byte-identical before and after a refresh. The table exists
+because interpolating a thin token's history on every Streamlit widget
+change is wasted work, and because a stored estimate can carry
+`gap_hours`, which is the closest this policy gets to an error bar.
+
+It is the one table in the database that is deleted from, and that is why
+it is not a hypertable: a cached fill is invalidated the moment a real row
+arrives for its hour, and a whole method is dropped when the cap or the
+estimator changes. `method` is in the key so step 4's causal estimator can
+land beside the linear one without either becoming consumable by accident
+— the read path filters on method, and `load_symbol_series` never reads
+this table at all. The placement reasoning is in
+[`../storage/table-placement/DESIGN.md`](../storage/table-placement/DESIGN.md).
 
 **Exit criterion.** `candlegraph compare WETH WBTC` prints correlation,
 beta and relative performance over aligned bars only *(met)*; the compose

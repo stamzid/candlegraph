@@ -31,6 +31,8 @@ a target, and never let CI run something that is not one either.
 | One ingest pass | `make ingest` |
 | Backfill 90 days | `make backfill days=90` |
 | Data-quality report | `make report` (`candlegraph report [--json]`) |
+| Recompute the display-only fill cache | `make fill` (`candlegraph fill [SYMBOLS] [--days N] [--max-fill N] [--clear]`) |
+| What the fill cache holds | `make fill-status` (`candlegraph fill --status`) |
 | Recent ingest runs | `make runs` |
 | Sync assets and aliases from `tokens.yaml` | `make sync-assets` (in the stack) or `candlegraph knowledge sync-assets` |
 | The embedding model server's log (Ollama is part of `make up`; the first start pulls `bge-m3`) | `make logs-ollama` |
@@ -77,6 +79,8 @@ candlegraph/
     runner.py          One ingest run: cursors in, upserted rows out.
     ledger.py          The ingest_run table: who ran, when, and how it went.
     quality.py         Gap detection and the data-quality report.
+    fills.py           The derived-fill cache: estimates for hours that were never
+                       ingested. Display only; writes token_hours_fill and nothing else.
     worker.py          The standalone ingest process.
   analytics/           Pure numerics. No I/O except prices.py, which only reads.
     rolling.py         Rolling mean, volatility, z-score, Bollinger, drawdown.
@@ -159,6 +163,7 @@ schema.graphql       Generated. `make sdl`; a test fails if it is stale.
 | `pool_hours_data` | one row per pool per hour | `(pool_id, period_start_unix)` | **hypertable** |
 | `ingest_run` | one row per ingest run | `run_id` | plain |
 | `signal` | one row per strategy, symbol and bar | `(strategy, symbol, period_start_unix)` | **hypertable** |
+| `token_hours_fill` | one row per **missing** token-hour, per method | `(token_id, period_start_unix, method)` | plain — a cache, and the one table that is deleted from |
 | `agent_run` | one row per agent graph run | `run_id` | plain |
 | `asset` | one row per knowledge entity (token addresses today) | `id` | plain |
 | `source` | one row per document source (`tavily`, `rss:<feed>`, `manual`) | `id` | plain |
@@ -202,7 +207,11 @@ Each of these has a test. Breaking one should break the build, not production.
    natural key: one row per token per hour. Re-ingesting is idempotent.
    **Ingestion never deletes.** Stored history is the input to the analytics
    and backtesting phases; `LOOKBACK_DAYS` only bounds the first fetch for a
-   token with no rows yet.
+   token with no rows yet. This is a rule about *observations*: the derived
+   fill cache (`token_hours_fill`) is deleted from on purpose, because an
+   estimate superseded by a real row is wrong rather than stale. No statement
+   may name a series table as a delete target, and a test reads the targets
+   rather than grepping for the word.
 5. **Candle times are bucket boundaries**, computed from the interval — never
    `MIN(timestamp)` of the rows present, which shifts when an hour is missing.
 6. **Buckets with no data produce no candle.** Gaps are absent, not zero-filled.
@@ -229,10 +238,20 @@ Each of these has a test. Breaking one should break the build, not production.
     `prices[: i + 1]`; appending future bars must not change past signals.
 18. **Analytics are pure.** Only `analytics/prices.py` touches the database,
     and only to read. The UI's arithmetic lives in `ui/viewmodels.py`, never
-    in the Streamlit script.
+    in the Streamlit script. The fill cache keeps this intact by splitting:
+    the arithmetic is `analytics.prices.apply_fill` (pure), the I/O is
+    `ingestion/fills.py`.
 19. **A missing hour is not a fault.** Uniswap emits no row for an hour with
     no swaps, so quality is judged by coverage against
     `MIN_EXPECTED_COVERAGE`, never by the presence of a gap.
+    **A filled hour is never an observed one.** Every `FillPolicy` declares
+    whether it is causal; `load_symbol_series` — the loader strategies,
+    signals and backtests use — refuses a non-causal policy outright rather
+    than downgrading it silently, and `apply_fill` returns a `synthetic`
+    mask so a filled cell stays distinguishable wherever it travels.
+    Linear interpolation reads the gap's right endpoint, so it is display
+    only; a test demonstrates the look-ahead by moving a future bar and
+    watching a past one change.
 20. **No secrets in the repo.** `GRAPH_API_KEY` lives in `.env`, which is
     gitignored. `.env.example` documents it with an empty value.
 21. **Agents never write market data.** Their whole write surface is the

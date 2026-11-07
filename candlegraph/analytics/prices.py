@@ -23,9 +23,13 @@ from candlegraph.storage import DatabaseManager
 from candlegraph.tokens import TokenRegistry
 
 PriceColumn = Literal["close", "price_usd", "open", "high", "low"]
-FillPolicy = Literal["ffill", "drop", "none"]
+FillPolicy = Literal["ffill", "drop", "none", "interpolate"]
 
 HOUR = 3600
+# Beyond a day, a carried or interpolated price is fiction rather than a
+# reasonable stand-in for an hour nobody traded in. Both filling policies
+# share the cap so "how stale may a synthetic bar be" has one answer.
+DEFAULT_MAX_FILL = 24
 
 
 class PriceError(LookupError):
@@ -36,6 +40,97 @@ class PriceError(LookupError):
     it to its own failure — the CLI to ``SystemExit``, the MCP tools to a
     tool error — so the wording is written once.
     """
+
+
+# --- the fill seam -----------------------------------------------------------
+#
+# `docs/roadmap/DESIGN.md` §0 settles what may be done about an hour with no
+# row, and scopes the answer by *who is asking*. This is that decision as
+# code: every policy declares whether it is causal, and the loader a strategy
+# uses refuses the one that is not.
+#
+# Nothing here writes. Filling is a read-time policy — `token_hours_data`
+# keeps emitting no row for an hour with no swaps, so coverage stays
+# falsifiable (invariants 6 and 11).
+
+
+@dataclass(frozen=True)
+class FillRule:
+    """One answer to "what do we do about an hour with no row".
+
+    ``causal`` is the field that matters. A causal rule uses only data at or
+    before the bar it fills, so a strategy consuming it cannot see the
+    future; a non-causal one reads across the gap and is therefore display
+    only. Invariant 17 does not relax for synthetic bars, and the whole
+    point of naming the rules is that the distinction stops being a comment.
+    """
+
+    name: str
+    causal: bool
+    summary: str
+    caveat: str = ""
+
+
+FILL_RULES: dict[str, FillRule] = {
+    "none": FillRule(
+        "none",
+        causal=True,
+        summary="Leave the hole. The honest default for any statistic computed over aligned bars.",
+    ),
+    "drop": FillRule(
+        "drop",
+        causal=True,
+        summary="Keep only hours every symbol has.",
+        caveat="Strict, but can throw away most of a thin token's history.",
+    ),
+    "ffill": FillRule(
+        "ffill",
+        causal=True,
+        summary="Carry the last known price forward, capped.",
+        caveat="Flattens returns across the gap, so realised volatility is understated.",
+    ),
+    "interpolate": FillRule(
+        "interpolate",
+        causal=False,
+        summary="Straight line between the last real bar before the gap and the first after it.",
+        caveat="Uses the gap's right endpoint — a future price. Display only. A straight line "
+        "has zero local variance, so every rolling standard deviation overlapping a filled "
+        "stretch is understated: Bollinger bands tighten and z-scores inflate.",
+    ),
+}
+
+
+def fill_rule(policy: str) -> FillRule:
+    """The rule for ``policy``, or a :class:`PriceError` naming the real ones."""
+    try:
+        return FILL_RULES[policy]
+    except KeyError:
+        raise PriceError(f"unknown fill policy {policy!r}; known: {', '.join(sorted(FILL_RULES))}") from None
+
+
+def is_causal(policy: str) -> bool:
+    """Whether ``policy`` may be fed to something that trades."""
+    return fill_rule(policy).causal
+
+
+def require_causal(policy: str, consumer: str) -> None:
+    """Refuse a look-ahead fill on behalf of ``consumer``.
+
+    The backtester cannot tell a real bar from one that embeds the future,
+    which is exactly why this raises rather than silently downgrading to a
+    causal policy: a quiet substitution would make the chosen policy a lie
+    and the resulting equity curve unexplainable.
+
+    Raises:
+        PriceError: ``policy`` reads across the gap it fills.
+    """
+    rule = fill_rule(policy)
+    if not rule.causal:
+        raise PriceError(
+            f"fill policy {policy!r} is not causal and {consumer} may not consume it: "
+            f"{rule.caveat.split('.')[0]}. Use one of "
+            f"{', '.join(sorted(n for n, r in FILL_RULES.items() if r.causal))}."
+        )
 
 
 @dataclass(frozen=True)
@@ -126,11 +221,105 @@ def _to_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
     return frame
 
 
+@dataclass(frozen=True)
+class FilledFrame:
+    """A wide price frame and the record of which cells are not observations.
+
+    ``synthetic`` is the same shape as ``frame`` and is ``True`` exactly
+    where a value was manufactured by the policy. It travels with the frame
+    rather than being recoverable from it, because once a number is in a
+    column nothing about it says where it came from — which is the mistake
+    the whole seam exists to prevent.
+    """
+
+    frame: pd.DataFrame
+    synthetic: pd.DataFrame
+    policy: str
+
+    @property
+    def filled_cells(self) -> int:
+        return int(self.synthetic.to_numpy().sum()) if not self.synthetic.empty else 0
+
+    @property
+    def rule(self) -> FillRule:
+        return fill_rule(self.policy)
+
+    def filled_index(self, symbol: str) -> pd.DatetimeIndex:
+        """Timestamps where ``symbol``'s value was manufactured, not observed."""
+        if symbol not in self.synthetic.columns:
+            return pd.DatetimeIndex([], tz="UTC")
+        marked = self.synthetic[symbol]
+        return pd.DatetimeIndex(marked.index[marked.to_numpy()])
+
+
+def run_lengths(mask: pd.Series) -> pd.Series:
+    """For each position, the length of the consecutive ``True`` run holding it.
+
+    ``0`` where the mask is ``False``. Pure, and the reason a gap longer than
+    the cap is left *entirely* alone: pandas' own ``limit`` would fill the
+    first N hours of a 30-hour hole and leave the rest, producing a bar that
+    is half line and half absence. The design says the hole stays.
+    """
+    if mask.empty:
+        return pd.Series(dtype="int64", index=mask.index)
+    blocks = (mask != mask.shift()).cumsum()
+    sizes = mask.groupby(blocks).transform("size")
+    return sizes.where(mask, 0).astype("int64")
+
+
+def _interpolate(wide: pd.DataFrame, max_fill: int | None) -> pd.DataFrame:
+    """Straight lines across interior gaps, leaving over-long runs untouched.
+
+    ``limit_area="inside"`` is what stops the line being extrapolated past
+    the first or last real bar: a token that started late has a short
+    history, not a gap, and inventing prices before it existed would be
+    fabrication rather than filling.
+    """
+    columns = {}
+    for name in wide.columns:
+        series = wide[name]
+        holes = series.isna()
+        filled = series.interpolate(method="time", limit_area="inside")
+        if max_fill is not None:
+            filled = filled.mask(run_lengths(holes) > max_fill)
+        columns[name] = filled
+    return pd.DataFrame(columns, index=wide.index) if columns else wide.copy()
+
+
+def apply_fill(
+    wide: pd.DataFrame, fill: FillPolicy = "ffill", max_fill: int | None = DEFAULT_MAX_FILL
+) -> FilledFrame:
+    """Resolve missing hours under one policy, and say which cells it invented.
+
+    Pure: a frame in, a frame and its synthetic mask out. Every caller that
+    needs to tell an observation from an estimate goes through here.
+    """
+    rule = fill_rule(fill)
+    missing = wide.isna()
+
+    match rule.name:
+        case "ffill":
+            filled = wide.ffill(limit=max_fill)
+        case "drop":
+            filled = wide.dropna(how="any")
+        case "interpolate":
+            filled = _interpolate(wide, max_fill)
+        case _:
+            filled = wide.copy()
+
+    # A cell is synthetic when it had no observation and now carries a value.
+    # `drop` removes whole rows rather than filling cells, so its mask is all
+    # False by construction — which is the truth: nothing was invented.
+    was_missing = missing.reindex(index=filled.index, columns=filled.columns, fill_value=False)
+    synthetic = was_missing & filled.notna()
+    return FilledFrame(frame=filled, synthetic=synthetic, policy=rule.name)
+
+
 def to_wide(
     history: PriceHistory,
     column: PriceColumn = "price_usd",
     fill: FillPolicy = "ffill",
-    max_fill: int | None = 24,
+    max_fill: int | None = DEFAULT_MAX_FILL,
 ) -> pd.DataFrame:
     """Pivot long rows into one column per symbol on a shared hourly index.
 
@@ -152,8 +341,24 @@ def to_wide(
         reindexed onto a complete hourly grid so gaps are visible as ``NaN``
         rather than silently closed up.
     """
+    return to_wide_filled(history, column=column, fill=fill, max_fill=max_fill).frame
+
+
+def to_wide_filled(
+    history: PriceHistory,
+    column: PriceColumn = "price_usd",
+    fill: FillPolicy = "ffill",
+    max_fill: int | None = DEFAULT_MAX_FILL,
+) -> FilledFrame:
+    """:func:`to_wide`, keeping the record of which cells were manufactured.
+
+    The same pivot and the same policy; the only difference is that the
+    synthetic mask survives the call. Display code that renders a filled bar
+    differently from an observed one needs this one, not :func:`to_wide`.
+    """
     if history.empty:
-        return pd.DataFrame(index=pd.DatetimeIndex([], tz="UTC", name="timestamp"))
+        empty = pd.DataFrame(index=pd.DatetimeIndex([], tz="UTC", name="timestamp"))
+        return FilledFrame(frame=empty, synthetic=empty.copy(), policy=fill_rule(fill).name)
 
     wide = history.frame.pivot_table(
         index="timestamp", columns="symbol", values=column, aggfunc="last"
@@ -166,15 +371,8 @@ def to_wide(
     wide = wide.reindex(full_index)
     wide.index.name = "timestamp"
 
-    match fill:
-        case "ffill":
-            wide = wide.ffill(limit=max_fill)
-        case "drop":
-            wide = wide.dropna(how="any")
-        case "none":
-            pass
-
-    return wide.astype("float64")
+    result = apply_fill(wide.astype("float64"), fill=fill, max_fill=max_fill)
+    return FilledFrame(frame=result.frame.astype("float64"), synthetic=result.synthetic, policy=result.policy)
 
 
 def load_price_frame(
@@ -205,10 +403,17 @@ def load_symbol_series(
     The registry lookup is case-insensitive but the stored ``symbol`` column
     is not, so the query always uses the registry's own spelling.
 
+    **This is the loader a strategy, a backtest and a signal run use**, so it
+    refuses a non-causal fill policy outright. A display surface that wants
+    interpolation calls :func:`to_wide_filled` and keeps the synthetic mask
+    with the numbers; there is no way to get a look-ahead fill into a
+    strategy through this function, which is the point of the seam.
+
     Raises:
-        PriceError: the symbol is not tracked, or nothing is stored for it
-            inside the window.
+        PriceError: the symbol is not tracked, nothing is stored for it
+            inside the window, or ``fill`` reads across the gaps it fills.
     """
+    require_causal(fill, "a strategy or backtest")
     token = registry.by_symbol(symbol)
     if token is None:
         raise PriceError(f"unknown token {symbol!r}; tracked: {', '.join(registry.symbols)}")

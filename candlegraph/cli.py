@@ -46,6 +46,30 @@ def _parser() -> argparse.ArgumentParser:
     runs = sub.add_parser("runs", help="show recent ingest runs from the ledger")
     runs.add_argument("--limit", type=int, default=10)
 
+    fill = sub.add_parser(
+        "fill",
+        help="recompute the display-only fill cache for hours with no stored row",
+    )
+    fill.add_argument(
+        "symbols",
+        nargs="*",
+        help="tokens to refresh; default: every token with stored history",
+    )
+    _add_window(fill)
+    fill.add_argument(
+        "--max-fill",
+        type=int,
+        default=None,
+        help="longest run of missing hours that may be filled (default: 24). "
+        "Beyond it the hole stays, whole.",
+    )
+    fill.add_argument(
+        "--clear",
+        action="store_true",
+        help="delete the cached fills instead of recomputing them",
+    )
+    fill.add_argument("--status", action="store_true", help="print what is cached and exit")
+
     sub.add_parser("strategies", help="list the available strategies")
 
     ui = sub.add_parser("ui", help="run the Streamlit UI")
@@ -352,6 +376,70 @@ def _report(settings: Settings, days: int | None, strict: bool, as_json: bool = 
     )
     print(json.dumps(report_dict(report), indent=2, default=str) if as_json else format_report(report))
     return 0 if report.ok or not strict else 1
+
+
+def _fill(args: argparse.Namespace) -> int:
+    """Recompute, clear, or report on the display-only fill cache.
+
+    Nothing a strategy reads goes through here: the cache holds linear
+    interpolation, which uses the gap's right endpoint and is therefore not
+    causal. `candlegraph backtest` and `signals` load observations only.
+    """
+    from candlegraph.analytics.prices import DEFAULT_MAX_FILL
+    from candlegraph.ingestion.fills import LINEAR, fill_cache_summary, refresh_fill_cache
+    from candlegraph.storage import get_db
+
+    db = get_db()
+
+    def stored_symbols() -> list[str]:
+        """Symbols with rows, read straight from the coverage query."""
+        rows = db.fetch_all(db.sql.coverage_report, {"start_unix": None})
+        return sorted(str(row["symbol"]) for row in rows if row.get("symbol"))
+
+    if args.status:
+        cached = fill_cache_summary(db)
+        if cached.empty:
+            print("the fill cache is empty; run `candlegraph fill` to populate it")
+            return 0
+        print(f"{'symbol':<10}{'method':<10}{'hours':>8}{'longest':>9}  computed")
+        for record in cached.to_dict("records"):
+            longest = int(record["longest_gap_hours"] or 0)
+            print(
+                f"{record['symbol']:<10}{record['method']:<10}"
+                f"{int(record['filled_hours']):>8}{longest:>8}h  "
+                f"{record['computed_at']:%Y-%m-%d %H:%M}"
+            )
+        return 0
+
+    symbols = list(args.symbols) or stored_symbols()
+    if not symbols:
+        print("no stored history to fill; run `make backfill days=90` first")
+        return 0
+
+    if args.clear:
+        removed = db.execute(db.sql.delete_fills_for_method, {"method": LINEAR, "symbols": symbols})
+        print(f"cleared {removed} cached fill(s) for {len(symbols)} symbol(s)")
+        return 0
+
+    summary = refresh_fill_cache(
+        db,
+        symbols,
+        days=args.days,
+        max_fill=args.max_fill if args.max_fill is not None else DEFAULT_MAX_FILL,
+    )
+    print(
+        f"fill cache ({summary.method}): {summary.rows_written} hour(s) written "
+        f"across {len(summary.runs)} symbol(s)"
+    )
+    for run in summary.runs:
+        if run.filled_hours or run.skipped_hours:
+            print(
+                f"  {run.symbol:<10}{run.filled_hours:>6} filled"
+                f"{run.skipped_hours:>7} left (gap over the cap)"
+                f"   {run.gaps} gap(s), longest {run.longest_gap_hours}h"
+            )
+    print("display only: linear interpolation is not causal, so no strategy reads this.")
+    return 0
 
 
 def _runs(limit: int) -> int:
@@ -1040,6 +1128,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _report(settings, args.days, args.strict, args.json)
         case "runs":
             return _runs(args.limit)
+        case "fill":
+            return _fill(args)
         case "strategies":
             return _strategies_cmd()
         case "ui":

@@ -1,6 +1,6 @@
 # Rollout: stage 0 — descriptive statistics, deeper
 
-**Status:** current — opened 2026-11-06, step 1 of 4 done. This is **the**
+**Status:** current — opened 2026-11-06, steps 1-3 of 4 done (2026-11-07). This is **the**
 current rollout: when someone says "the plan" or "step N", they mean this
 file. Finished rollouts move to [`archive/`](archive/).
 **Designs this executes:** [`../roadmap/DESIGN.md`](../roadmap/DESIGN.md)
@@ -16,8 +16,8 @@ touching numbers, `release-check` before calling a step done.
 | # | Step | Size | Depends on | Status |
 |---|---|---|---|---|
 | 1 | Descriptive display: audit the UI against the analytics layer and close the gaps | M | — | **done** 2026-11-06 |
-| 2 | `FillPolicy` seam: the causal estimate anything a strategy consumes may use | M | — | todo |
-| 3 | Linear interpolation estimator, display-only, capped and flagged | S | 2 | todo |
+| 2 | `FillPolicy` seam: the causal estimate anything a strategy consumes may use | M | — | **done** 2026-11-07 |
+| 3 | Linear interpolation estimator, display-only, capped and flagged, cached in `token_hours_fill` | M | 2 | **done** 2026-11-07 |
 | 4 | Kalman / Brownian-bridge estimator, with the `synthetic` flag through `to_wide` | L | 2, 3 | todo |
 
 **Combining steps in one session:** 3 follows 2 naturally and the two can
@@ -112,6 +112,25 @@ stage's exit criterion, not a nice-to-have.
 test, and `candlegraph backtest` produces identical results with it off
 and on.
 
+**Outcome (2026-11-07).** Done, combined with step 3 in one session.
+`FillPolicy` is now four named `FillRule`s in `analytics/prices.py`, each
+declaring `causal`. The enforcement point is `load_symbol_series` — the
+loader strategies, signals, backtests and the `stats`/`signals`/`backtest`
+MCP tools all walk through — which calls `require_causal` and **raises**
+rather than quietly downgrading: a silent substitution would make the
+chosen policy a lie and the equity curve unexplainable.
+
+`apply_fill` is the pure core and returns a `FilledFrame` carrying a
+`synthetic` mask the same shape as the frame, because once a number is in
+a column nothing about it says where it came from. `to_wide` is unchanged
+for its existing callers (it delegates and drops the mask);
+`to_wide_filled` is the variant that keeps it.
+
+The pair of tests that justify the whole seam: moving a bar *after* a gap
+changes the interpolated bar *before* it, and the same experiment against
+`ffill` leaves the past untouched. The look-ahead is demonstrated, not
+asserted in prose.
+
 ---
 
 ## Step 3 — Linear interpolation, display only
@@ -135,6 +154,28 @@ the gap as a gap.
 **Done when.** The Token chart can draw interpolated segments, visibly
 distinct from observed bars, and `candlegraph compare` and
 `candlegraph report` are provably unaffected.
+
+**Outcome (2026-11-07).** Done. `interpolate` is `method="time"` with
+`limit_area="inside"`, so nothing is extrapolated before a token's first
+bar or after its last — a late start is a short history, not a gap. A run
+longer than the cap is left **entirely** alone rather than partly filled:
+pandas' own `limit` fills the first N hours of an over-long hole and
+leaves the rest, which would draw a line stopping in mid-air.
+
+**Added beyond the design, at the user's request:** the estimates are
+cached in a new plain table, `token_hours_fill`, so a dashboard reads them
+instead of recomputing on every widget change. Only missing hours are
+stored — never a copy of an observation — with `gap_hours` per row as the
+nearest thing to an error bar. The roadmap's "no filled rows in the
+database" rejection was about `token_hours_data` and stands; §0 now
+records the refinement, and an integration test asserts the coverage
+report is unchanged by a populated cache. `candlegraph fill`
+(`make fill`, `make fill-status`, `--clear`) is the command behind it, and
+the Quality dashboard has a refresh button since it writes rows.
+
+What was **not** done: no causal estimator (that is step 4), and nothing
+reads the cache except display code. `method_is_causal` treats an unknown
+method as unsafe rather than assuming it is fine.
 
 ---
 

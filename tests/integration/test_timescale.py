@@ -28,7 +28,10 @@ BASE = 1_700_000_000 // HOUR * HOUR
 
 # docs/storage/table-placement/DESIGN.md is the rationale; this is the rule.
 HYPERTABLES = {"token_hours_data", "pool_hours_data", "signal"}
-PLAIN_TABLES = {"token", "pool", "ingest_run", "agent_run"}
+# `token_hours_fill` looks the most like a series of anything plain here, and
+# is the clearest "no": it is a cache of derived prices and is deleted from,
+# which is the one thing a hypertable in this database never is.
+PLAIN_TABLES = {"token", "pool", "ingest_run", "agent_run", "token_hours_fill"}
 # Plain on purpose too: `chunk`'s ANN index must be global, and the rest are
 # state, links, or ledgers. See the knowledge rows in the placement table.
 KNOWLEDGE_TABLES = {

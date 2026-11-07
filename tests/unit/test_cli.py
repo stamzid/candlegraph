@@ -479,3 +479,101 @@ def test_mcp_without_the_extra_says_how_to_install_it(
 def test_an_unknown_mcp_transport_is_rejected_by_the_parser(cli_env: FakeDatabase) -> None:
     with pytest.raises(SystemExit):
         main(["mcp", "--transport", "carrier-pigeon"])
+
+
+# --- the fill cache --------------------------------------------------------
+
+
+def fill_env(tokens_file: Path, monkeypatch: pytest.MonkeyPatch) -> FakeDatabase:
+    """A database with one token whose history has a two-hour hole."""
+    from decimal import Decimal
+
+    hour = 3600
+    base = 1_700_000_000 // (24 * hour) * (24 * hour)
+    rows = [
+        {
+            "symbol": "WBTC",
+            "token_id": "0xwbtc",
+            "period_start_unix": base + i * hour,
+            "timestamp": datetime.fromtimestamp(base + i * hour, tz=UTC),
+            "open": Decimal(str(100 + i)),
+            "high": Decimal(str(100 + i)),
+            "low": Decimal(str(100 + i)),
+            "close": Decimal(str(100 + i)),
+            "price_usd": Decimal(str(100 + i)),
+            "volume_usd": Decimal("1000"),
+            "total_value_locked_usd": Decimal("5000"),
+        }
+        for i in (0, 1, 2, 5, 6, 7)
+    ]
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    monkeypatch.setattr("candlegraph.cli.get_settings", lambda: make_settings(tokens_file=str(tokens_file)))
+    db = FakeDatabase(
+        get_price_history=rows,
+        coverage_report=[
+            {
+                "token_id": "0xwbtc",
+                "symbol": "WBTC",
+                "stored_hours": 6,
+                "expected_hours": 8,
+                "first_unix": base,
+                "last_unix": base + 7 * hour,
+            }
+        ],
+    )
+    set_db(db)
+    return db
+
+
+def test_fill_refreshes_the_cache_and_says_it_is_display_only(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The command exists so the capability is not MCP- or UI-only.
+
+    It also has to say what it built: a reader who does not know that linear
+    interpolation looks ahead would otherwise reasonably assume a backtest
+    picks these rows up.
+    """
+    db = fill_env(tokens_file, monkeypatch)
+
+    assert main(["fill"]) == 0
+
+    out = capsys.readouterr().out
+    assert "2 hour(s) written" in out
+    assert "display only" in out and "not causal" in out
+    assert any(label == "insert_token_hours_fill" for label, _ in db.upserts)
+
+
+def test_fill_defaults_to_every_token_with_stored_history(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fill_env(tokens_file, monkeypatch)
+
+    assert main(["fill"]) == 0
+    assert "1 symbol(s)" in capsys.readouterr().out
+
+
+def test_fill_status_reports_an_empty_cache_without_failing(
+    cli_env: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["fill", "--status"]) == 0
+    assert "fill cache is empty" in capsys.readouterr().out
+
+
+def test_fill_clear_deletes_instead_of_recomputing(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = fill_env(tokens_file, monkeypatch)
+
+    assert main(["fill", "--clear"]) == 0
+
+    assert "cleared" in capsys.readouterr().out
+    assert [label for label, _ in db.executed] == ["delete_fills_for_method"]
+    assert db.upserts == [], "clearing must not write"
+
+
+def test_fill_with_no_stored_history_says_so_rather_than_failing(
+    cli_env: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["fill"]) == 0
+    assert "no stored history" in capsys.readouterr().out

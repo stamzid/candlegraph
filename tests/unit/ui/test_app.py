@@ -338,12 +338,20 @@ def test_single_token_pages_open_on_wbtc_not_the_alphabet(page: str) -> None:
     assert token.value == "WBTC"
 
 
-def test_compare_opens_on_wbtc_against_usdt() -> None:
+def test_compare_opens_on_two_volatile_majors() -> None:
+    """WETH against WBTC, not a token against a dollar.
+
+    It used to open on WBTC/USDT, which is a dollar chart — something the
+    Token dashboard already draws. The question this screen answers (do
+    these move together, and which one leads) needs a second leg that
+    actually moves, so a stablecoin is the wrong default here even though it
+    is still the right one for the Risk benchmark.
+    """
     app = run_app("Compare")
 
     a = next(w for w in app.main.selectbox if w.label == "Token A")
     b = next(w for w in app.main.selectbox if w.label == "Token B")
-    assert (a.value, b.value) == ("WBTC", "USDT")
+    assert (a.value, b.value) == ("WETH", "WBTC")
 
 
 def test_the_portfolio_opens_on_the_majors_without_stablecoins_at_a_quarter_cap() -> None:
@@ -571,3 +579,78 @@ def test_the_compare_dashboard_shows_spearman_beside_pearson() -> None:
     labels = {m.label for m in app.metric}
     assert "Correlation (Pearson)" in labels
     assert "Correlation (Spearman)" in labels
+
+
+# --- selections survive a dashboard switch -----------------------------------
+
+
+def test_a_pair_choice_survives_leaving_the_dashboard_and_coming_back() -> None:
+    """The reported bug, end to end through the real script.
+
+    Compare WBTC against something, go to another view, come back: it used
+    to be back on the defaults, because Streamlit discards a widget's state
+    as soon as a rerun does not render it.
+    """
+    app = run_app("Compare")
+    a = next(w for w in app.main.selectbox if w.label == "Token A")
+    b = next(w for w in app.main.selectbox if w.label == "Token B")
+    a.set_value("WBTC").run()
+    next(w for w in app.main.selectbox if w.label == "Token B").set_value("USDT").run()
+
+    app.sidebar.radio[0].set_value("Market").run()
+    app.sidebar.radio[0].set_value("Compare").run()
+
+    a = next(w for w in app.main.selectbox if w.label == "Token A")
+    b = next(w for w in app.main.selectbox if w.label == "Token B")
+    assert (a.value, b.value) == ("WBTC", "USDT"), "the pair came back as it was left"
+    assert not app.exception, [str(e) for e in app.exception]
+
+
+def test_the_history_window_is_remembered_too() -> None:
+    app = run_app()
+    window = next(w for w in app.sidebar.selectbox if w.label == "History")
+    window.set_value("7 days").run()
+
+    app.sidebar.radio[0].set_value("Token").run()
+    app.sidebar.radio[0].set_value("Market").run()
+
+    assert next(w for w in app.sidebar.selectbox if w.label == "History").value == "7 days"
+
+
+def test_reset_returns_every_dashboard_to_its_defaults() -> None:
+    app = run_app("Compare")
+    next(w for w in app.main.selectbox if w.label == "Token A").set_value("WBTC").run()
+
+    reset = next(b for b in app.sidebar.button if "Reset" in b.label)
+    reset.set_value(True).run()
+
+    app.sidebar.radio[0].set_value("Compare").run()
+    assert next(w for w in app.main.selectbox if w.label == "Token A").value == "WETH"
+    assert not app.exception, [str(e) for e in app.exception]
+
+
+def test_the_reset_button_is_disabled_until_something_is_remembered() -> None:
+    """Nothing to forget, so the control says so rather than doing nothing."""
+    app = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    seeded_db()
+    app.run()
+
+    reset = next(b for b in app.sidebar.button if "Reset" in b.label)
+    assert reset.disabled
+
+
+def test_reset_leaves_a_pending_backfill_confirmation_alone() -> None:
+    """Resetting selections must not cancel an action in flight."""
+    app = run_app("Compare")
+    # Something to reset, or the button is (correctly) disabled.
+    next(w for w in app.main.selectbox if w.label == "Token A").set_value("WBTC").run()
+
+    app.sidebar.radio[0].set_value("Data").run()
+    next(b for b in app.main.button if b.label == "Backfill…").set_value(True).run()
+    assert "backfill_pending" in app.session_state
+
+    next(b for b in app.sidebar.button if "Reset" in b.label).set_value(True).run()
+
+    assert "backfill_pending" in app.session_state, "a confirmation is not a preference"
+    app.sidebar.radio[0].set_value("Compare").run()
+    assert next(w for w in app.main.selectbox if w.label == "Token A").value == "WETH"

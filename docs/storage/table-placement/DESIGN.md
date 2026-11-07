@@ -185,6 +185,52 @@ still stay plain when its dominant read is **similarity, not time**.
 Chunking by time and indexing by nearest neighbour pull in opposite
 directions, and recall wins.
 
+## `token_hours_fill` (stage 0, rollout step 3) — plain
+
+Recorded here before the migration was written. The table caches the
+*derived* price for an hour the subgraph never emitted, so a dashboard does
+not re-interpolate on every widget change. It holds **only the missing
+hours** — never a copy of an observed row — and `method` is part of its key
+so step 4's causal estimator can sit beside the linear one.
+
+| Table | 1. Observation grain | 2. Time-ordered writes | 3. Range reads | 4. Unbounded growth | Placement |
+|---|---|---|---|---|---|
+| `token_hours_fill` | **no**: a row is an estimate, not a measurement | yes: upserted on `(token_id, period_start_unix, method)` | yes | **no**: it is a cache, and is deleted | **plain** |
+
+Two of the four fail, and the second failure is the decisive one. **This
+table is deleted from**, which no series table in this database is: a cached
+fill is invalidated the moment a real row arrives for that hour, and the
+whole method is dropped and recomputed when the cap or the estimator
+changes. A hypertable is the wrong shape for anything whose rows are
+provisional, and the volume never justifies chunking — the table is bounded
+by the number of *missing* hours, which is a fraction of one token's
+history.
+
+The new case this adds to the rule: **invariant 4 is about market data, not
+about every table.** "Nothing deletes it" is a property of
+`token_hours_data` because stored history is the input to everything
+downstream. A derived cache has the opposite property, and conflating the
+two would have produced a hypertable that cannot be invalidated.
+
+### Why this does not contradict the roadmap
+
+`docs/roadmap/DESIGN.md` §0 rejects "writing filled rows into the
+database", and that rejection stands exactly as written: it is about
+`token_hours_data`. Writing a fill there would make coverage read 100% by
+construction and destroy the `NULL`-means-not-collected contract
+(invariant 11), so the quality report could never again be falsified.
+A separate table avoids both:
+
+- `token_hours_data` is untouched, so `coverage_report`, `missing_hours`
+  and every observer finding keep measuring what was actually ingested.
+- A consumer that joins the cache in has to ask for it, and gets back a
+  `synthetic` flag per row. Nothing silently inherits an estimate.
+- The cache is *display-only* for as long as it holds `linear` rows,
+  because linear interpolation is not causal. The `method` column is what
+  lets a future causal estimator be stored in the same table without
+  becoming consumable by a strategy by accident — the read path filters on
+  method, and `load_symbol_series` never reads this table at all.
+
 ## How to apply this to a new table
 
 Ask the four questions in "The rule" before writing the migration, and record

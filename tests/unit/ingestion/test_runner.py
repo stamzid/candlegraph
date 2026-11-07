@@ -249,16 +249,42 @@ def test_a_run_never_deletes_anything(registry: TokenRegistry, frozen_now: datet
 
 
 def test_no_statement_can_delete_hourly_rows() -> None:
-    """Belt and braces: the SQL to prune history no longer exists at all."""
+    """Belt and braces: nothing in the statement set can prune stored history.
+
+    This used to assert that the word DELETE appeared nowhere at all, which
+    was a faithful proxy while every table here held market data. The
+    derived-fill cache (`token_hours_fill`, stage 0 rollout step 3) broke
+    the proxy without weakening the rule: invalidating an *estimate* is not
+    pruning an *observation*, and a cached fill for an hour that has since
+    been ingested is wrong rather than merely stale.
+
+    So the assertion is now on the delete **target** rather than on the
+    word. `delete_superseded_fills` joins `token_hours_data` in its USING
+    clause and must still pass — it reads that table to decide what to
+    remove from the cache — which is exactly the distinction a substring
+    check cannot make.
+    """
+    import re
+
     from candlegraph.storage import statements_for
 
     statements = statements_for("candlegraph")
 
     assert not hasattr(statements, "delete_older_data")
-    rendered = " ".join(
-        str(getattr(statements, name)) for name in vars(statements) if not name.startswith("_")
+
+    deletable = set()
+    for name in vars(statements):
+        if name.startswith("_"):
+            continue
+        rendered = str(getattr(statements, name))
+        # `DELETE FROM `, then the schema Identifier, then `.<table>`.
+        deletable.update(re.findall(r"DELETE FROM '\),\s*Identifier\('[^']+'\),\s*SQL\('\.(\w+)", rendered))
+
+    assert deletable <= {"token_hours_fill"}, (
+        f"only the derived-fill cache may be deleted from; found {sorted(deletable)}"
     )
-    assert "DELETE" not in rendered.upper()
+    # And the rule it protects: the series tables are never a delete target.
+    assert deletable.isdisjoint({"token_hours_data", "pool_hours_data", "signal", "ingest_run"})
 
 
 def test_an_empty_run_is_still_a_success(registry: TokenRegistry, frozen_now: datetime) -> None:
