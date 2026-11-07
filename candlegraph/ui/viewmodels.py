@@ -55,6 +55,13 @@ from candlegraph.analytics.rolling import (
     rolling_summary,
     simple_returns,
 )
+from candlegraph.ingestion.quality import (
+    HOUR,
+    Gap,
+    QualityReport,
+    build_report,
+    group_missing_hours,
+)
 from candlegraph.ingestion.runner import IngestResult, run_ingest
 from candlegraph.knowledge.budget import Level, usage_fraction, usage_level
 from candlegraph.knowledge.explain import (
@@ -175,6 +182,39 @@ def _trailing_change(prices: pd.Series, bars: int) -> float:
     return float(clean.iloc[-1]) / past - 1.0 if past > 0 else float("nan")
 
 
+def observed_gaps(unix_hours: Any) -> list[Gap]:
+    """Runs of missing hourly buckets inside an observed series' own range.
+
+    Pure. The grouping is :func:`quality.group_missing_hours`, the same
+    function the data-quality report uses, so the UI and ``candlegraph
+    report`` can never disagree about what counts as one gap.
+
+    Only the *interior* is examined: a token that started trading late has
+    not got a gap before its first bar, it has a shorter history. That is
+    the same rule ``coverage`` uses (``expected_hours`` spans the token's
+    own stored range, not the window).
+    """
+    present = sorted({int(u) for u in unix_hours})
+    if len(present) < 2:
+        return []
+    seen = set(present)
+    missing = [unix for unix in range(present[0], present[-1] + HOUR, HOUR) if unix not in seen]
+    return group_missing_hours(missing)
+
+
+def longest_gaps(gaps: list[Gap], limit: int) -> list[Gap]:
+    """The ``limit`` longest gaps, back in chronological order.
+
+    A thin token can have hundreds of one-hour holes; shading every one of
+    them turns a chart into a barcode and is slow to render. The longest are
+    the ones a reader can act on.
+    """
+    if limit < 1 or len(gaps) <= limit:
+        return list(gaps)
+    chosen = sorted(gaps, key=lambda gap: gap.hours, reverse=True)[:limit]
+    return sorted(chosen, key=lambda gap: gap.start_unix)
+
+
 # --- market dashboard --------------------------------------------------------
 
 
@@ -252,10 +292,37 @@ class TokenView:
     window: int
     var_1d: float
     """One-day 95% historical VaR as a positive loss fraction; NaN when short."""
+    gaps: list[Gap] = field(default_factory=list)
+    """Runs of hours with no stored row, inside this window's own range.
+
+    Descriptive only: nothing here fills them. A gap is not a fault
+    (invariant 19) — Uniswap emits no row for an hour with no swaps — but a
+    reader comparing two charts deserves to know which one has holes in it.
+    """
 
     @property
     def bars(self) -> int:
         return len(self.prices)
+
+    @property
+    def missing_hours(self) -> int:
+        """Hours with no row, inside the plotted range."""
+        return sum(gap.hours for gap in self.gaps)
+
+    @property
+    def span_hours(self) -> int:
+        """Hours between the first and last stored bar, inclusive."""
+        return self.bars + self.missing_hours
+
+    @property
+    def coverage(self) -> float:
+        """Observed fraction of the hours in the plotted range."""
+        span = self.span_hours
+        return self.bars / span if span else 0.0
+
+    @property
+    def longest_gap(self) -> Gap | None:
+        return max(self.gaps, key=lambda gap: gap.hours, default=None)
 
     @property
     def latest(self) -> dict[str, float]:
@@ -313,6 +380,9 @@ def build_token_view(
         drawdown=drawdown_curve(equity_curve(returns)),
         window=window,
         var_1d=var_1d,
+        # The rows that were actually read, not a reindexed grid: this is the
+        # one place that knows which hours the subgraph really emitted.
+        gaps=observed_gaps(history.for_symbol(symbol)["period_start_unix"]),
     )
 
 
@@ -331,6 +401,231 @@ def candle_frame(ohlc: pd.DataFrame, target_bars: int = 320) -> pd.DataFrame:
         {"open": "first", "high": "max", "low": "min", "close": "last", "volume_usd": "sum"}
     )
     return sampled.dropna(subset=["open", "close"])
+
+
+# --- quality dashboard -------------------------------------------------------
+
+# Beyond this many gap lanes the map stops being readable; the table below it
+# still lists every token.
+MAX_GAP_LANES = 25
+# Gaps shaded on one token's price chart. See :func:`longest_gaps`.
+MAX_SHADED_GAPS = 40
+
+
+def quality_tokens_frame(report: QualityReport, now: datetime) -> pd.DataFrame:
+    """One row per token: coverage, gaps, and how stale the last bar is.
+
+    Pure. The same numbers ``candlegraph report`` prints, plus ``stale_hours``,
+    which the fixed-width table has no room for and a screen does.
+    """
+    columns = [
+        "symbol",
+        "stored_hours",
+        "expected_hours",
+        "missing_hours",
+        "coverage",
+        "gaps",
+        "longest_gap_hours",
+        "stale_hours",
+        "first",
+        "last",
+        "under_covered",
+    ]
+    rows = []
+    for token in sorted(report.tokens, key=lambda t: t.coverage):
+        longest = token.longest_gap
+        rows.append(
+            {
+                "symbol": token.symbol,
+                "stored_hours": token.stored_hours,
+                "expected_hours": token.expected_hours,
+                "missing_hours": token.missing_hours,
+                "coverage": token.coverage,
+                "gaps": len(token.gaps),
+                "longest_gap_hours": longest.hours if longest else 0,
+                "stale_hours": (now - token.last).total_seconds() / HOUR if token.last else float("nan"),
+                "first": token.first,
+                "last": token.last,
+                "under_covered": token.coverage < report.min_expected_coverage,
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def quality_gaps_frame(report: QualityReport) -> pd.DataFrame:
+    """Every gap in the report, longest first: which token, when, how long."""
+    columns = ["symbol", "start", "end", "hours"]
+    rows = [
+        {"symbol": token.symbol, "start": gap.start, "end": gap.end, "hours": gap.hours}
+        for token in report.tokens
+        for gap in token.gaps
+    ]
+    frame = pd.DataFrame(rows, columns=columns)
+    return frame.sort_values("hours", ascending=False).reset_index(drop=True) if not frame.empty else frame
+
+
+def completeness_frame(completeness: dict[str, Any]) -> pd.DataFrame:
+    """Field-level fill rates as fractions of ``rows_total``.
+
+    Every ``*_present`` count the query returns is picked up by name, so a
+    column added to the completeness query appears here without an edit.
+    A low number is not automatically a fault: ``NULL`` means *not
+    collected* (invariant 11), which is exactly what rows written before the
+    enrichment migration are.
+    """
+    columns = ["field", "present", "fraction"]
+    total = int(completeness.get("rows_total") or 0)
+    if not total:
+        return pd.DataFrame(columns=columns)
+    rows = [
+        {
+            "field": name.removesuffix("_present"),
+            "present": int(value or 0),
+            "fraction": int(value or 0) / total,
+        }
+        for name, value in completeness.items()
+        if name.endswith("_present")
+    ]
+    return pd.DataFrame(rows, columns=columns).sort_values("fraction").reset_index(drop=True)
+
+
+def _absent(value: Any) -> bool:
+    """``None`` or ``NaT``/``NaN``, as one question. Keeps pandas' sentinels local."""
+    return value is None or bool(pd.isna(value))
+
+
+def gap_lane_segments(gaps: pd.DataFrame, symbols: list[str]) -> tuple[list[Any], list[Any]]:
+    """Gap runs as one broken line: ``(x, y)`` with ``None`` between segments.
+
+    Plotly draws a single trace with breaks where a coordinate is ``None``,
+    so every gap across every token becomes one trace rather than hundreds —
+    which is the difference between a chart that renders and one that hangs.
+    Only ``symbols`` are included, in the order given, so the lanes line up
+    with the background ranges drawn beside them.
+    """
+    wanted = set(symbols)
+    xs: list[Any] = []
+    ys: list[Any] = []
+    if gaps.empty:
+        return xs, ys
+    for symbol, start, end in zip(list(gaps["symbol"]), list(gaps["start"]), list(gaps["end"]), strict=True):
+        if symbol not in wanted:
+            continue
+        # The run covers whole buckets: it starts at `start` and ends when the
+        # last missing hour ends, which is one hour after that bucket opens.
+        xs.extend([start, end + timedelta(hours=1), None])
+        ys.extend([symbol, symbol, None])
+    return xs, ys
+
+
+def range_lane_segments(tokens: pd.DataFrame, symbols: list[str]) -> tuple[list[Any], list[Any]]:
+    """Each token's stored range as one broken line: the gap map's background.
+
+    Drawn under the gap segments so a short history reads as a short lane
+    rather than as a lane full of holes — the two are different statements
+    and the map has to keep them apart.
+    """
+    xs: list[Any] = []
+    ys: list[Any] = []
+    if tokens.empty:
+        return xs, ys
+    spans = {
+        symbol: (first, last)
+        for symbol, first, last in zip(
+            list(tokens["symbol"]), list(tokens["first"]), list(tokens["last"]), strict=True
+        )
+    }
+    for symbol in symbols:
+        first, last = spans.get(symbol, (None, None))
+        # A token with no rows has no range to draw; it is named in
+        # `missing_tokens` instead, where it means something different.
+        if _absent(first) or _absent(last):
+            continue
+        xs.extend([first, last, None])
+        ys.extend([symbol, symbol, None])
+    return xs, ys
+
+
+@dataclass
+class QualityView:
+    """Is this history trustworthy, and where is it thin?
+
+    The descriptive view of the stored data itself: coverage, where the holes
+    are, which rows are impossible, and which fields were never collected.
+    Read-only — nothing here fills a gap or writes a row.
+    """
+
+    report: QualityReport
+    tokens: pd.DataFrame
+    gaps: pd.DataFrame
+    completeness: pd.DataFrame
+    violations: pd.DataFrame
+    generated_at: datetime
+
+    @property
+    def min_expected_coverage(self) -> float:
+        return self.report.min_expected_coverage
+
+    @property
+    def under_covered(self) -> list[str]:
+        """Tokens below the configured threshold — a prompt to look, not a fault."""
+        return [token.symbol for token in self.report.under_covered]
+
+    @property
+    def missing_tokens(self) -> list[str]:
+        """Configured tokens with no stored rows at all. Always worth a look."""
+        return list(self.report.missing_tokens)
+
+    @property
+    def lane_symbols(self) -> list[str]:
+        """Tokens for the gap map: thinnest coverage first, capped for legibility."""
+        return list(self.tokens["symbol"].head(MAX_GAP_LANES)) if not self.tokens.empty else []
+
+    @property
+    def headline(self) -> dict[str, Any]:
+        """The metric strip."""
+        gaps = self.gaps
+        worst = gaps.iloc[0] if not gaps.empty else None
+        return {
+            "tokens": len(self.tokens),
+            "rows": self.report.total_rows,
+            "under_covered": len(self.under_covered),
+            "violations": len(self.violations),
+            "gaps": len(gaps),
+            "worst_gap_hours": int(worst["hours"]) if worst is not None else 0,
+            "worst_gap_symbol": str(worst["symbol"]) if worst is not None else None,
+            "ok": self.report.ok,
+        }
+
+
+def build_quality_view(
+    db: DatabaseManager, settings: Settings, days: int | None = None, now: datetime | None = None
+) -> QualityView:
+    """The data-quality report, shaped for a screen.
+
+    Calls the same :func:`quality.build_report` that ``candlegraph report``
+    and the ``data_quality_report`` MCP tool call, so three surfaces cannot
+    drift apart. It issues one query per token with missing hours, exactly as
+    the CLI does, which is why this lives on its own dashboard rather than
+    loading on every page.
+    """
+    moment = (now or datetime.now(tz=UTC)).astimezone(UTC)
+    start_unix, _end_unix = window_bounds(days, now=moment)
+    report = build_report(
+        db,
+        expected_symbols=get_token_registry().symbols,
+        start_unix=start_unix,
+        min_expected_coverage=settings.min_expected_coverage,
+        now=moment,
+    )
+    return QualityView(
+        report=report,
+        tokens=quality_tokens_frame(report, moment),
+        gaps=quality_gaps_frame(report),
+        completeness=completeness_frame(report.completeness),
+        violations=pd.DataFrame(report.violations),
+        generated_at=report.generated_at,
+    )
 
 
 # --- risk dashboard ----------------------------------------------------------
@@ -402,6 +697,38 @@ class PairView:
     """Two tokens side by side: ratio, correlation regime, beta cloud."""
 
     comparison: PairwiseComparison
+
+    @property
+    def legs_frame(self) -> pd.DataFrame:
+        """Each token's own statistics, side by side over the aligned bars.
+
+        ``candlegraph compare`` prints these; the screen showed only the
+        joint numbers (correlation, beta, tracking error), which left a
+        reader unable to see *which* leg carried the return or the risk.
+        Both columns are computed over the same aligned bars, so they are
+        comparable with each other — not with a full-history figure
+        elsewhere in the app.
+        """
+        c = self.comparison
+        # One row per token, so each statistic is a column and can carry its
+        # own unit: a percentage and a ratio must not share a format string.
+        return pd.DataFrame(
+            [
+                {
+                    "token": c.symbol_a,
+                    "total_return": c.total_return_a,
+                    "volatility": c.volatility_a,
+                    "sharpe": c.sharpe_a,
+                },
+                {
+                    "token": c.symbol_b,
+                    "total_return": c.total_return_b,
+                    "volatility": c.volatility_b,
+                    "sharpe": c.sharpe_b,
+                },
+            ],
+            columns=["token", "total_return", "volatility", "sharpe"],
+        )
 
     @property
     def scatter(self) -> pd.DataFrame:

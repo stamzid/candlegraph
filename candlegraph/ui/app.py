@@ -15,6 +15,7 @@ Run it with ``candlegraph ui`` (or ``streamlit run candlegraph/ui/app.py``).
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 import pandas as pd
@@ -36,6 +37,7 @@ from candlegraph.strategies.crossover import CrossoverConfig
 from candlegraph.ui.viewmodels import (
     BACKFILL_CHOICES,
     DEFAULT_BENCHMARK,
+    MAX_SHADED_GAPS,
     MAX_WEIGHT_STEP,
     ViewError,
     available_symbols,
@@ -45,6 +47,7 @@ from candlegraph.ui.viewmodels import (
     build_news_view,
     build_pair_view,
     build_portfolio_view,
+    build_quality_view,
     build_risk_view,
     build_strategy_view,
     build_token_view,
@@ -53,7 +56,10 @@ from candlegraph.ui.viewmodels import (
     default_max_weight,
     default_portfolio_symbols,
     forecast_frame,
+    gap_lane_segments,
     load_stored_explanation,
+    longest_gaps,
+    range_lane_segments,
     run_backfill,
     run_explain_now,
     run_news_fetch_now,
@@ -61,7 +67,19 @@ from candlegraph.ui.viewmodels import (
 )
 
 WINDOW_CHOICES = {"7 days": 7, "30 days": 30, "90 days": 90, "180 days": 180, "Everything": None}
-PAGES = ("Market", "Token", "Risk", "Compare", "Portfolio", "Strategy", "Forecast", "Agents", "News", "Data")
+PAGES = (
+    "Market",
+    "Token",
+    "Quality",
+    "Risk",
+    "Compare",
+    "Portfolio",
+    "Strategy",
+    "Forecast",
+    "Agents",
+    "News",
+    "Data",
+)
 HORIZON_CHOICES = {"1 hour": 1, "4 hours": 4, "1 day": 24, "1 week": 168}
 UP, DOWN = "#00c853", "#ff5252"
 SEVERITY_COLORS = {
@@ -242,7 +260,7 @@ def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) ->
     view = build_token_view(db, symbol, ctx["days"], window, num_std, settings.analytics_interval_hours)
     latest = view.latest
 
-    cols = st.columns(5)
+    cols = st.columns(6)
     cols[0].metric("Last", f"{latest['price']:,.4f}", delta=_pct(latest["change_24h"]) + " 24h")
     cols[1].metric("Realised vol (ann.)", _pct(latest.get("rolling_volatility", float("nan"))))
     cols[2].metric(
@@ -250,10 +268,28 @@ def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) ->
     )
     cols[3].metric("Max drawdown", _pct(latest["max_drawdown"]))
     cols[4].metric("Bars", f"{view.bars:,}")
+    longest = view.longest_gap
+    cols[5].metric(
+        "Coverage",
+        _pct(view.coverage),
+        delta=f"{len(view.gaps)} gaps · longest {longest.hours}h" if longest else "no gaps",
+        delta_color="off",
+        help="Observed hours over the plotted range. An hour with no swaps emits no row, "
+        "so a thin token is legitimately sparse — see the Quality dashboard before calling it a fault.",
+    )
 
+    shaded = longest_gaps(view.gaps, MAX_SHADED_GAPS)
+    note = (
+        f" Shaded bands are the {len(shaded)} longest of {len(view.gaps)} gaps."
+        if len(shaded) < len(view.gaps)
+        else " Shaded bands are hours with no stored row."
+        if shaded
+        else ""
+    )
     _title(
         f"Price Action — {symbol} candles with Bollinger envelope",
-        f"{view.window}-bar mean ± {num_std:g} std. Candles are resampled for readability on long windows.",
+        f"{view.window}-bar mean ± {num_std:g} std. Candles are resampled for readability "
+        f"on long windows.{note}",
     )
     candles = candle_frame(view.ohlc)
     figure = go.Figure(
@@ -277,6 +313,17 @@ def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) ->
                 line={"width": 1, "dash": dash, "color": "#90a4ae"},
             )
         )
+    # Under the candles, so a gap reads as missing ground rather than as a mark
+    # on the price. Nothing is interpolated across it — the line simply joins.
+    for gap in shaded:
+        figure.add_vrect(
+            x0=gap.start,
+            x1=gap.end + timedelta(hours=1),
+            fillcolor="#ffab00",
+            opacity=0.14,
+            line_width=0,
+            layer="below",
+        )
     figure.update_layout(xaxis_rangeslider_visible=False)
     _plot(figure, height=420)
 
@@ -294,6 +341,208 @@ def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) ->
         st.area_chart(view.drawdown.to_frame("drawdown"), height=220, color=DOWN)
         _title("Trend vs Price — rolling mean overlay")
         st.line_chart(view.summary[["price", "rolling_mean"]], height=220)
+
+    left, right = st.columns(2)
+    with left:
+        _title(
+            "Band Width — the squeeze",
+            "Band span as a fraction of the mean. Compression is the setup; it says "
+            "a move is coming, never which way.",
+        )
+        squeeze = go.Figure(
+            go.Scatter(
+                x=view.bands.index,
+                y=view.bands["bandwidth"],
+                mode="lines",
+                line={"color": "#2962ff", "width": 1},
+                name="bandwidth",
+            )
+        )
+        squeeze.update_layout(yaxis_tickformat=".1%")
+        _plot(squeeze, height=220)
+    with right:
+        _title(
+            "%B — where price sits in the band",
+            "0 is the lower band, 1 the upper. Outside that range the price has left the envelope.",
+        )
+        percent_b = go.Figure(
+            go.Scatter(
+                x=view.bands.index,
+                y=view.bands["percent_b"],
+                mode="lines",
+                line={"color": "#607d8b", "width": 1},
+                name="%B",
+            )
+        )
+        for level, colour in ((1.0, DOWN), (0.0, UP)):
+            percent_b.add_hline(y=level, line_color=colour, line_dash="dot", line_width=1)
+        _plot(percent_b, height=220)
+
+
+# --- QUALITY -------------------------------------------------------------------
+
+
+def _gap_map(view: Any) -> None:
+    """One lane per token: its stored range, with the missing hours cut out of it."""
+    symbols = view.lane_symbols
+    if not symbols:
+        st.info("No stored history yet.")
+        return
+
+    base_x, base_y = range_lane_segments(view.tokens, symbols)
+    gap_x, gap_y = gap_lane_segments(view.gaps, symbols)
+    figure = go.Figure(
+        go.Scatter(
+            x=base_x,
+            y=base_y,
+            mode="lines",
+            line={"color": "#2e7d32", "width": 11},
+            name="stored",
+            hoverinfo="skip",
+        )
+    )
+    if gap_x:
+        figure.add_trace(
+            go.Scatter(
+                x=gap_x,
+                y=gap_y,
+                mode="lines",
+                line={"color": "#ffab00", "width": 11},
+                name="missing",
+                hoverinfo="skip",
+            )
+        )
+    # Thinnest coverage at the top, which is where the eye lands first.
+    figure.update_layout(yaxis={"categoryorder": "array", "categoryarray": symbols[::-1]})
+    _plot(figure, height=max(200, 34 * len(symbols)))
+
+
+def _quality_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+    st.subheader("Quality — can this history be trusted, and where is it thin?")
+    view = build_quality_view(db, settings, ctx["days"])
+    head = view.headline
+
+    cols = st.columns(6)
+    cols[0].metric("Tokens with history", f"{head['tokens']:,}")
+    cols[1].metric("Hourly rows stored", f"{head['rows']:,}")
+    cols[2].metric(
+        f"Below {view.min_expected_coverage:.0%} coverage",
+        f"{head['under_covered']}",
+        help="Judged against MIN_EXPECTED_COVERAGE, never by the presence of a gap.",
+    )
+    cols[3].metric(
+        "Impossible rows",
+        f"{head['violations']}",
+        delta=f"-{head['violations']}" if head["violations"] else None,
+        delta_color="inverse",
+        help="high < low, or OHLC outside the bar. Impossible whatever the market did — "
+        "the only unambiguous fault on this page.",
+    )
+    cols[4].metric("Gaps", f"{head['gaps']:,}")
+    cols[5].metric(
+        "Longest gap",
+        f"{head['worst_gap_hours']}h" if head["worst_gap_hours"] else "—",
+        delta=head["worst_gap_symbol"] or None,
+        delta_color="off",
+    )
+
+    window = "all stored history" if ctx["days"] is None else f"the last {ctx['days']} days"
+    st.caption(
+        f"Generated {view.generated_at:%Y-%m-%d %H:%M} UTC over {window}. "
+        "Read-only: nothing on this page fills a gap or writes a row."
+    )
+
+    if view.missing_tokens:
+        st.error(
+            f"**No rows at all for {', '.join(view.missing_tokens)}.** "
+            "These are configured in `config/tokens.yaml` but have never ingested — "
+            "check `make runs` and the worker log, not the market."
+        )
+    if head["violations"]:
+        st.warning(
+            f"{head['violations']} impossible row(s) stored. Unlike a gap, this is always a bug: "
+            "inspect them below and check the transform."
+        )
+    if head["ok"]:
+        st.success(
+            "No impossible rows, every configured token present, and every token above the "
+            "coverage threshold."
+        )
+
+    _title(
+        "Gap Map — where the hours are missing",
+        "One lane per token, thinnest coverage first. Green is stored, amber is a run of hours "
+        "with no row. A short lane is a short history, not a gap.",
+    )
+    _gap_map(view)
+
+    left, right = st.columns(2)
+    with left:
+        _title(
+            "Gap Lengths — one outage or constant drizzle?",
+            "Many one-hour holes is a quiet market (invariant 19). A single long bar is an "
+            "ingestion failure worth chasing.",
+        )
+        if view.gaps.empty:
+            st.info("No gaps in the stored ranges.")
+        else:
+            _plot(
+                go.Figure(
+                    go.Histogram(x=view.gaps["hours"].to_numpy(), nbinsx=40, marker_color="#ffab00")
+                ).update_layout(xaxis_title="gap length (hours)", yaxis_title="gaps"),
+                height=260,
+            )
+    with right:
+        _title(
+            "Field Completeness — what was actually collected",
+            "A blank field is NULL, meaning *not collected* — never a real zero (invariant 11). "
+            "Rows written before the enrichment migration genuinely have no value.",
+        )
+        if view.completeness.empty:
+            st.info("No completeness counts for this window.")
+        else:
+            bars = go.Figure(
+                go.Bar(
+                    x=view.completeness["fraction"],
+                    y=view.completeness["field"],
+                    orientation="h",
+                    marker_color="#2962ff",
+                )
+            )
+            bars.update_layout(xaxis_tickformat=".0%", xaxis_range=[0, 1])
+            _plot(bars, height=260)
+
+    _title("By Token — coverage, gaps and freshness", "Thinnest coverage first.")
+    st.dataframe(
+        view.tokens.style.format(
+            {
+                "coverage": "{:.1%}",
+                "stale_hours": "{:,.1f}",
+                "first": "{:%Y-%m-%d %H:%M}",
+                "last": "{:%Y-%m-%d %H:%M}",
+            },
+            na_rep="—",
+        ).map(
+            lambda v: f"color: {'#ffab00' if v < view.min_expected_coverage else UP}",
+            subset=["coverage"],
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+    _title("Longest Gaps — the runs worth explaining", "Longest first.")
+    if view.gaps.empty:
+        st.info("No gaps in the stored ranges.")
+    else:
+        st.dataframe(
+            view.gaps.head(30).style.format({"start": "{:%Y-%m-%d %H:%M}", "end": "{:%Y-%m-%d %H:%M}"}),
+            width="stretch",
+            hide_index=True,
+        )
+
+    if not view.violations.empty:
+        _title("Impossible Rows — high < low, or OHLC outside the bar")
+        st.dataframe(view.violations, width="stretch", hide_index=True)
 
 
 # --- RISK --------------------------------------------------------------------
@@ -411,12 +660,40 @@ def _compare_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) 
     )
     result = view.comparison
 
-    cols = st.columns(5)
-    cols[0].metric("Correlation", f"{result.correlation:.3f}")
-    cols[1].metric(f"Beta ({symbol_a} on {symbol_b})", f"{result.beta:.3f}")
-    cols[2].metric("Tracking error (ann.)", _pct(result.tracking_error))
-    cols[3].metric(f"Relative return {symbol_a} - {symbol_b}", _pct(result.relative_return))
-    cols[4].metric("Aligned bars", f"{result.bars:,}")
+    cols = st.columns(6)
+    cols[0].metric(
+        "Correlation (Pearson)",
+        f"{result.correlation:.3f}",
+        help="Of hourly log returns, over the aligned bars.",
+    )
+    cols[1].metric(
+        "Correlation (Spearman)",
+        f"{result.spearman:.3f}",
+        help="Rank correlation: unmoved by outliers, so a large gap between this and "
+        "Pearson means a few extreme hours are driving the linear number.",
+    )
+    cols[2].metric(f"Beta ({symbol_a} on {symbol_b})", f"{result.beta:.3f}")
+    cols[3].metric("Tracking error (ann.)", _pct(result.tracking_error))
+    cols[4].metric(f"Relative return {symbol_a} - {symbol_b}", _pct(result.relative_return))
+    cols[5].metric("Aligned bars", f"{result.bars:,}")
+
+    _title(
+        "Each Leg on Its Own — over the same aligned bars",
+        "Which token carried the return, and which carried the risk. Computed over the "
+        "hours both traded, so these are comparable with each other — not with a "
+        "full-history figure elsewhere in the app.",
+    )
+    st.dataframe(
+        view.legs_frame.style.format(
+            {"total_return": "{:+.2%}", "volatility": "{:.1%}", "sharpe": "{:.3f}"},
+            na_rep="—",
+        ).map(
+            lambda v: f"color: {UP}" if isinstance(v, float) and v > 0 else f"color: {DOWN}",
+            subset=["total_return"],
+        ),
+        width="stretch",
+        hide_index=True,
+    )
 
     _title(
         f"Relative Value — {symbol_a} priced in {symbol_b}",
@@ -1244,6 +1521,8 @@ def main() -> None:
                 _market_page(db, settings, ctx)
             case "Token":
                 _token_page(db, settings, ctx)
+            case "Quality":
+                _quality_page(db, settings, ctx)
             case "Risk":
                 _risk_page(db, settings, ctx)
             case "Compare":

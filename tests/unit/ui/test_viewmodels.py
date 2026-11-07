@@ -7,7 +7,7 @@ this is where the UI gets its coverage. Errors a user can fix must arrive as
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -18,6 +18,7 @@ import pytest
 from candlegraph.analytics.arima import ArimaConfig, ArimaForecast
 from candlegraph.analytics.portfolio import PortfolioConfig
 from candlegraph.analytics.risk import RiskConfig
+from candlegraph.ingestion.quality import Gap
 from candlegraph.strategies.backtest import BacktestConfig
 from candlegraph.strategies.bollinger import BollingerConfig
 from candlegraph.ui.viewmodels import (
@@ -29,15 +30,21 @@ from candlegraph.ui.viewmodels import (
     build_news_view,
     build_pair_view,
     build_portfolio_view,
+    build_quality_view,
     build_risk_view,
     build_strategy_view,
     build_token_view,
     candle_frame,
+    completeness_frame,
     default_index,
     default_max_weight,
     default_portfolio_symbols,
     forecast_frame,
+    gap_lane_segments,
     load_prices,
+    longest_gaps,
+    observed_gaps,
+    range_lane_segments,
     run_backfill,
     run_news_fetch_now,
     run_observer_now,
@@ -68,6 +75,10 @@ def price_rows(symbol: str, n: int, seed: int = 3) -> list[dict[str, Any]]:
         }
         for i, p in enumerate(walk)
     ]
+
+
+def _utc(unix: int) -> datetime:
+    return datetime.fromtimestamp(unix, tz=UTC)
 
 
 def coverage_row(symbol: str, stored: int = 400, expected: int = 400) -> dict[str, Any]:
@@ -869,3 +880,240 @@ def test_run_explain_now_turns_a_bad_bar_into_a_view_error(
         run_explain_now(settings, db, strategy, "WBTC", search=False, at=datetime(2031, 1, 1, tzinfo=UTC))
     with pytest.raises(ViewError, match="unknown token"):
         run_explain_now(settings, db, strategy, "DOGE", search=False)
+
+
+# --- quality dashboard: gaps as a descriptive fact ---------------------------
+
+
+def test_a_quiet_hour_inside_the_range_is_reported_as_a_gap() -> None:
+    """Uniswap emits no row for an hour with no swaps, so the hour is absent."""
+    hours = [BASE, BASE + HOUR, BASE + 3 * HOUR]
+
+    gaps = observed_gaps(hours)
+
+    assert len(gaps) == 1
+    assert gaps[0].hours == 1
+    assert gaps[0].start_unix == BASE + 2 * HOUR
+
+
+def test_consecutive_missing_hours_collapse_into_one_gap() -> None:
+    """ "3 gaps, longest 14h" is actionable; 212 missing hours is not."""
+    hours = [BASE, BASE + 5 * HOUR]
+
+    gaps = observed_gaps(hours)
+
+    assert len(gaps) == 1
+    assert gaps[0].hours == 4
+
+
+def test_a_token_that_started_late_has_a_short_history_not_a_leading_gap() -> None:
+    """Only the interior counts: absence before the first bar is not a hole.
+
+    The same rule `coverage` uses — `expected_hours` spans the token's own
+    stored range, not the window the user picked.
+    """
+    hours = [BASE + 100 * HOUR, BASE + 101 * HOUR]
+
+    assert observed_gaps(hours) == []
+
+
+def test_a_series_of_one_bar_has_no_gaps() -> None:
+    assert observed_gaps([BASE]) == []
+    assert observed_gaps([]) == []
+
+
+def test_only_the_longest_gaps_are_shaded_and_they_stay_in_time_order() -> None:
+    """Hundreds of one-hour holes render as a barcode; the long ones carry the meaning."""
+    gaps = [
+        Gap(BASE, BASE),
+        Gap(BASE + 10 * HOUR, BASE + 19 * HOUR),
+        Gap(BASE + 30 * HOUR, BASE + 30 * HOUR),
+        Gap(BASE + 50 * HOUR, BASE + 54 * HOUR),
+    ]
+
+    kept = longest_gaps(gaps, 2)
+
+    assert [g.hours for g in kept] == [10, 5], "the two longest"
+    assert [g.start_unix for g in kept] == sorted(g.start_unix for g in kept), "chronological"
+    assert longest_gaps(gaps, 10) == gaps, "under the cap, nothing is dropped"
+
+
+def test_the_token_view_measures_coverage_over_the_plotted_range(db: FakeDatabase) -> None:
+    """A reader comparing two charts deserves to know which one has holes."""
+    rows = price_rows("WETH", 60)
+    del rows[30:34]  # a four-hour hole in the middle
+    gappy = FakeDatabase(get_price_history=rows, coverage_report=[coverage_row("WETH")])
+
+    view = build_token_view(gappy, "WETH", None, window=5)
+
+    assert view.bars == 56
+    assert view.missing_hours == 4
+    assert view.span_hours == 60
+    assert view.coverage == pytest.approx(56 / 60)
+    assert view.longest_gap is not None and view.longest_gap.hours == 4
+
+
+# --- quality dashboard: the report, shaped for a screen ----------------------
+
+
+def quality_db(stored: int = 90, expected: int = 100) -> FakeDatabase:
+    """One under-covered token with a real gap, plus completeness counts.
+
+    WBTC and SHIB are the two tokens in the `tokens_file` fixture's registry;
+    storing only WBTC leaves SHIB genuinely un-ingested, which is what
+    `missing_tokens` is for.
+    """
+    return FakeDatabase(
+        coverage_report=[coverage_row("WBTC", stored=stored, expected=expected)],
+        missing_hours=[{"period_start_unix": BASE + i * HOUR} for i in range(10, 20)],
+        field_completeness=[
+            {"rows_total": 100, "volume_present": 100, "tvl_usd_present": 40, "fees_usd_present": 0}
+        ],
+    )
+
+
+def test_the_quality_table_agrees_with_the_report_the_cli_prints(
+    tokens_file: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three surfaces read one function; a fourth shape here would be a bug.
+
+    `candlegraph report`, the `data_quality_report` MCP tool and this screen
+    all go through `quality.build_report`, so the screen's numbers are
+    compared against `report_dict` rather than recomputed.
+    """
+    from candlegraph.ingestion.quality import report_dict
+
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    db = quality_db()
+    settings = make_settings(tokens_file=str(tokens_file), min_expected_coverage=0.95)
+
+    view = build_quality_view(db, settings)
+    expected = report_dict(view.report)
+
+    row = view.tokens.iloc[0]
+    printed = expected["tokens"][0]
+    assert row["symbol"] == printed["symbol"]
+    assert row["stored_hours"] == printed["stored_hours"]
+    assert row["missing_hours"] == printed["missing_hours"]
+    assert row["coverage"] == pytest.approx(printed["coverage"])
+    assert row["gaps"] == printed["gaps"]
+    assert row["longest_gap_hours"] == printed["longest_gap_hours"]
+
+
+def test_the_quality_view_counts_gaps_and_names_the_worst(
+    tokens_file: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    settings = make_settings(tokens_file=str(tokens_file), min_expected_coverage=0.95)
+
+    view = build_quality_view(quality_db(), settings)
+
+    assert view.headline["worst_gap_hours"] == 10
+    assert view.headline["worst_gap_symbol"] == "WBTC"
+    assert view.under_covered == ["WBTC"], "90 of 100 hours, under a 95% threshold"
+    assert view.headline["ok"] is False
+    assert list(view.gaps.columns) == ["symbol", "start", "end", "hours"]
+
+
+def test_a_configured_token_with_no_rows_at_all_is_named_not_merely_thin(
+    tokens_file: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thin coverage is the market; no rows at all is an ingestion fault."""
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    settings = make_settings(tokens_file=str(tokens_file))
+
+    view = build_quality_view(quality_db(), settings)
+
+    assert view.missing_tokens == ["SHIB"], "configured in tokens.yaml, never ingested"
+
+
+def test_completeness_reports_a_fraction_per_field_and_survives_an_empty_table() -> None:
+    """A blank field is NULL — not collected — and never a real zero (invariant 11)."""
+    frame = completeness_frame(
+        {"rows_total": 200, "volume_present": 200, "tvl_usd_present": 50, "fees_usd_present": 0}
+    )
+
+    assert list(frame["field"]) == ["fees_usd", "tvl_usd", "volume"], "worst first"
+    assert list(frame["fraction"]) == [0.0, 0.25, 1.0]
+    # No rows means no denominator; the page shows "no counts", not a crash.
+    assert completeness_frame({"rows_total": 0, "volume_present": 0}).empty
+    assert completeness_frame({}).empty
+
+
+def test_a_new_completeness_column_appears_without_an_edit() -> None:
+    """Driven off the `_present` suffix, so the query can grow a column."""
+    frame = completeness_frame({"rows_total": 10, "liquidity_present": 5})
+
+    assert list(frame["field"]) == ["liquidity"]
+
+
+# --- quality dashboard: the gap map ------------------------------------------
+
+
+def test_gap_lanes_break_between_runs_and_cover_the_whole_missing_bucket() -> None:
+    """One plotly trace for every gap: `None` is what breaks the line.
+
+    The end coordinate is one hour past the last missing bucket, because a
+    gap of one hour covers that hour rather than being a zero-width instant.
+    """
+    gaps = pd.DataFrame(
+        [
+            {"symbol": "WETH", "start": _utc(BASE), "end": _utc(BASE), "hours": 1},
+            {"symbol": "SHIB", "start": _utc(BASE), "end": _utc(BASE + HOUR), "hours": 2},
+        ]
+    )
+
+    xs, ys = gap_lane_segments(gaps, ["WETH", "SHIB"])
+
+    assert ys == ["WETH", "WETH", None, "SHIB", "SHIB", None]
+    assert xs[1] - xs[0] == timedelta(hours=1), "a one-hour gap spans one hour"
+    assert xs[2] is None and xs[5] is None
+    assert xs[4] - xs[3] == timedelta(hours=2)
+
+
+def test_gap_lanes_skip_tokens_that_are_not_on_the_map() -> None:
+    """The map caps its lanes; a gap on a token with no lane must not float."""
+    gaps = pd.DataFrame([{"symbol": "SHIB", "start": _utc(BASE), "end": _utc(BASE), "hours": 1}])
+
+    assert gap_lane_segments(gaps, ["WETH"]) == ([], [])
+    assert gap_lane_segments(pd.DataFrame(columns=["symbol", "start", "end", "hours"]), ["WETH"]) == ([], [])
+
+
+def test_a_short_history_draws_a_short_lane_rather_than_a_hole(
+    tokens_file: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The background range is what keeps "late start" and "gap" apart."""
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    view = build_quality_view(quality_db(), make_settings(tokens_file=str(tokens_file)))
+
+    xs, ys = range_lane_segments(view.tokens, ["WBTC"])
+
+    assert ys == ["WBTC", "WBTC", None]
+    assert xs[0] == view.tokens.iloc[0]["first"]
+    assert xs[1] == view.tokens.iloc[0]["last"]
+
+
+def test_a_token_with_no_stored_range_draws_no_lane() -> None:
+    tokens = pd.DataFrame([{"symbol": "WETH", "first": None, "last": None}])
+
+    assert range_lane_segments(tokens, ["WETH"]) == ([], [])
+    assert range_lane_segments(pd.DataFrame(columns=["symbol", "first", "last"]), ["WETH"]) == ([], [])
+
+
+# --- compare: the numbers the CLI prints and the screen dropped --------------
+
+
+def test_the_compare_screen_shows_each_leg_on_its_own(db: FakeDatabase) -> None:
+    """`candlegraph compare` prints twelve numbers; the screen showed five.
+
+    Without the per-leg column a reader cannot see which token carried the
+    return or the risk — only that they moved together.
+    """
+    view = build_pair_view(db, "WETH", "WBTC", None, window=24)
+
+    legs = view.legs_frame
+
+    assert list(legs["token"]) == ["WETH", "WBTC"]
+    assert list(legs.columns) == ["token", "total_return", "volatility", "sharpe"]
+    assert legs.iloc[0]["total_return"] == pytest.approx(view.comparison.total_return_a)
+    assert legs.iloc[1]["sharpe"] == pytest.approx(view.comparison.sharpe_b)

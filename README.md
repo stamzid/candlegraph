@@ -364,12 +364,24 @@ dashboard opens with a metric strip, and every chart carries a title that says w
 - **Market** — the whole tape: relative strength (every token rebased to 100), a movers table
   with 24h/7d/30d changes, a return-correlation heatmap over aligned bars, and a volatility ladder.
 - **Token** — hourly candlesticks with the Bollinger envelope, volume, rolling volatility,
-  the z-score stretch gauge, and the drawdown-from-peak curve.
+  the z-score stretch gauge, the drawdown-from-peak curve, band width (the squeeze) and %B.
+  Hours with no stored row are shaded on the candles and counted as a coverage figure, so a
+  chart with holes in it cannot be mistaken for a continuous one.
+- **Quality** — can this history be trusted, and where is it thin? A **gap map** (one lane per
+  token: green where hours are stored, amber where they are missing), the distribution of gap
+  lengths (constant drizzle is a quiet market; one long bar is an ingestion failure), field
+  completeness (a blank field is `NULL` — *not collected* — never a real zero), per-token
+  coverage and staleness, the longest gaps, and any impossible rows. It reads the same
+  `quality.build_report` that `candlegraph report` and the `data_quality_report` MCP tool read,
+  so the three cannot disagree. Read-only: nothing here fills a gap or writes a row.
 - **Risk** — VaR and CVaR at a chosen confidence, horizon and estimator; the return histogram
   with the VaR cut; the three estimators side by side as a fat-tail check; and the
   systematic-vs-idiosyncratic split against a benchmark.
 - **Compare** — the A/B price ratio, the rolling correlation regime, and the beta cloud with its
-  fitted slope.
+  fitted slope. Pearson and Spearman correlation sit side by side (a wide gap between them means
+  a few extreme hours are driving the linear number), and each leg's own total return,
+  volatility and Sharpe are tabled over the same aligned bars — the twelve numbers
+  `candlegraph compare` prints, rather than only the joint five.
 - **Portfolio** — allocation donut, the risk budget (each asset's share of portfolio volatility),
   the efficient frontier with the solved portfolio starred, and the allocation's own VaR/CVaR.
 - **Strategy** — equity vs buy-and-hold net of costs, exposure timeline, strategy drawdown, and a

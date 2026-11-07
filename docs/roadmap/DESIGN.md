@@ -23,12 +23,18 @@ the test suite:
 | **Time-series storage** | The three series tables are TimescaleDB hypertables chunked on `period_start_unix`; the state and ledger tables deliberately are not. | `make test-integration` (`test_timescale.py`) |
 | **Knowledge graph and signaller** (stage 1, 2026-11-06) | The eight corpus tables on pgvector, assets and aliases from `tokens.yaml`, the document pipeline, local embeddings, Tavily under a budget with the `source_call` ledger, hybrid retrieval bounded by `published_at <= bar`, `signals --explain` with its citation validator on the CLI, GraphQL and the UI, four observer findings, and the read-only MCP server. | `candlegraph signals WETH --strategy bollinger --explain`, with no LLM key; `make mcp` |
 
-One stage is open — stage 0, paused with its first deliverable landed and
-now next in line:
+One stage is open — stage 0, resumed 2026-11-06 and now being built in
+four steps tracked in [`../rollout/ROLLOUT.md`](../rollout/ROLLOUT.md):
 
 | In progress | Landed | Remaining | Exit criterion |
 |---|---|---|---|
-| **0. Descriptive statistics, deeper** | `candlegraph compare` over aligned bars. | The `active` token flag; the `FillPolicy` seam. | met for `compare`; the five active tokens and the no-look-ahead fill test remain |
+| **0. Descriptive statistics, deeper** | `candlegraph compare` over aligned bars; the descriptive display, audited and completed — the Quality dashboard's gap map, gap shading on the Token candles, and the per-leg Compare numbers (rollout step 1). | The `active` token flag; the `FillPolicy` seam and the two estimators (rollout steps 2–4). | met for `compare`; the five active tokens and the no-look-ahead fill test remain |
+
+The descriptive-display step came first on purpose: rule 2 below asks for
+filled bars to be *flagged*, which presupposes a surface that tells an
+observed bar from a filled one. Building the gap map before the estimators
+means steps 3 and 4 have something to be judged against rather than a
+prettier chart nobody can falsify.
 
 What that adds up to, and where the next stages attach:
 

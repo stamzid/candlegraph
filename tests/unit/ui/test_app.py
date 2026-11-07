@@ -37,7 +37,19 @@ BASE = 1_700_000_000 // (24 * HOUR) * (24 * HOUR)
 # ARIMA refits make the strategy page slow when selected.
 TIMEOUT = 120
 
-PAGES = ("Market", "Token", "Risk", "Compare", "Portfolio", "Strategy", "Forecast", "Agents", "News", "Data")
+PAGES = (
+    "Market",
+    "Token",
+    "Quality",
+    "Risk",
+    "Compare",
+    "Portfolio",
+    "Strategy",
+    "Forecast",
+    "Agents",
+    "News",
+    "Data",
+)
 
 
 def price_rows(symbol: str, n: int, seed: int = 3) -> list[dict[str, Any]]:
@@ -488,3 +500,74 @@ def test_a_news_fetch_without_a_key_is_an_error_box_not_a_traceback(
 
     assert not app.exception
     assert any("TAVILY_API_KEY" in e.value for e in app.error)
+
+
+# --- the quality dashboard renders a real gap --------------------------------
+
+
+def gappy_db() -> FakeDatabase:
+    """A token missing ten interior hours, with impossible rows to report."""
+    db = FakeDatabase(
+        get_price_history=[row for i, s in enumerate(SYMBOLS) for row in price_rows(s, 300, seed=3 + i)],
+        coverage_report=[{**coverage(s, 300), "stored_hours": 290} for s in SYMBOLS],
+        missing_hours=[{"period_start_unix": BASE + i * HOUR} for i in range(10, 20)],
+        field_completeness=[
+            {"rows_total": 300, "volume_present": 300, "tvl_usd_present": 90, "fees_usd_present": 0}
+        ],
+        ohlc_violations=[{"token_id": "0xweth", "period_start_unix": BASE, "high": 1.0, "low": 2.0}],
+        get_recent_agent_runs=[],
+        get_recent_runs=[],
+    )
+    set_db(db)
+    return db
+
+
+def test_the_quality_dashboard_renders_gaps_without_an_exception() -> None:
+    """The empty-data smoke test cannot reach the gap map, the histogram or
+    the violations table — every one of those needs a gap to exist first."""
+    gappy_db()
+    app = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    app.run()
+    app.sidebar.radio[0].set_value("Quality").run()
+
+    assert not app.exception, [str(e) for e in app.exception]
+    rendered = " ".join(m.value for m in app.markdown)
+    assert "Gap Map" in rendered
+    assert "Field Completeness" in rendered
+    assert "Impossible Rows" in rendered, "a violation was seeded and must be shown"
+    # Both branches render the titles above, so without this the test would
+    # pass on a page that found no gaps at all.
+    infos = [i.value for i in app.info]
+    assert not any("No gaps" in text for text in infos), "the seeded gap must reach the chart"
+    assert any(m.label == "Gaps" and m.value != "0" for m in app.metric)
+
+
+def test_the_quality_dashboard_says_a_gap_is_not_automatically_a_fault() -> None:
+    """Invariant 19 on the one screen most likely to be read as an alarm."""
+    gappy_db()
+    app = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    app.run()
+    app.sidebar.radio[0].set_value("Quality").run()
+
+    text = " ".join(c.value for c in app.caption) + " ".join(m.value for m in app.markdown)
+    assert "no row" in text or "no swaps" in text
+    assert "fills a gap" in text, "the page must say it is read-only"
+
+
+def test_the_token_dashboard_reports_coverage_alongside_the_price() -> None:
+    gappy_db()
+    app = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    app.run()
+    app.sidebar.radio[0].set_value("Token").run()
+
+    assert not app.exception, [str(e) for e in app.exception]
+    assert any(m.label == "Coverage" for m in app.metric)
+
+
+def test_the_compare_dashboard_shows_spearman_beside_pearson() -> None:
+    """A wide gap between the two means outliers are driving the linear number."""
+    app = run_app("Compare")
+
+    labels = {m.label for m in app.metric}
+    assert "Correlation (Pearson)" in labels
+    assert "Correlation (Spearman)" in labels
