@@ -29,6 +29,7 @@ from candlegraph.analytics.portfolio import OBJECTIVES, Objective, PortfolioConf
 from candlegraph.analytics.prices import DEFAULT_MAX_FILL, fill_rule
 from candlegraph.analytics.rates import real_rate
 from candlegraph.analytics.risk import METHODS, Method, RiskConfig
+from candlegraph.analytics.simulation import GENERATOR_NAMES, GENERATORS
 from candlegraph.ingestion.fills import METHOD_POLICY, METHOD_SUMMARY
 from candlegraph.ingestion.fills import METHODS as FILL_METHODS
 from candlegraph.settings import Settings, get_settings
@@ -38,6 +39,7 @@ from candlegraph.strategies.arima_signal import ArimaSignalConfig
 from candlegraph.strategies.backtest import BacktestConfig
 from candlegraph.strategies.bollinger import BollingerConfig
 from candlegraph.strategies.crossover import CrossoverConfig
+from candlegraph.strategies.montecarlo import SAMPLE_CAVEAT
 from candlegraph.ui.viewmodels import (
     BACKFILL_CHOICES,
     DEFAULT_PAIR,
@@ -47,6 +49,7 @@ from candlegraph.ui.viewmodels import (
     ViewError,
     available_symbols,
     build_agents_view,
+    build_execution_view,
     build_forecast,
     build_lag_demonstration,
     build_market_view,
@@ -54,8 +57,10 @@ from candlegraph.ui.viewmodels import (
     build_news_view,
     build_pair_view,
     build_portfolio_view,
+    build_posterior_forecast,
     build_quality_view,
     build_risk_view,
+    build_simulation_view,
     build_strategy_comparison,
     build_strategy_view,
     build_token_view,
@@ -63,11 +68,15 @@ from candlegraph.ui.viewmodels import (
     default_index,
     default_max_weight,
     default_portfolio_symbols,
+    execution_walkthrough,
     forecast_frame,
     gap_lane_segments,
+    generator_catalogue,
     load_stored_explanation,
     longest_gaps,
     method_catalogue,
+    posterior_diagnostics_frame,
+    posterior_interval_frame,
     range_lane_segments,
     run_backfill,
     run_explain_now,
@@ -85,6 +94,7 @@ PAGES = (
     "Compare",
     "Portfolio",
     "Strategy",
+    "Simulation",
     "Forecast",
     "Agents",
     "News",
@@ -313,44 +323,13 @@ def _market_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -
 # --- TOKEN -------------------------------------------------------------------
 
 
-def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
-    left, mid, right = st.columns(3)
-    symbol = _pick(left, "Token", ctx["symbols"], "token_symbol", default_index(ctx["symbols"]))
-    window = int(mid.number_input("Rolling window (bars)", 2, 2000, settings.rolling_window, 1))
-    num_std = float(right.number_input("Band width (std)", 0.5, 5.0, 2.0, 0.25))
+def _token_price_chart(view: Any, candles: pd.DataFrame, symbol: str, num_std: float) -> None:
+    """Candles, the Bollinger envelope, shaded gaps and the chosen estimate.
 
-    # Whichever estimator the Quality dashboard has selected. They are
-    # alternatives, so exactly one is drawn.
-    method = _prefs().get("fill_method", settings.fill_method)
-    view = build_token_view(
-        db,
-        symbol,
-        ctx["days"],
-        window,
-        num_std,
-        settings.analytics_interval_hours,
-        fill_method=str(method),
-    )
-    latest = view.latest
-
-    cols = st.columns(6)
-    cols[0].metric("Last", f"{latest['price']:,.4f}", delta=_pct(latest["change_24h"]) + " 24h")
-    cols[1].metric("Realised vol (ann.)", _pct(latest.get("rolling_volatility", float("nan"))))
-    cols[2].metric(
-        "VaR 95% 1d", _pct(latest["var_1d"]), help="Historical. The loss exceeded one day in twenty."
-    )
-    cols[3].metric("Max drawdown", _pct(latest["max_drawdown"]))
-    cols[4].metric("Bars", f"{view.bars:,}")
-    longest = view.longest_gap
-    cols[5].metric(
-        "Coverage",
-        _pct(view.coverage),
-        delta=f"{len(view.gaps)} gaps · longest {longest.hours}h" if longest else "no gaps",
-        delta_color="off",
-        help="Observed hours over the plotted range. An hour with no swaps emits no row, "
-        "so a thin token is legitimately sparse — see the Quality dashboard before calling it a fault.",
-    )
-
+    The shading and the dashed estimate are drawn here rather than in
+    the page so the ordering stays explicit: gaps go underneath, the
+    uncertainty ribbon under the mean, the mean under the candles.
+    """
     shaded = longest_gaps(view.gaps, MAX_SHADED_GAPS)
     note = (
         f" Shaded bands are the {len(shaded)} longest of {len(view.gaps)} gaps."
@@ -364,7 +343,6 @@ def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) ->
         f"{view.window}-bar mean ± {num_std:g} std. Candles are resampled for readability "
         f"on long windows.{note}",
     )
-    candles = candle_frame(view.ohlc)
     figure = go.Figure(
         go.Candlestick(
             x=candles.index,
@@ -459,6 +437,9 @@ def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) ->
                 "or use the Quality dashboard to compute it."
             )
 
+
+def _token_diagnostics(view: Any, candles: pd.DataFrame) -> None:
+    """Volume, then the four per-token statistics, two by two."""
     _title("Volume Pulse — USD traded per candle")
     _plot(go.Figure(go.Bar(x=candles.index, y=candles["volume_usd"], marker_color="#607d8b")), height=160)
 
@@ -509,6 +490,51 @@ def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) ->
         for level, colour in ((1.0, DOWN), (0.0, UP)):
             percent_b.add_hline(y=level, line_color=colour, line_dash="dot", line_width=1)
         _plot(percent_b, height=220)
+
+
+def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+    left, mid, right = st.columns(3)
+    symbol = _pick(left, "Token", ctx["symbols"], "token_symbol", default_index(ctx["symbols"]))
+    window = int(mid.number_input("Rolling window (bars)", 2, 2000, settings.rolling_window, 1))
+    num_std = float(right.number_input("Band width (std)", 0.5, 5.0, 2.0, 0.25))
+
+    # Whichever estimator the Quality dashboard has selected. They are
+    # alternatives, so exactly one is drawn.
+    method = _prefs().get("fill_method", settings.fill_method)
+    view = build_token_view(
+        db,
+        symbol,
+        ctx["days"],
+        window,
+        num_std,
+        settings.analytics_interval_hours,
+        fill_method=str(method),
+    )
+    latest = view.latest
+
+    cols = st.columns(6)
+    cols[0].metric("Last", f"{latest['price']:,.4f}", delta=_pct(latest["change_24h"]) + " 24h")
+    cols[1].metric("Realised vol (ann.)", _pct(latest.get("rolling_volatility", float("nan"))))
+    cols[2].metric(
+        "VaR 95% 1d", _pct(latest["var_1d"]), help="Historical. The loss exceeded one day in twenty."
+    )
+    cols[3].metric("Max drawdown", _pct(latest["max_drawdown"]))
+    cols[4].metric("Bars", f"{view.bars:,}")
+    longest = view.longest_gap
+    cols[5].metric(
+        "Coverage",
+        _pct(view.coverage),
+        delta=f"{len(view.gaps)} gaps · longest {longest.hours}h" if longest else "no gaps",
+        delta_color="off",
+        help="Observed hours over the plotted range. An hour with no swaps emits no row, "
+        "so a thin token is legitimately sparse — see the Quality dashboard before calling it a fault.",
+    )
+
+    # Resampled once and shared: the chart and the volume pulse must show
+    # the same buckets, and resampling twice invites them to drift.
+    candles = candle_frame(view.ohlc)
+    _token_price_chart(view, candles, symbol, num_std)
+    _token_diagnostics(view, candles)
 
 
 # --- QUALITY -------------------------------------------------------------------
@@ -566,58 +592,8 @@ def _run_fill(db: DatabaseManager, view: Any, methods: list[str]) -> None:
         st.rerun()
 
 
-def _quality_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
-    st.subheader("Quality — can this history be trusted, and where is it thin?")
-    view = build_quality_view(db, settings, ctx["days"])
-    head = view.headline
-
-    cols = st.columns(6)
-    cols[0].metric("Tokens with history", f"{head['tokens']:,}")
-    cols[1].metric("Hourly rows stored", f"{head['rows']:,}")
-    cols[2].metric(
-        f"Below {view.min_expected_coverage:.0%} coverage",
-        f"{head['under_covered']}",
-        help="Judged against MIN_EXPECTED_COVERAGE, never by the presence of a gap.",
-    )
-    cols[3].metric(
-        "Impossible rows",
-        f"{head['violations']}",
-        delta=f"-{head['violations']}" if head["violations"] else None,
-        delta_color="inverse",
-        help="high < low, or OHLC outside the bar. Impossible whatever the market did — "
-        "the only unambiguous fault on this page.",
-    )
-    cols[4].metric("Gaps", f"{head['gaps']:,}")
-    cols[5].metric(
-        "Longest gap",
-        f"{head['worst_gap_hours']}h" if head["worst_gap_hours"] else "—",
-        delta=head["worst_gap_symbol"] or None,
-        delta_color="off",
-    )
-
-    window = "all stored history" if ctx["days"] is None else f"the last {ctx['days']} days"
-    st.caption(
-        f"Generated {view.generated_at:%Y-%m-%d %H:%M} UTC over {window}. "
-        "Read-only: nothing on this page fills a gap or writes a row."
-    )
-
-    if view.missing_tokens:
-        st.error(
-            f"**No rows at all for {', '.join(view.missing_tokens)}.** "
-            "These are configured in `config/tokens.yaml` but have never ingested — "
-            "check `make runs` and the worker log, not the market."
-        )
-    if head["violations"]:
-        st.warning(
-            f"{head['violations']} impossible row(s) stored. Unlike a gap, this is always a bug: "
-            "inspect them below and check the transform."
-        )
-    if head["ok"]:
-        st.success(
-            "No impossible rows, every configured token present, and every token above the "
-            "coverage threshold."
-        )
-
+def _estimator_panel(db: DatabaseManager, settings: Settings, ctx: dict[str, Any], view: Any) -> None:
+    """Pick a gap estimator, recompute it, and see how the three compare."""
     _title(
         "Gap Estimators — three ways to guess, one selected",
         "Stored in `token_hours_fill` so a dashboard reads an estimate instead of recomputing "
@@ -724,6 +700,9 @@ def _quality_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) 
             )
         st.caption(note)
 
+
+def _gap_diagnostics(view: Any) -> None:
+    """Where the holes are, how long they run, and what was collected."""
     _title(
         "Gap Map — where the hours are missing",
         "One lane per token, thinnest coverage first. Green is stored, amber is a run of hours "
@@ -767,6 +746,9 @@ def _quality_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) 
             bars.update_layout(xaxis_tickformat=".0%", xaxis_range=[0, 1])
             _plot(bars, height=260)
 
+
+def _quality_tables(view: Any) -> None:
+    """Per token, then the longest gaps, then anything impossible."""
     _title("By Token — coverage, gaps and freshness", "Thinnest coverage first.")
     st.dataframe(
         view.tokens.style.format(
@@ -798,6 +780,63 @@ def _quality_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) 
     if not view.violations.empty:
         _title("Impossible Rows — high < low, or OHLC outside the bar")
         st.dataframe(view.violations, width="stretch", hide_index=True)
+
+
+def _quality_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+    st.subheader("Quality — can this history be trusted, and where is it thin?")
+    view = build_quality_view(db, settings, ctx["days"])
+    head = view.headline
+
+    cols = st.columns(6)
+    cols[0].metric("Tokens with history", f"{head['tokens']:,}")
+    cols[1].metric("Hourly rows stored", f"{head['rows']:,}")
+    cols[2].metric(
+        f"Below {view.min_expected_coverage:.0%} coverage",
+        f"{head['under_covered']}",
+        help="Judged against MIN_EXPECTED_COVERAGE, never by the presence of a gap.",
+    )
+    cols[3].metric(
+        "Impossible rows",
+        f"{head['violations']}",
+        delta=f"-{head['violations']}" if head["violations"] else None,
+        delta_color="inverse",
+        help="high < low, or OHLC outside the bar. Impossible whatever the market did — "
+        "the only unambiguous fault on this page.",
+    )
+    cols[4].metric("Gaps", f"{head['gaps']:,}")
+    cols[5].metric(
+        "Longest gap",
+        f"{head['worst_gap_hours']}h" if head["worst_gap_hours"] else "—",
+        delta=head["worst_gap_symbol"] or None,
+        delta_color="off",
+    )
+
+    window = "all stored history" if ctx["days"] is None else f"the last {ctx['days']} days"
+    st.caption(
+        f"Generated {view.generated_at:%Y-%m-%d %H:%M} UTC over {window}. "
+        "Read-only: nothing on this page fills a gap or writes a row."
+    )
+
+    if view.missing_tokens:
+        st.error(
+            f"**No rows at all for {', '.join(view.missing_tokens)}.** "
+            "These are configured in `config/tokens.yaml` but have never ingested — "
+            "check `make runs` and the worker log, not the market."
+        )
+    if head["violations"]:
+        st.warning(
+            f"{head['violations']} impossible row(s) stored. Unlike a gap, this is always a bug: "
+            "inspect them below and check the transform."
+        )
+    if head["ok"]:
+        st.success(
+            "No impossible rows, every configured token present, and every token above the "
+            "coverage threshold."
+        )
+
+    _estimator_panel(db, settings, ctx, view)
+    _gap_diagnostics(view)
+    _quality_tables(view)
 
 
 # --- RISK --------------------------------------------------------------------
@@ -1496,6 +1535,315 @@ def _forecast_page(db: DatabaseManager, ctx: dict[str, Any]) -> None:
     )
     _plot(fig, height=360)
 
+    _posterior_panel(db, ctx, symbol, steps, confidence)
+
+
+def _posterior_panel(
+    db: DatabaseManager, ctx: dict[str, Any], symbol: str, steps: int, confidence: float
+) -> None:
+    """The same horizon, with the model's parameters treated as unknown."""
+    _title(
+        "Parameter Uncertainty — the interval above assumes it knows the model",
+        "ARIMA fits parameters and then forecasts as if they were exact, so its interval "
+        "covers innovation noise only. Sampling the parameters by MCMC covers both. The "
+        "difference is largest on a short window and vanishes on a long one — that "
+        "convergence is the method agreeing with the point estimate, not failing.",
+    )
+    if not st.button("▶ Sample the posterior", help="Pure computation; writes nothing."):
+        st.caption("Press to re-forecast with the parameters treated as estimated.")
+        return
+
+    with st.spinner("Sampling…"):
+        try:
+            forecast = build_posterior_forecast(db, symbol, ctx["days"], steps=steps, confidence=confidence)
+        except ViewError as exc:
+            st.error(str(exc))
+            return
+
+    if not forecast.usable:
+        st.error(
+            f"**Refused — the chains did not mix.** {forecast.posterior.diagnosis} "
+            "An unconverged sampler produces confident nonsense and does not announce "
+            "itself, so nothing below should be read as a posterior."
+        )
+    else:
+        st.success(forecast.posterior.diagnosis)
+
+    cols = st.columns(4)
+    cols[0].metric("Posterior median", f"{forecast.median:,.4f}")
+    cols[1].metric(
+        "Interval width",
+        _pct(forecast.width),
+        help="Interval span over the last price, with parameter uncertainty included.",
+    )
+    cols[2].metric(
+        "Wider than the point estimate",
+        _pct(forecast.widening),
+        help="Near zero on a long window is correct: the parameters are pinned down.",
+    )
+    cols[3].metric(
+        "Acceptance",
+        _pct(forecast.posterior.acceptance),
+        help="Proposals the sampler took. Very low or very high both mean poor mixing.",
+    )
+
+    left, right = st.columns(2)
+    with left:
+        _title("The Two Intervals", "Posterior against the one every other forecast reports.")
+        st.dataframe(
+            posterior_interval_frame(forecast).style.format(
+                {"lower": "{:,.4f}", "upper": "{:,.4f}", "width": "{:.2%}"}
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+    with right:
+        _title("Per Parameter", "R-hat near 1 and a large ESS are what make this readable.")
+        st.dataframe(
+            posterior_diagnostics_frame(forecast).style.format(
+                {"mean": "{:,.6f}", "p5": "{:,.6f}", "p95": "{:,.6f}", "r_hat": "{:.4f}", "ess": "{:,.0f}"}
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+    st.caption(
+        f"Random walk with drift, {forecast.posterior.draws.shape[0]} chains x "
+        f"{forecast.posterior.draws.shape[1]} draws, seed {forecast.posterior.seed}."
+    )
+
+
+# --- SIMULATION ----------------------------------------------------------------
+
+
+def _monte_carlo_panel(db: DatabaseManager, ctx: dict[str, Any], symbol: str, name: str) -> None:
+    """Is this edge luck? A distribution instead of a sample of size one."""
+    controls = st.columns(4)
+    method = _pick(
+        controls[0],
+        "Path generator",
+        list(GENERATOR_NAMES),
+        "sim_method",
+        0,
+        help="Choosing one is choosing what the answer can mean; the table below says how.",
+    )
+    paths = int(controls[1].number_input("Paths", min_value=20, max_value=5000, value=300, step=50))
+    seed = int(controls[2].number_input("Seed", min_value=0, max_value=10_000, value=0, step=1))
+    controls[3].metric("Generator keeps", GENERATORS[method].preserves.split(",")[0])
+
+    st.dataframe(generator_catalogue(), width="stretch", hide_index=True)
+
+    if not st.button("▶ Run the simulation", type="primary", help="Pure computation; writes nothing."):
+        st.caption("Press to backtest this strategy over synthetic markets.")
+        return
+
+    with st.spinner(f"Backtesting over {paths} synthetic markets…"):
+        view = build_simulation_view(
+            db, symbol, name, ctx["days"], paths, method, seed, ctx["backtest"], _strategy_config(name)
+        )
+
+    head = view.headline
+    cols = st.columns(5)
+    cols[0].metric("Actual excess", _pct(head["actual_excess"]))
+    cols[1].metric("Median simulated", _pct(head["median_excess"]))
+    cols[2].metric(
+        "p-value",
+        f"{head['p_value']:.3f}",
+        help="Share of synthetic paths that did at least as well. Large means the real "
+        "result is easy to reproduce by chance.",
+    )
+    cols[3].metric("Paths", f"{head['paths']:,}")
+    cols[4].metric("From real bars", f"{head['source_bars']:,}", help=SAMPLE_CAVEAT)
+
+    verdict = view.summary.verdict
+    (st.info if head["p_value"] > 0.10 else st.success)(verdict)
+    st.caption(
+        f"Generator `{head['method']}`, seed {head['seed']} — the same seed gives the same "
+        f"answer. {SAMPLE_CAVEAT}"
+    )
+
+    left, right = st.columns(2)
+    with left:
+        _title(
+            "Where the Real Result Sits",
+            "Excess return of each synthetic path. The line is what actually happened: if it "
+            "is inside the crowd, the rule did nothing the market's own shape would not.",
+        )
+        histogram = go.Figure(go.Histogram(x=view.distribution.to_numpy(), nbinsx=40, marker_color="#607d8b"))
+        histogram.add_vline(
+            x=head["actual_excess"],
+            line_color="#ffab00",
+            line_width=2,
+            annotation_text="actual",
+            annotation_position="top",
+        )
+        histogram.update_layout(xaxis_tickformat=".0%", xaxis_title="excess vs buy & hold")
+        _plot(histogram, height=300)
+    with right:
+        _title(
+            "Path Envelope — percentile bands across the simulated markets",
+            "A thousand lines are noise; the envelope is the statement. All paths start at "
+            "the same price, so the fan opens from a point.",
+        )
+        fan = go.Figure()
+        for column, width in (("p5", 1), ("p25", 1), ("p50", 2), ("p75", 1), ("p95", 1)):
+            fan.add_trace(
+                go.Scatter(
+                    x=view.fan.index,
+                    y=view.fan[column],
+                    mode="lines",
+                    name=column,
+                    line={"width": width, "color": "#2962ff" if column == "p50" else "#90a4ae"},
+                )
+            )
+        _plot(fan, height=300)
+
+    _title("Every Metric, Across Paths", "`actual` is the real backtest; the rest is the crowd.")
+    st.dataframe(
+        view.percentile_frame.style.format(
+            dict.fromkeys(("actual", "p5", "p25", "p50", "p75", "p95"), "{:,.4g}")
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def _execution_panel(db: DatabaseManager, ctx: dict[str, Any], symbol: str, name: str) -> None:
+    """Does the vectorised backtester lie about execution?
+
+    Written to be checkable *on screen*. The reconciliation proves the
+    engine is right; the walkthrough shows what it does, so nobody has to
+    read the source to match the implementation against the theory.
+    """
+    st.markdown(
+        """
+##### The lifecycle
+
+Every bar runs through four events, in this order:
+
+| | Event | What happens |
+|---|---|---|
+| 1 | **decide** | at bar *t*'s **close**, the strategy reads the bar and picks a target position |
+| 2 | **delay** | the order waits `latency_bars` further bars before it reaches the market |
+| 3 | **fill** | it closes `fill_ratio` of the remaining gap, capped by what the bar's volume can absorb |
+| 4 | **hold** | the position reached at *t*'s close is held **during bar _t+1_**, earning that bar's return |
+
+Step 4 is the one that matters, and it is why:
+
+> `ExecutionModel(latency_bars=k)` is the same thing as `BacktestConfig(execution_lag=k + 1)`
+
+The `+ 1` is **not** latency. A decision taken at a close cannot be acted on before the next
+bar exists — true for an infinitely fast trader, so it is structural. `latency_bars` is
+whatever delay comes on top of it. Above `execution_lag = 1` you are filling **stale
+decisions**: the order carries the target it was placed with, and there is no cancel-replace.
+
+Costs are charged on the bar the new position is *first held*, sized by how far it moved —
+so a long-to-short flip is two units and costs twice an opening trade.
+"""
+    )
+
+    _title(
+        "Worked Example — the engine run on a flat price and a trivial signal",
+        "Real output from the same `run_execution` the reconciliation uses, not an "
+        "illustration that could drift from it. The price is held constant so every number "
+        "here is about execution and none of it is about the market.",
+    )
+    walkthrough = st.columns([3, 1])
+    extra_latency = int(
+        walkthrough[1].number_input(
+            "latency_bars", min_value=0, max_value=3, value=0, step=1, key="walk_latency"
+        )
+    )
+    with walkthrough[0]:
+        st.dataframe(
+            execution_walkthrough(latency_bars=extra_latency).style.format(
+                {
+                    "decided (signal)": "{:+.0f}",
+                    "held during bar": "{:+.0f}",
+                    "position changed": "{:.2f}",
+                    "cost paid": "{:.4f}",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+    st.caption(
+        f"Read down the first two columns: a decision at bar *t* becomes a position at bar "
+        f"*t+{1 + extra_latency}*. Raise `latency_bars` and the whole held column slides "
+        "further right, which is the off-by-one made visible."
+    )
+
+    _title(
+        "Reconciliation — is the fast backtester telling the truth?",
+        "With no extra latency and full fills the two engines must agree **exactly**. That "
+        "equality is what licenses using the fast one everywhere else in this app.",
+    )
+    if not st.button("▶ Reconcile and price the assumptions", type="primary"):
+        st.caption("Press to run the event engine beside the vectorised one.")
+        return
+
+    with st.spinner("Running both engines…"):
+        check, table = build_execution_view(
+            db, symbol, name, ctx["days"], ctx["backtest"], _strategy_config(name)
+        )
+
+    if check.agrees:
+        st.success(
+            f"**The engines agree.** Position paths differ by "
+            f"{check.max_position_difference:.1e} and equity by "
+            f"{check.max_equity_difference:.1e}, against an `execution_lag` of "
+            f"{check.execution_lag}. The fast path is telling the truth."
+        )
+    else:
+        st.error(
+            f"**The engines disagree**: positions by {check.max_position_difference:.2e}, "
+            f"equity by {check.max_equity_difference:.2e}. One of the two is wrong, and "
+            "every backtest on this screen depends on which."
+        )
+
+    _title(
+        "What the Assumptions Are Worth",
+        "Each row relaxes one of them. `vs_baseline` is the distance from the fast path's "
+        "answer — the price of assuming instant, complete fills. `incomplete_fills` counts "
+        "orders that needed more than one bar to go through.",
+    )
+    st.dataframe(
+        table.style.format(
+            {
+                "total_return": "{:+.2%}",
+                "vs_baseline": "{:+.2%}",
+                "costs": "{:.2%}",
+                "fill_ratio": "{:.2f}",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def _simulation_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+    st.subheader("Simulation — is the edge luck, and would it have filled?")
+    st.caption(
+        "A backtest is a sample of size one. These two answer different doubts: Monte Carlo "
+        "asks whether the result survives a market reshuffled from the same moves; the "
+        "execution model asks whether the fast backtester's assumptions are costing you "
+        "anything. Both are read-only."
+    )
+
+    left, right = st.columns(2)
+    symbol = _pick(left, "Token", ctx["symbols"], "sim_symbol", default_index(ctx["symbols"]))
+    name = _pick(right, "Strategy", list(available()), "sim_strategy", 1)
+    if name == "arima":
+        st.warning(
+            "ARIMA refits per bar, so a few hundred simulated paths is minutes of work rather "
+            "than seconds. Start with a small path count."
+        )
+
+    monte_carlo, execution = st.tabs(["Monte Carlo — is the edge luck?", "Execution — would it have filled?"])
+    with monte_carlo:
+        _monte_carlo_panel(db, ctx, symbol, name)
+    with execution:
+        _execution_panel(db, ctx, symbol, name)
+
 
 # --- AGENTS ------------------------------------------------------------------
 
@@ -1946,6 +2294,8 @@ def main() -> None:
                 _portfolio_page(db, settings, ctx)
             case "Strategy":
                 _strategy_page(db, settings, ctx)
+            case "Simulation":
+                _simulation_page(db, settings, ctx)
             case "Forecast":
                 _forecast_page(db, ctx)
             case "Agents":

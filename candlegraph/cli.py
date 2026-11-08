@@ -26,6 +26,12 @@ from candlegraph.utils.logging_utils import configure_logging, service_logger
 # owns the real list and a test holds the two together.
 FILL_METHODS = ("linear", "causal", "bridge")
 
+# Monte Carlo path generators, named here for the same reason: the parser
+# should not import the analytics package at start-up. `analytics.simulation`
+# owns the real list and a test holds the two together.
+SIMULATION_GENERATORS = ("block", "iid", "gbm", "regime")
+DEFAULT_GENERATOR = "block"
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="candlegraph", description=__doc__.splitlines()[0])
@@ -104,6 +110,34 @@ def _parser() -> argparse.ArgumentParser:
         default=4,
         help="width of the synthetic holes --evaluate punches (default: 4)",
     )
+
+    sim = sub.add_parser(
+        "simulate",
+        help="run a strategy over synthetic markets, or measure the execution assumptions",
+    )
+    sim.add_argument("symbol")
+    sim.add_argument("--strategy", default="bollinger", help="strategy name")
+    _add_window(sim)
+    sim.add_argument("--paths", type=int, default=500, help="synthetic paths to draw (default: 500)")
+    sim.add_argument(
+        "--method",
+        choices=SIMULATION_GENERATORS,
+        default=None,
+        help="path generator. block = stationary block bootstrap, keeps volatility "
+        "clustering (the default); iid = shuffle returns, keeps the distribution and "
+        "destroys the structure; gbm = normal returns at the sample's moments; "
+        "regime = two-state Markov switching",
+    )
+    sim.add_argument("--seed", type=int, default=0, help="recorded with the result; same seed, same paths")
+    sim.add_argument(
+        "--execution",
+        action="store_true",
+        help="instead of path simulation, reconcile the discrete-event engine against the "
+        "vectorised backtester and report what latency and partial fills cost",
+    )
+    sim.add_argument("--fee-bps", type=float, default=None)
+    sim.add_argument("--slippage-bps", type=float, default=None)
+    _add_strategy_flags(sim)
 
     sub.add_parser("strategies", help="list the available strategies")
 
@@ -221,6 +255,16 @@ def _parser() -> argparse.ArgumentParser:
     forecast.add_argument("--auto-order", action="store_true", help="pick p and q by criterion")
     forecast.add_argument("--steps", type=int, default=1, help="periods ahead")
     forecast.add_argument("--confidence", type=float, default=0.95)
+    forecast.add_argument(
+        "--posterior",
+        action="store_true",
+        help="sample the model's parameters by MCMC instead of fitting a point estimate, "
+        "so the interval includes parameter uncertainty and not just innovation noise. "
+        "Reports R-hat and effective sample size, and refuses if the chains did not mix",
+    )
+    forecast.add_argument("--draws", type=int, default=2000, help="posterior draws per chain")
+    forecast.add_argument("--chains", type=int, default=4, help="chains; R-hat needs at least 2")
+    forecast.add_argument("--seed", type=int, default=0, help="recorded with the result")
 
     # --- agents ---
     observe = sub.add_parser("observe", help="run the run-observer agent once and post its report")
@@ -822,6 +866,87 @@ def _backtest(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _simulation_config(settings: Settings, args: argparse.Namespace) -> Any:
+    """Execution assumptions shared by the real and the simulated runs.
+
+    They have to be the same, or the distribution is not a distribution
+    *about* the real backtest.
+    """
+    from candlegraph.strategies.backtest import BacktestConfig
+
+    return BacktestConfig(
+        fee_bps=args.fee_bps if args.fee_bps is not None else settings.backtest_fee_bps,
+        slippage_bps=(args.slippage_bps if args.slippage_bps is not None else settings.backtest_slippage_bps),
+        risk_free_rate=settings.risk_free_rate,
+        interval_hours=settings.analytics_interval_hours,
+    )
+
+
+def _simulate_paths_report(settings: Settings, args: argparse.Namespace) -> int:
+    """Monte Carlo: is this edge luck?"""
+    from candlegraph.strategies.montecarlo import evaluate_strategy, format_simulation
+
+    prices = _prices_for(settings, args.symbol, args.days)
+    summary = evaluate_strategy(
+        prices,
+        args.strategy,
+        n_paths=args.paths,
+        method=args.method or DEFAULT_GENERATOR,
+        seed=args.seed,
+        config=_simulation_config(settings, args),
+        strategy_config=build_strategy_config(args.strategy, args),
+    )
+    print(format_simulation(summary))
+    return 0
+
+
+def _simulate_execution_report(settings: Settings, args: argparse.Namespace) -> int:
+    """Discrete event: does the vectorised backtester lie about execution?
+
+    The reconciliation is printed first because everything after it is
+    only meaningful if the two engines agree when the assumptions are put
+    back.
+    """
+    from candlegraph.analytics.events import latency_cost, reconcile
+    from candlegraph.strategies import run_strategy
+
+    prices = _prices_for(settings, args.symbol, args.days)
+    signals = run_strategy(args.strategy, prices, build_strategy_config(args.strategy, args)).signals
+    cost_bps = (args.fee_bps if args.fee_bps is not None else settings.backtest_fee_bps) + (
+        args.slippage_bps if args.slippage_bps is not None else settings.backtest_slippage_bps
+    )
+
+    check = reconcile(prices, signals, latency_bars=0, cost_bps=cost_bps)
+    print(f"Execution model: {args.strategy} on {args.symbol}, {cost_bps:.0f} bps per unit")
+    print("-" * 64)
+    print("Reconciliation against the vectorised backtester (no extra latency):")
+    print(f"  max position difference {check.max_position_difference:.2e}")
+    print(f"  max equity difference   {check.max_equity_difference:.2e}")
+    print(f"  {'AGREES' if check.agrees else 'DISAGREES — one of the two engines is wrong'}")
+    print()
+    print("What the convenient assumptions are worth:")
+    table = latency_cost(prices, signals, latencies=(0, 1, 2, 4), cost_bps=cost_bps, fill_ratios=(1.0, 0.25))
+    print(table.to_string(index=False, float_format=lambda v: f"{v:,.4f}"))
+    print()
+    print(
+        "latency_bars is delay on top of the one bar you cannot trade inside; 0 with full "
+        "fills is exactly what `candlegraph backtest` assumes."
+    )
+    return 0
+
+
+def _simulate(settings: Settings, args: argparse.Namespace) -> int:
+    """Two reports behind one verb, because they answer different doubts."""
+    from candlegraph.analytics.simulation import SimulationError
+
+    try:
+        if args.execution:
+            return _simulate_execution_report(settings, args)
+        return _simulate_paths_report(settings, args)
+    except SimulationError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def _portfolio(settings: Settings, args: argparse.Namespace) -> int:
     from candlegraph.analytics.portfolio import (
         PortfolioConfig,
@@ -967,8 +1092,39 @@ def _risk(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _posterior_forecast_report(settings: Settings, args: argparse.Namespace) -> int:
+    """`forecast --posterior`: an interval that admits the parameters are estimated.
+
+    Exits non-zero when the chains did not mix. An unconverged sampler
+    produces confident nonsense and does not announce itself, so the
+    refusal has to be the command's exit code and not only a line of
+    prose someone might skim past.
+    """
+    from candlegraph.analytics.mcmc import MCMCError, format_posterior, posterior_forecast
+
+    prices = _prices_for(settings, args.symbol, args.days)
+    try:
+        result = posterior_forecast(
+            prices,
+            steps=args.steps,
+            confidence=args.confidence,
+            draws=args.draws,
+            chains=args.chains,
+            seed=args.seed,
+        )
+    except MCMCError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    print(f"{args.symbol}: random walk with drift, on {len(prices)} bars")
+    print(format_posterior(result))
+    return 0 if result.usable else 1
+
+
 def _forecast(settings: Settings, args: argparse.Namespace) -> int:
     from candlegraph.analytics.arima import ArimaConfig, fit_forecast
+
+    if args.posterior:
+        return _posterior_forecast_report(settings, args)
 
     prices = _prices_for(settings, args.symbol, args.days)
     config = ArimaConfig(
@@ -1237,6 +1393,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _runs(args.limit)
         case "fill":
             return _fill(settings, args)
+        case "simulate":
+            return _simulate(settings, args)
         case "strategies":
             return _strategies_cmd()
         case "ui":

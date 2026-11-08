@@ -14,7 +14,8 @@ reconstructing the steps:
 - `add-token` — add a token to `config/tokens.yaml` and verify it ingests.
 - `add-migration` — create, apply, and verify an Alembic revision.
 - `backfill-and-verify` — load history and read the data-quality report.
-- `run-analytics` — volatility, portfolios, signals, backtests, and the UI.
+- `run-analytics` — volatility, portfolios, signals, backtests, the
+  simulators, the posterior forecast, and the UI.
 - `run-agents` — run the observer and the janitor, read their reports, and
   tell a real finding from an expected one.
 - `add-agent` — add a new LangGraph graph that follows the framework.
@@ -40,9 +41,9 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   one. When the user refers to "the rollout", "the plan", or "step N",
   this is the document: find the step, read its "Read first" pointers, do
   it, and update the progress table in the same change. One at a time;
-  finished ones are archived under `docs/rollout/archive/`. Stage 1's is
-  archived and **there is no current rollout** — the file says so and
-  points at the roadmap for what is next.
+  finished ones are archived under `docs/rollout/archive/`. Three are
+  archived (stages 1, 0 and 6) and **there is no current rollout** — the
+  file says so, and costs four candidates for the next one.
 - `docs/incidents/` — post-mortems. Read the two from October 2026 before
   changing the database image, a migration id, or a compose health check.
 
@@ -67,6 +68,18 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   check** re-runs at `execution_lag=0`: do not describe that as "inflating
   returns" — it flatters a trend rule and *punishes* a mean-reversion one,
   and both tests pin the direction.
+- The discrete-event engine in `analytics/events.py` exists to be the
+  reference the vectorised backtester is checked against, not to replace
+  it. `ExecutionModel(latency_bars=k)` corresponds to
+  `BacktestConfig(execution_lag=k + 1)` — the extra bar is structural, not
+  latency — and `reconcile()` must come back at exactly `0.0` on both
+  positions and equity. If it does not, one of the two engines is wrong
+  and every backtest in the repo depends on which. Both bugs found while
+  building it were invisible from the vectorised side.
+- Simulation persists nothing. `candlegraph simulate` recomputes, and the
+  seed is the only thing that has to be remembered — so report it
+  everywhere a distribution is shown, and never print a p-value of
+  `0.000`: a thousand paths cannot evidence one in a million.
 - Gap estimates are display-only and live in their own table. Three
   estimators (`linear`, `causal`, `bridge`) can hold a value for the same
   missing hour so they can be compared; exactly one is selected at a time.

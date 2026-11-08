@@ -41,14 +41,15 @@ a target, and never let CI run something that is not one either.
 | Fetch news (one budgeted search per token per UTC day) | `make fetch-news` (or `candlegraph knowledge fetch-news [--symbol S]`) |
 | Hybrid retrieval as of a bar | `make search ARGS='"WBTC unlock" --symbol WBTC'` (or `candlegraph knowledge search`) |
 | Link stored chunks to the assets they name | `make link-mentions` (idempotent backfill; the news pipeline links as it stores) |
-| Rolling mean / volatility | `candlegraph stats WETH --window 24` |
-| Pairwise comparison | `candlegraph compare WETH WBTC` |
-| Signals | `candlegraph signals WETH --strategy bollinger [--store]` |
 | Explain a signal with cited news (no LLM key needed) | `make explain ARGS='WETH --strategy bollinger'` (or `candlegraph signals WETH --explain [--at ISO] [--reference S] [--no-search]`) |
-| Backtest | `candlegraph backtest WETH --strategy all` |
-| Portfolio | `candlegraph portfolio --risk-free-rate 0.04 --objective max_sharpe` |
-| ARIMA forecast | `candlegraph forecast WETH --auto-order` |
-| Risk report | `candlegraph risk WETH --benchmark WBTC --confidence 0.99` |
+| Rolling mean / volatility, in the stack | `make stats ARGS='WETH --window 24'` |
+| Pairwise comparison, in the stack | `make compare ARGS='WETH WBTC'` |
+| Signals / backtest / strategies | `make signals ARGS='WETH --store'`, `make backtest ARGS='WETH --strategy all'`, `make strategies` |
+| Portfolio / risk | `make portfolio ARGS='--objective max_sharpe'`, `make risk ARGS='WETH --benchmark WBTC'` |
+| ARIMA forecast | `make forecast ARGS='WETH --auto-order'` |
+| Forecast with parameter uncertainty (MCMC, reports R-hat; exits non-zero unconverged) | `make forecast-posterior ARGS='WETH'` (`candlegraph forecast SYMBOL --posterior [--draws N] [--chains N] [--seed N]`) |
+| Monte Carlo a strategy over synthetic markets | `make simulate ARGS='WETH --paths 1000'` (`candlegraph simulate SYMBOL [--strategy X] [--paths N] [--method block\|iid\|gbm\|regime] [--seed N]`) |
+| Reconcile the event engine with the backtester and price its assumptions | `make simulate-execution ARGS='WETH'` (`candlegraph simulate SYMBOL --execution`) |
 | Streamlit UI | `make ui` (local) or the `ui` compose service |
 | Run observer, once | `make observe` (in the stack) or `candlegraph observe [--strict]` |
 | CI janitor, once | `make janitor ARGS="--open-pr --strict"` |
@@ -69,6 +70,8 @@ Dependencies are managed by **uv**, not Poetry or pip. `pyproject.toml` plus
 candlegraph/
   settings.py          Typed configuration (pydantic-settings). Cross-cutting.
   tokens.py            Loads and validates config/tokens.yaml into a TokenRegistry.
+                       `active` decides what ingestion polls; every other surface
+                       reads the full list, so a retired token keeps its history.
   cli.py               Every command; see the table above.
   storage/
     database.py        Connection pool and query helpers. Connects lazily.
@@ -92,6 +95,12 @@ candlegraph/
     rates.py           RateProvider seam: nominal and real risk-free rate; constant today, Tavily planned.
     statespace.py      Gap estimators: local-level Kalman filter (causal) and Brownian bridge
                        (two-sided). Pure; posterior mean plus the standard deviation of it.
+    simulation.py      Monte Carlo path generators: block bootstrap (default), IID, GBM,
+                       Markov regime switching. Pure; each declares what it destroys.
+    events.py          Discrete-event execution: decide, delay, fill. The reference
+                       implementation the vectorised backtester is reconciled against.
+    mcmc.py            Random-walk Metropolis, Gelman-Rubin and ESS, and a posterior
+                       forecast. Pure; an unconverged chain is a refusal, not a result.
     prices.py          Stored rows -> aligned pandas frames.
   strategies/
     base.py            Signal, StrategyResult, and the registry.
@@ -99,6 +108,8 @@ candlegraph/
     crossover.py       Moving-average trend following.
     arima_signal.py    Walk-forward ARIMA signals.
     backtest.py        Vectorised backtester. Owns the execution lag.
+    montecarlo.py      Runs a strategy over synthetic paths and reports the distribution
+                       and an empirical p-value. Here, not analytics/: it needs backtest.py.
     store.py           Upserting signals into the signal table.
   api/
     app.py             FastAPI app factory and health check.
@@ -343,32 +354,32 @@ unfalsifiable.
 | Deterministic analytics | Rolling statistics, mean-variance portfolios, Bollinger/crossover/ARIMA signals, the `signal` table, a costed and lagged backtester, the Streamlit UI. | `candlegraph signals WETH --store && candlegraph backtest WETH --strategy all` |
 | Agent layer | The run observer and the CI janitor as LangGraph graphs, the `agent_run` ledger, report sinks, the `agents` service and the janitor workflow. | `make observe && make agent-runs` |
 | Time-series storage | The three series tables as TimescaleDB hypertables; state and ledger tables deliberately plain. | `make test-integration` (`test_timescale.py`) |
+| Descriptive statistics, deeper (stage 0) | Pairwise comparison over aligned bars; the descriptive display audited and completed (Quality dashboard, gap map, gap shading); the `FillPolicy` seam where every policy declares whether it is causal and `load_symbol_series` refuses the ones that are not; three gap estimators cached in `token_hours_fill` and scored against held-out hours; the `active` flag trimming the poll to five tokens. | `candlegraph compare WETH WBTC` over aligned bars; `FillPolicy` with a no-look-ahead test; the stack ingests exactly the five active tokens |
+| Simulation and strategy evaluation (stage 6) | The backtester made legible; Monte Carlo over four path generators with an empirical p-value; the discrete-event engine reconciling exactly with the vectorised backtester; MCMC posteriors with R-hat and ESS gating every surface. | `candlegraph simulate WETH --paths 1000` prints a distribution and a p-value; a zero-latency event run matches the backtester exactly; `forecast --posterior` is wider on a short window, with R-hat |
 | Knowledge graph and signaller | The eight corpus tables on pgvector, assets and aliases, the document pipeline, embeddings (`bge-m3` via the `ollama` service), Tavily under a budget with the `source_call` ledger, hybrid retrieval with the no-look-ahead bound, `signals --explain` with its citation validator on three surfaces, the observer's four knowledge findings, and the read-only MCP server. | `candlegraph signals WETH --strategy bollinger --explain` prints a rationale citing a retrieved document with a URL and a timestamp, stored with the signal, with no LLM key configured |
 
 ### In progress
 
-| Stage | Landed so far | Still to land | Exit criterion |
-|---|---|---|---|
-| **0. Descriptive statistics, deeper** | `candlegraph compare WETH WBTC` over aligned bars; the descriptive display audited and completed (Quality dashboard, gap map, gap shading, per-leg Compare numbers); the `FillPolicy` seam with its no-look-ahead test; `linear`, `causal` and `bridge` estimators cached in `token_hours_fill` and comparable via `candlegraph fill --evaluate`. | The `active` flag in `config/tokens.yaml` — independent of the rest, and the only thing left. | `compare` prints correlation, beta and relative performance (met); `FillPolicy` exists with a no-look-ahead test (met); the stack ingests exactly the five active tokens (remaining) |
-| **6. Simulation and strategy evaluation** | The backtester made legible: execution lag and cost model stated on screen, all thirteen metrics, cross-strategy comparison, look-ahead demonstration. | Monte Carlo and discrete-event simulation; MCMC posteriors. `docs/rollout/ROLLOUT.md` sequences it. | `candlegraph simulate` prints a distribution with an empirical p-value; a zero-latency discrete-event run matches the vectorised backtester; `forecast --posterior` is wider than the point estimate, with R-hat |
+Nothing. Stages 0 and 6 both closed on 2026-11-10 and
+`docs/rollout/ROLLOUT.md` records that there is no current rollout, with
+four costed suggestions for what to pick up next.
 
 ### Next
 
-0. **Descriptive statistics, deeper.** Mostly delivered. Pairwise
-   comparison over aligned bars only; the descriptive display audited and
-   completed; and the gap-filling policy behind `FillPolicy`, where every
+0. ~~**Descriptive statistics, deeper.**~~ *Delivered 2026-11-10.*
+   Pairwise comparison over aligned bars; the descriptive display audited
+   and completed; the gap-filling policy behind `FillPolicy`, where every
    policy declares whether it is causal and `load_symbol_series` refuses
-   the ones that are not. Three estimators (`linear`, `causal`, `bridge`)
-   are cached in `token_hours_fill` — **never** in `token_hours_data`, so
-   coverage stays falsifiable — one selected at a time, and
-   `candlegraph fill --evaluate` scores them against held-out real hours.
-   Still to land: an `active` flag in `config/tokens.yaml` trimming the
-   test run to five tokens (WBTC, WETH, BNB, plus GNO and SHIB chosen for
-   their gapped history).
-   *Exit:* `candlegraph compare WETH WBTC` prints correlation, beta and
-   relative performance over aligned bars (met); the fill policy exists
-   behind `FillPolicy` with a no-look-ahead test (met); the stack ingests
-   exactly the five active tokens (remaining).
+   the ones that are not; three estimators (`linear`, `causal`, `bridge`)
+   cached in `token_hours_fill` — **never** in `token_hours_data`, so
+   coverage stays falsifiable — one selected at a time, scored by
+   `candlegraph fill --evaluate`; and the `active` flag in
+   `config/tokens.yaml`. Deactivating a token stops it being **polled**,
+   never forgotten: it stays listed and every analytics surface still
+   reads its stored history, because removing the entry would orphan rows
+   invariant 4 promises to keep. The plan it followed is archived at
+   `docs/rollout/archive/2026-11-08-stage-0-descriptive-deeper.md`.
+
 1. ~~**Knowledge graph and signaller.**~~ *Delivered 2026-11-06.* Assets,
    sources, documents and chunks in Postgres with pgvector; Tavily for web
    search under a budget; news attached to the prices already stored, so a
@@ -395,25 +406,26 @@ unfalsifiable.
    knowledge graph, and an alerting agent with deduplication and cooldowns.
    *Exit:* a market event produces exactly one cited alert, and an identical
    event inside the cooldown produces none.
-6. **Simulation and strategy evaluation.** *(In progress — next after
-   stage 0's remaining flag; the numbers are identities, not a queue.)*
-   Three simulators with three jobs: **Monte Carlo** over resampled and
-   modelled paths, so a backtest reports a distribution and an empirical
+6. ~~**Simulation and strategy evaluation.**~~ *Delivered 2026-11-10.*
+   Three simulators with three jobs: **Monte Carlo** over four path
+   generators, so a backtest reports a distribution and an empirical
    p-value rather than a sample of size one; **discrete-event**
    simulation as the reference implementation the vectorised backtester
-   is checked against, which is how the `shift(1)` and the flat bps cost
-   get a price; and **MCMC** posteriors, so forecast intervals include
-   parameter uncertainty and portfolio weights come with a distribution.
-   Every simulator reuses `strategies/backtest.py`; a second
-   implementation of `position * returns` is how invariant 15 comes back.
-   Nothing simulated is written to `token_hours_data`. The argument is in
-   `docs/analytics/simulation/DESIGN.md`.
-   *Exit:* `candlegraph simulate WETH --strategy bollinger --paths 1000`
-   prints the distribution of excess return with an empirical p-value; a
-   zero-latency discrete-event run reproduces the vectorised backtester to
-   tolerance and reports what one bar of latency costs; and
-   `candlegraph forecast WETH --posterior` prints an interval wider than
-   the point-estimate one, with R-hat reported.
+   is checked against; and **MCMC** posteriors, so a forecast interval
+   includes parameter uncertainty and not only innovation noise. Every
+   simulator reuses `strategies/backtest.py`, and nothing simulated is
+   persisted at all. The argument is in
+   `docs/analytics/simulation/DESIGN.md`; the plan is archived at
+   `docs/rollout/archive/2026-11-10-stage-6-simulation.md`. Three things
+   the build settled: `ExecutionModel(latency_bars=k)` corresponds to
+   `BacktestConfig(execution_lag=k + 1)`, because the one bar you cannot
+   trade inside is structural rather than slow; above `execution_lag=1`
+   the vectorised model is filling **stale decisions**, which it implies
+   and never says; and the posterior interval is wider than the
+   point-estimate one *on short windows only* — it converges to it as the
+   sample grows, which is agreement rather than failure.
+   **Deferred:** the portfolio-weight posterior, with the reason in the
+   design document.
 
 Prefer adding columns and a migration over reshaping the hourly tables; the
 natural keys are settled. A table added from here gets its placement

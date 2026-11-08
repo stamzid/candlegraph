@@ -49,8 +49,15 @@ Ingestion runs in its own process so a long backfill cannot compete with query t
 so an unreachable subgraph degrades the data rather than the service — the API comes up and
 stays up regardless.
 
-The tokens tracked are config, not code — see [`config/tokens.yaml`](config/tokens.yaml)
-(ten mainnet tokens by default: WETH, WBTC, USDC, USDT, DAI, LINK, UNI, AAVE, SHIB, GNO).
+The tokens tracked are config, not code — see [`config/tokens.yaml`](config/tokens.yaml).
+Eleven mainnet tokens are listed; **five are polled** (WBTC, WETH, BNB, plus GNO and SHIB,
+chosen because their history is gapped), and the rest carry `active: false`.
+
+`active: false` means **stop fetching new hours, never forget**. The entry stays listed, every
+lookup still finds it, and all the analytics still read its stored history — removing the
+entry instead would orphan rows that invariant 4 promises to keep. So
+`make compare ARGS='USDC WETH'` still works on what was already collected; it simply stops
+getting newer.
 
 ## Quick start
 
@@ -121,7 +128,7 @@ see [`.env.example`](.env.example) for the full list.
 | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASS`, `DB_NAME`, `DB_SCHEMA` | local compose values | Postgres connection. |
 | `DATABASE_URL` | unset | Full URL; overrides the `DB_*` values. |
 | `MIN_DB_CONNECTIONS` / `MAX_DB_CONNECTIONS` | 2 / 10 | Pool size. |
-| `TOKENS_FILE` | `config/tokens.yaml` | Which tokens to ingest. |
+| `TOKENS_FILE` | `config/tokens.yaml` | Which tokens are known. Only the `active` ones are polled; the rest keep their stored history. |
 | `LOOKBACK_DAYS` | 7 | How far back a first-time backfill reaches for a token with no stored rows. |
 | `INGEST_POOLS` | `true` | `false` skips pool-level data (and so transaction counts). |
 | `POOLS_PER_TOKEN` | 3 | Deepest pools to track per token, per side of the pair. 0 freezes the set. |
@@ -229,6 +236,9 @@ a failing one always is.
 | `compare SYMBOL_A SYMBOL_B [--window N]` | Pairwise comparison: correlation, beta, relative return |
 | `signals SYMBOL [--strategy X] [--store] [--explain [--at ISO] [--reference S] [--no-search]]` | Generate signals, optionally persisting them; `--explain` prints one bar's numeric context and a rationale citing news published before it (URL and timestamp per citation), stored in `explanation`. Works with no LLM key and no Tavily key |
 | `backtest SYMBOL [--strategy X\|all]` | Backtest, net of fees and slippage |
+| `simulate SYMBOL [--strategy X] [--paths N] [--method M] [--seed N]` | Backtest over N synthetic markets and report the distribution with an empirical p-value |
+| `simulate SYMBOL --execution` | Reconcile the discrete-event engine against the vectorised backtester and price its assumptions |
+| `forecast SYMBOL --posterior [--draws N] [--chains N]` | Sample the model's parameters by MCMC so the interval covers parameter uncertainty too; reports R-hat and exits non-zero if the chains did not mix |
 | `portfolio [--objective X] [--risk-free-rate R]` | Mean-variance allocation |
 | `forecast SYMBOL [--auto-order]` | ARIMA point forecast and interval |
 | `risk SYMBOL [--benchmark X] [--confidence C] [--horizon N] [--method M]` | VaR, CVaR, drawdown, and the systematic/idiosyncratic split |
@@ -410,6 +420,73 @@ that is deleted from: an estimate for an hour that has since been ingested is wr
 The reasoning is in [`docs/roadmap/DESIGN.md`](docs/roadmap/DESIGN.md) §0 and
 [`docs/storage/table-placement/DESIGN.md`](docs/storage/table-placement/DESIGN.md).
 
+## Simulation
+
+A backtest is a sample of size one: one number, over the one price path that happened. Two
+commands widen that, and they answer different doubts.
+
+**Is the edge luck?** Resample the market and run the same strategy over it many times.
+
+```sh
+make simulate ARGS='WETH --strategy bollinger --paths 1000'
+```
+
+Four path generators, and choosing one is choosing what the answer can mean:
+
+| Generator | Preserves | Destroys |
+|---|---|---|
+| `block` *(default)* | short-range dependence and volatility clustering | structure longer than a block |
+| `iid` | the return distribution, fat tails included | all autocorrelation and clustering |
+| `gbm` | drift and volatility | fat tails, clustering, mean reversion |
+| `regime` | regime persistence and regime-dependent volatility | structure within a regime |
+
+The default is the **stationary block bootstrap**, not IID: an IID bootstrap destroys the
+volatility clustering most of these strategies are implicitly trading, which flatters mean
+reversion and punishes trend following for reasons that have nothing to do with either.
+
+The output is a distribution of excess return and an empirical p-value — the share of
+synthetic markets that did at least as well as reality. A Sharpe of 1.2 that 40% of resampled
+paths also reach is not an edge. **Resampling reorders the moves that happened; it does not
+invent a regime the window does not contain.** Ten thousand paths from ninety days is still
+ninety days, and every surface says so. Every run reports its seed.
+
+**Would it have filled?** The vectorised backtester encodes three assumptions as arithmetic —
+instant execution one bar later, complete fills, a flat cost. The discrete-event engine makes
+each a parameter.
+
+```sh
+make simulate-execution ARGS='WETH'
+```
+
+It exists to be the **reference implementation the fast backtester is checked against**, not
+to replace it. With no extra latency and full fills the two must agree exactly, and they do —
+to `0.0` on both positions and equity. That equality is what licenses using the fast path
+everywhere else; writing it was what found two bugs that a vectorised implementation could
+not have shown. `ExecutionModel(latency_bars=k)` corresponds to
+`BacktestConfig(execution_lag=k + 1)`: the extra bar is structural, not slowness — a decision
+taken at a close cannot be acted on before the next bar exists.
+
+Relaxing one assumption at a time then prices it: what a bar of latency costs, what a quarter
+fill rate costs, what a thin bar does to a large order. Nothing is persisted; both commands
+recompute, so the seed is the only thing worth writing down.
+
+**How wrong are the parameters?** Every forecast here fits parameters and then predicts as if
+they were exact, so its interval covers innovation noise only.
+
+```sh
+make forecast-posterior ARGS='WETH'
+```
+
+Samples `(drift, volatility)` by Metropolis-Hastings and forecasts from each draw, so the
+interval covers both sources. **Check R-hat and the effective sample size before anything
+else** — the command exits non-zero and prints `REFUSED` when the chains did not mix, because
+an unconverged sampler produces confident nonsense and, unlike a failed optimiser, does not
+announce itself.
+
+The widening is a short-window number: roughly **+30% at 40 bars, +5% at 200, and nothing at
+800**. That convergence is the method agreeing with the point estimate once the parameters are
+pinned down — a method that stayed wide forever would be wrong in the other direction.
+
 ## UI
 
 ```sh
@@ -460,7 +537,17 @@ dashboard opens with a metric strip, and every chart carries a title that says w
   Note it does not always flatter: a trend rule gains from the bias, a mean-reversion rule is
   punished by it (it shorts the bar that just rose, then collects the rise). Both numbers are
   equally unreal — the lesson is the size of the gap, not its sign.
-- **Forecast** — the ARIMA path with its confidence interval drawn at the horizon.
+- **Simulation** — two tabs for two doubts. *Monte Carlo*: pick a generator, a path count and
+  a seed, and see where the real result sits in the crowd of synthetic ones — a histogram with
+  the actual marked, a percentile envelope, the p-value and a verdict in words. *Execution*:
+  reconcile the discrete-event engine against the vectorised backtester and read what latency
+  and partial fills are worth. The execution tab states the four-event lifecycle, why
+  `latency_bars=k` means `execution_lag=k+1`, and runs a **worked example** on a flat price so
+  the one-bar offset and the cost timing are visible instead of asserted. Both are read-only and behind an explicit button, because
+  hundreds of backtests on every widget change would make the page unusable.
+- **Forecast** — the ARIMA path with its confidence interval drawn at the horizon, and a
+  **parameter uncertainty** panel that re-forecasts by MCMC and shows the two intervals side
+  by side with R-hat and ESS per parameter. An unconverged run is labelled a refusal.
 - **Strategy → Explain** — the `signals --explain` surface: what is stored for the selected token
   and strategy shows for free; **Explain latest signal** runs the pipeline, and a checkbox decides
   whether the news source may be called (at most one Tavily credit per token per UTC day, disabled

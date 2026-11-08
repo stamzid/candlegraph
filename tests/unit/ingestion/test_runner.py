@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -584,3 +585,38 @@ def test_backfill_overrides_the_configured_window(registry: TokenRegistry, froze
     ingest_once(db, client, registry, token_settings(lookback_days=7), frozen_now, lookback_days=90)
 
     assert client.cursors_seen[0][1] == lookback_start(90, frozen_now)
+
+
+def test_an_inactive_token_is_not_polled_and_does_not_break_the_run(
+    frozen_now: datetime, tmp_path: Path
+) -> None:
+    """The bug the unit tier missed and a real ingest run found immediately.
+
+    `resolve_cursors` builds its map from the *active* addresses, so a
+    loop over the whole registry looked up a cursor that was never
+    created and died with a bare `KeyError` on the first inactive token.
+    Nothing caught it because every fixture registry had all tokens
+    active.
+    """
+    from candlegraph.tokens import load_tokens
+
+    path = tmp_path / "tokens.yaml"
+    path.write_text(
+        """
+tokens:
+  - address: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    symbol: WETH
+    active: true
+  - address: "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+    symbol: WBTC
+    active: false
+""",
+        encoding="utf-8",
+    )
+    registry = load_tokens(path)
+
+    result = ingest_once(FakeDatabase(), FakeSubgraphClient(), registry, token_settings(), frozen_now)
+
+    assert result.ok, result.errors
+    assert "WBTC" not in result.hours_by_symbol, "an inactive token is not polled"
+    assert "WETH" in result.hours_by_symbol

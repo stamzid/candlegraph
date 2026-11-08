@@ -12,7 +12,9 @@ E2E_URL ?= http://localhost:$${APP_HOST_PORT:-8000}
 .PHONY: help install lock fmt fmt-check lint typecheck test test-unit test-integration \
         cov check up down reset logs logs-worker ps migrate revision e2e sdl clean \
         ingest backfill report runs ui logs-ui observe janitor agent-runs logs-agents sync-assets \
-        up-knowledge logs-ollama embed reembed fetch-news search link-mentions explain mcp
+        up-knowledge logs-ollama embed reembed fetch-news search link-mentions explain mcp \
+        fill fill-status fill-evaluate stats compare signals backtest strategies portfolio \
+        forecast forecast-posterior risk simulate simulate-execution
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -121,6 +123,44 @@ fill-status: ## Show what the fill cache holds, per token and method
 
 fill-evaluate: ## Score every gap estimator against hours whose real price is known
 	$(COMPOSE) exec worker python -m candlegraph fill --evaluate $(ARGS)
+
+# --- analytics, in the stack -------------------------------------------------
+# Every one of these was previously reachable only through a hand-written
+# `docker compose exec`, which is exactly the thing the Makefile exists to
+# stop. They all take ARGS so the CLI's own flags pass straight through.
+
+stats: ## Rolling mean and volatility: make stats ARGS='WETH --window 24'
+	$(COMPOSE) exec worker python -m candlegraph stats $(ARGS)
+
+compare: ## Pairwise comparison over aligned bars: make compare ARGS='WETH WBTC'
+	$(COMPOSE) exec worker python -m candlegraph compare $(ARGS)
+
+signals: ## Generate signals: make signals ARGS='WETH --strategy bollinger --store'
+	$(COMPOSE) exec worker python -m candlegraph signals $(ARGS)
+
+backtest: ## Backtest net of costs: make backtest ARGS='WETH --strategy all'
+	$(COMPOSE) exec worker python -m candlegraph backtest $(ARGS)
+
+strategies: ## List the registered strategies
+	$(COMPOSE) exec worker python -m candlegraph strategies
+
+portfolio: ## Mean-variance allocation: make portfolio ARGS='--objective max_sharpe'
+	$(COMPOSE) exec worker python -m candlegraph portfolio $(ARGS)
+
+forecast: ## ARIMA point forecast: make forecast ARGS='WETH --auto-order'
+	$(COMPOSE) exec worker python -m candlegraph forecast $(ARGS)
+
+forecast-posterior: ## Forecast with parameter uncertainty by MCMC, with R-hat
+	$(COMPOSE) exec worker python -m candlegraph forecast $(ARGS) --posterior
+
+risk: ## VaR, CVaR and the benchmark split: make risk ARGS='WETH --benchmark WBTC'
+	$(COMPOSE) exec worker python -m candlegraph risk $(ARGS)
+
+simulate: ## Monte Carlo a strategy over synthetic markets: make simulate ARGS='WETH --paths 1000'
+	$(COMPOSE) exec worker python -m candlegraph simulate $(ARGS)
+
+simulate-execution: ## Reconcile the event engine with the backtester and price its assumptions
+	$(COMPOSE) exec worker python -m candlegraph simulate $(ARGS) --execution
 
 sync-assets: ## Load asset rows (addresses, symbols, aliases) from config/tokens.yaml into the stack
 	$(COMPOSE) exec worker python -m candlegraph knowledge sync-assets

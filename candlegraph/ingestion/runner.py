@@ -123,7 +123,7 @@ def resolve_cursors(
     reaches further back than the stored history.
     """
     stored = _stored_bounds(db.fetch_all(db.sql.get_latest_timestamps), "token_id")
-    return _cursors(stored, registry.addresses, lookback_days, now, reach_back)
+    return _cursors(stored, registry.active_addresses, lookback_days, now, reach_back)
 
 
 def resolve_pool_cursors(
@@ -145,9 +145,9 @@ def ingest_token_metadata(
     db: DatabaseManager, client: SubgraphClient, registry: TokenRegistry, now: datetime | None = None
 ) -> int:
     """Refresh the ``token`` table. Returns the number of rows written."""
-    rows = client.fetch_tokens(list(registry.addresses))
+    rows = client.fetch_tokens(list(registry.active_addresses))
     if not rows:
-        service_logger.warning("Subgraph returned no token metadata for %d tokens", len(registry))
+        service_logger.warning("Subgraph returned no token metadata for %d tokens", len(registry.active))
         return 0
     prepared = prepare_token_rows(rows, now)
     return db.upsert_many(db.sql.insert_token, db.sql.insert_token_template, prepared)
@@ -178,17 +178,17 @@ def discover_pools(
     now: datetime | None = None,
 ) -> int:
     """Find and store the deepest pools for the tracked tokens."""
-    rows = client.fetch_pools_for_tokens(list(registry.addresses), pools_per_token)
+    rows = client.fetch_pools_for_tokens(list(registry.active_addresses), pools_per_token)
     prepared = prepare_pool_rows(rows, now)
     if not prepared:
-        service_logger.warning("Pool discovery returned nothing for %d tokens", len(registry))
+        service_logger.warning("Pool discovery returned nothing for %d tokens", len(registry.active))
         return 0
     return db.upsert_many(db.sql.insert_pool, db.sql.insert_pool_template, prepared)
 
 
 def tracked_pool_ids(db: DatabaseManager, registry: TokenRegistry) -> tuple[str, ...]:
     """Stored pools that hold at least one tracked token."""
-    rows = db.fetch_all(db.sql.get_pools_for_tokens, {"token_ids": list(registry.addresses)})
+    rows = db.fetch_all(db.sql.get_pools_for_tokens, {"token_ids": list(registry.active_addresses)})
     return tuple(row["id"] for row in rows)
 
 
@@ -233,7 +233,10 @@ def ingest_once(
         result.errors["__metadata__"] = str(exc)
 
     cursors = resolve_cursors(db, registry, window, now, reach_back)
-    for token in registry:
+    # The active ones only, and the same set `resolve_cursors` built from:
+    # iterating the whole registry here would look up a cursor that was
+    # never created for a token nobody is polling.
+    for token in registry.active:
         try:
             written = ingest_token_hours(db, client, registry, token.address, cursors[token.address])
         except TARGET_ERRORS as exc:

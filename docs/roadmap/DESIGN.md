@@ -1,6 +1,6 @@
 # Roadmap
 
-**Status:** living document — last revised 2026-11-06
+**Status:** living document — last revised 2026-11-10 (stages 0 and 6 delivered)
 **Scope:** what candlegraph is, what has been built, and what comes next.
 
 `AGENTS.md` carries a condensed copy of the stage list; this is the
@@ -23,18 +23,20 @@ the test suite:
 | **Time-series storage** | The three series tables are TimescaleDB hypertables chunked on `period_start_unix`; the state and ledger tables deliberately are not. | `make test-integration` (`test_timescale.py`) |
 | **Knowledge graph and signaller** (stage 1, 2026-11-06) | The eight corpus tables on pgvector, assets and aliases from `tokens.yaml`, the document pipeline, local embeddings, Tavily under a budget with the `source_call` ledger, hybrid retrieval bounded by `published_at <= bar`, `signals --explain` with its citation validator on the CLI, GraphQL and the UI, four observer findings, and the read-only MCP server. | `candlegraph signals WETH --strategy bollinger --explain`, with no LLM key; `make mcp` |
 
-Two stages are open:
+No stage is open. Stages 0 and 6 both closed on 2026-11-10:
 
-| In progress | Landed | Remaining | Exit criterion |
-|---|---|---|---|
-| **0. Descriptive statistics, deeper** | `candlegraph compare` over aligned bars; the descriptive display audited and completed (gap map, gap shading, per-leg Compare numbers); the `FillPolicy` seam with its no-look-ahead test; linear, causal and bridge estimators cached in `token_hours_fill` and comparable. | The `active` flag in `config/tokens.yaml` — independent of everything else here, and the only thing between this stage and delivered. | `compare` prints correlation, beta and relative performance (met); `FillPolicy` exists with a no-look-ahead test (met); the stack ingests exactly the five active tokens (**remaining**) |
-| **6. Simulation and strategy evaluation** | The backtester made legible: the execution lag and cost model stated on screen, all thirteen metrics, a cross-strategy comparison, and a look-ahead demonstration (rollout step 1). | Monte Carlo and discrete-event (step 2); MCMC posteriors and closeout (step 3). | in [`../analytics/simulation/DESIGN.md`](../analytics/simulation/DESIGN.md) |
+| Recently delivered | What closed it |
+|---|---|
+| **0. Descriptive statistics, deeper** | The `active` flag in `config/tokens.yaml` — the stack now polls exactly WBTC, WETH, BNB, GNO and SHIB while the file still lists every token whose history is stored. |
+| **6. Simulation and strategy evaluation** | MCMC posteriors, gated on R-hat and effective sample size, completing the three simulators. |
 
-Stage 6 is being built out of numeric order, which is normal here — stage
-1 was delivered while stage 0 was paused. The numbers are identities, not
-a queue. It comes next because the deterministic layer it tests is
-finished and the question it answers — *is this edge luck?* — is the one
-standing between a backtest and a decision.
+[`../rollout/ROLLOUT.md`](../rollout/ROLLOUT.md) records that there is no
+current rollout and costs four candidates for the next one; by this
+document's ordering the next stage is **2, the harness**.
+
+Stage 6 was built out of numeric order, which is normal here — stage 1
+was delivered while stage 0 was paused. The numbers are identities, not a
+queue.
 
 The descriptive-display step came first on purpose: rule 2 below asks for
 filled bars to be *flagged*, which presupposes a surface that tells an
@@ -97,7 +99,7 @@ stages is cheaper once the harness exists to run it.
 
 ---
 
-## 0. Descriptive statistics, deeper
+## 0. Descriptive statistics, deeper — **delivered 2026-11-10**
 
 **Goal.** Before signals learn to cite documents (stage 1), the descriptive
 layer should be able to say how two assets relate to each other, the test
@@ -467,7 +469,7 @@ produces none.
 
 ---
 
-## 6. Simulation and strategy evaluation
+## 6. Simulation and strategy evaluation — **delivered 2026-11-10**
 
 **Goal.** Stop reporting one number per strategy over the one price path
 that happened. A backtest is a sample of size one; this stage gives the
@@ -510,11 +512,12 @@ invariants 15-17 cannot drift inside it. Nothing simulated is written to
 
 **Exit criterion.** `candlegraph simulate WETH --strategy bollinger
 --paths 1000` prints the distribution of excess return with an empirical
-p-value against the real backtest; a zero-latency discrete-event run
-reproduces the vectorised backtester to tolerance and reports what one
-bar of latency costs; and `candlegraph forecast WETH --posterior` prints
-an interval wider than the point-estimate one, with R-hat reported and a
-refusal if the chain has not converged.
+p-value against the real backtest *(met 2026-11-09)*; a zero-latency
+discrete-event run reproduces the vectorised backtester to tolerance and
+reports what one bar of latency costs *(met 2026-11-09 — the agreement is
+exact, not merely within tolerance)*; and `candlegraph forecast WETH
+--posterior` prints an interval wider than the point-estimate one, with
+R-hat reported and a refusal if the chain has not converged *(remaining)*.
 
 ---
 

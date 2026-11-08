@@ -722,3 +722,185 @@ def test_the_parser_offers_exactly_the_estimators_that_exist() -> None:
 
     assert FILL_METHODS == METHODS
     assert set(FILL_METHODS) == set(METHOD_POLICY)
+
+
+# --- simulation --------------------------------------------------------------
+
+
+def simulate_env(tokens_file: Path, monkeypatch: pytest.MonkeyPatch, bars: int = 500) -> FakeDatabase:
+    """Enough history for resampling to mean something."""
+    from decimal import Decimal
+
+    import numpy as np
+
+    hour = 3600
+    base = 1_700_000_000 // (24 * hour) * (24 * hour)
+    rng = np.random.default_rng(4)
+    walk = 100 * np.exp(np.cumsum(rng.normal(0, 0.01, bars)))
+    rows = [
+        {
+            "symbol": "WBTC",
+            "token_id": "0xwbtc",
+            "period_start_unix": base + i * hour,
+            "timestamp": datetime.fromtimestamp(base + i * hour, tz=UTC),
+            "open": Decimal(str(p)),
+            "high": Decimal(str(p)),
+            "low": Decimal(str(p)),
+            "close": Decimal(str(p)),
+            "price_usd": Decimal(str(p)),
+            "volume_usd": Decimal("1000"),
+            "total_value_locked_usd": Decimal("5000"),
+        }
+        for i, p in enumerate(walk)
+    ]
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    monkeypatch.setattr("candlegraph.cli.get_settings", lambda: make_settings(tokens_file=str(tokens_file)))
+    db = FakeDatabase(get_price_history=rows)
+    set_db(db)
+    return db
+
+
+def test_simulate_prints_a_distribution_with_a_p_value(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The step's exit criterion, as a command."""
+    db = simulate_env(tokens_file, monkeypatch)
+
+    assert main(["simulate", "WBTC", "--strategy", "bollinger", "--paths", "40", "--seed", "7"]) == 0
+
+    out = capsys.readouterr().out
+    assert "40 paths" in out and "generator 'block'" in out and "seed 7" in out
+    assert "p-value" in out
+    assert "actual excess vs buy & hold" in out
+    assert db.upserts == [], "simulating writes nothing"
+
+
+def test_simulate_repeats_the_caveat_about_the_sample(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Resampling widens the sample along one axis only, and every surface
+    that reports a distribution has to say so."""
+    simulate_env(tokens_file, monkeypatch)
+
+    assert main(["simulate", "WBTC", "--paths", "30"]) == 0
+
+    assert "still ninety days" in capsys.readouterr().out
+
+
+def test_simulate_defaults_to_the_block_bootstrap(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Not IID: that would destroy the clustering the strategies trade."""
+    simulate_env(tokens_file, monkeypatch)
+
+    assert main(["simulate", "WBTC", "--paths", "20"]) == 0
+
+    assert "generator 'block'" in capsys.readouterr().out
+
+
+def test_simulate_accepts_each_generator(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for method in ("block", "iid", "gbm", "regime"):
+        simulate_env(tokens_file, monkeypatch)
+        assert main(["simulate", "WBTC", "--paths", "20", "--method", method]) == 0
+        assert f"generator {method!r}" in capsys.readouterr().out
+
+
+def test_simulate_rejects_a_generator_that_does_not_exist(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    simulate_env(tokens_file, monkeypatch)
+    with pytest.raises(SystemExit):
+        main(["simulate", "WBTC", "--method", "crystal-ball"])
+
+
+def test_simulate_refuses_a_window_too_short_to_resample(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    simulate_env(tokens_file, monkeypatch, bars=20)
+    with pytest.raises(SystemExit, match="usable returns"):
+        main(["simulate", "WBTC", "--paths", "10"])
+
+
+def test_simulate_execution_reports_the_reconciliation_first(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Everything after it is only meaningful if the engines agree."""
+    simulate_env(tokens_file, monkeypatch)
+
+    assert main(["simulate", "WBTC", "--execution"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Reconciliation against the vectorised backtester" in out
+    assert "AGREES" in out, "the two engines must match at zero latency"
+    assert "What the convenient assumptions are worth" in out
+    assert "latency_bars" in out
+
+
+def test_the_parser_offers_exactly_the_generators_that_exist() -> None:
+    """Two lists that must agree, held together rather than asked nicely."""
+    from candlegraph.analytics.simulation import GENERATOR_NAMES
+    from candlegraph.cli import DEFAULT_GENERATOR, SIMULATION_GENERATORS
+
+    assert SIMULATION_GENERATORS == GENERATOR_NAMES
+    assert DEFAULT_GENERATOR == "block"
+
+
+def test_forecast_posterior_reports_r_hat_and_both_intervals(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The stage's third exit clause, as a command."""
+    simulate_env(tokens_file, monkeypatch)
+
+    assert main(["forecast", "WBTC", "--posterior", "--draws", "800", "--seed", "3"]) == 0
+
+    out = capsys.readouterr().out
+    assert "R-hat" in out and "ESS" in out
+    assert "point-estimate interval" in out and "posterior interval" in out
+    assert "seed 3" in out
+    assert "Converged" in out
+
+
+def test_an_unconverged_posterior_exits_non_zero(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unconverged sampler does not announce itself, so the refusal has
+    to be the exit code and not only prose someone might skim past."""
+    simulate_env(tokens_file, monkeypatch)
+
+    assert main(["forecast", "WBTC", "--posterior", "--draws", "5", "--chains", "2"]) == 1
+
+    assert "REFUSED" in capsys.readouterr().out
+
+
+def test_forecast_without_posterior_still_runs_arima(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The default behaviour must not have moved."""
+    simulate_env(tokens_file, monkeypatch)
+
+    assert main(["forecast", "WBTC"]) == 0
+
+    assert "ARIMA" in capsys.readouterr().out
+
+
+def test_every_analytics_command_has_a_make_target() -> None:
+    """The gap that sent a reader to `docker compose exec` by hand.
+
+    The Makefile is the single source of commands (AGENTS.md), so a CLI
+    subcommand a person would run interactively needs a target behind it.
+    Services and namespaces are excluded: nobody runs `make serve` to get
+    a foreground API inside the stack that is already running one.
+    """
+    import re
+    from pathlib import Path as _Path
+
+    makefile = _Path("Makefile").read_text()
+    targets = set(re.findall(r"^([a-z][a-z0-9-]*):", makefile, re.M))
+    subcommands = set(re.findall(r'add_parser\(\s*"([a-z-]+)"', _Path("candlegraph/cli.py").read_text()))
+    services = {"serve", "worker", "agents", "knowledge"}
+
+    assert (subcommands - services) <= targets, (
+        f"no make target for: {sorted(subcommands - services - targets)}"
+    )

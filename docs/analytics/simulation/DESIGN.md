@@ -1,7 +1,8 @@
 # Simulation: testing strategies against markets that did not happen
 
-**Status:** proposed — 2026-11-09. No code yet; this document is the
-argument, and `docs/rollout/ROLLOUT.md` sequences the build.
+**Status:** implemented — 2026-11-10. All three simulators are built;
+the portfolio-posterior half of §3 is the one thing deferred, and this
+document says why below.
 **Decision:** three simulators with three different jobs — **Monte Carlo**
 for "is this edge luck?", **discrete-event** for "does the vectorised
 backtester lie about execution?", and **MCMC** for "how wrong might the
@@ -77,6 +78,29 @@ still 90 days of one market.
 **Determinism.** Every run takes a seed and records it. A simulation whose
 result changes between two readings of the same page is not evidence.
 
+**As built (2026-11-09).** `analytics/simulation.py` holds the four
+generators behind a registry, each declaring what it preserves and
+destroys; the harness that runs a strategy over the paths is
+`strategies/montecarlo.py`, **not** `analytics/`, because
+`strategies.backtest` already imports `analytics` and a harness there
+would close an import cycle. It calls the existing backtester rather
+than reimplementing it, so invariants 15-17 cannot drift inside it.
+
+Two measured results worth recording. The block bootstrap carries
+volatility clustering through at close to full strength (lag-1
+autocorrelation of absolute returns +0.357 against the source's +0.371)
+while IID and GBM flatten it to zero and the regime generator keeps about
+three-quarters of it — which is the comparison table above, confirmed
+rather than assumed. And the p-value is reported with the usual
+`(k + 1) / (n + 1)` correction, because a thousand paths cannot evidence
+one-in-a-million and printing `0.000` would claim more than the sample
+size supports.
+
+The regime generator labels bars by rolling volatility against its own
+median rather than fitting a hidden Markov model. That is a deliberate
+proxy: four auditable lines with no optimiser that can fail to converge,
+at the cost of being a cruder classifier than a fitted one.
+
 ## 2. Discrete-event simulation — does the backtester lie?
 
 **What it does.** Replace the vectorised `position * returns` with an
@@ -113,6 +137,37 @@ data actually supports.
 **What it needs from storage.** Volume and liquidity per hour, which
 `pool_hours_data` already carries — and which, per the data-model note, is
 the *only* place per-pair volume and TVL are reachable.
+
+**As built (2026-11-09).** `analytics/events.py` runs a real queue
+(`heapq` over `(bar, phase, token)`) with decide, delay and fill as
+separate events. The accounting — costs on turnover, `equity_curve`,
+`drawdown_curve` — is deliberately **shared** with the backtester; what
+this module derives independently is the *position path*, which is the
+thing worth reconciling. The equality holds exactly: at latency 0, 1, 2
+and 5 the two engines agree to `0.0` on both positions and equity.
+
+The correspondence needs stating because the off-by-one is the whole
+subject: `ExecutionModel(latency_bars=k)` matches
+`BacktestConfig(execution_lag=k + 1)`. The `+ 1` is not latency — a
+decision taken at a close cannot be acted on before the next bar exists,
+which is true of an infinitely fast trader.
+
+**Writing the reconciliation first found two bugs**, exactly as the
+rollout predicted it would:
+
+1. `fill_ratio=1.0` was read as a one-*unit* cap rather than "all of the
+   gap", so every long-to-short flip — a two-unit move — silently took
+   two bars. Aggression (a fraction of the remaining gap) and capacity (a
+   unit cap from liquidity) are now separate arguments, because
+   conflating them is what caused it.
+2. A fill read the *current* target instead of the one its order was
+   placed with, so any latency above zero executed a trade nobody placed.
+   Orders now carry their own target. This also makes explicit something
+   `shift(k)` implies and never says: above `execution_lag=1` you are
+   filling **stale decisions**, and there is no cancel-replace.
+
+Both would have been invisible in a vectorised implementation, which is
+the argument for having a second one.
 
 ## 3. MCMC — how wrong might the parameters be?
 
@@ -151,6 +206,48 @@ will already exist.
 produces confident nonsense, and unlike a failed optimisation it does not
 announce itself. R-hat and ESS are reported with every posterior, and a
 run that fails them is surfaced as a refusal rather than a result.
+
+**As built (2026-11-10).** `analytics/mcmc.py` holds a random-walk
+Metropolis sampler, the two diagnostics, and a
+random-walk-with-drift model over `(mu, log sigma)` — the model every
+forecast in this codebase already assumes, with the parameters no longer
+pretended to be known. `log sigma` is sampled rather than `sigma` so a
+symmetric proposal cannot step to a negative volatility.
+
+`PosteriorSamples.usable` is false unless R-hat <= 1.01 *and* ESS >= 100,
+`candlegraph forecast --posterior` exits non-zero when it is false, and
+the dashboard prints a refusal banner. Three surfaces, one gate: an
+unconverged chain cannot be read as a result by forgetting to look.
+
+**The sampler needed per-dimension adaptation, and the diagnostics are
+what caught it.** A single acceptance-based tuning factor scales every
+parameter together, so it cannot fix a proposal that is four times too
+narrow in one dimension and twenty times too wide in another — which is
+exactly a drift near 1e-4 beside a log volatility near -4. The first
+working version reported ESS 17 for `mu` against 1228 for `log sigma`,
+and was correctly refused. Warm-up now re-fits the proposal to the
+spread of the draws seen so far (Roberts-Gelman-Gilks scaling) before
+applying the acceptance nudge, and both parameters mix.
+
+**What the widening actually does.** Measured on a random walk, the
+posterior interval is 31% wider than the point-estimate one at 40 bars,
+14% at 80, 5% at 200, and indistinguishable from it at 800. That
+convergence is the method *agreeing* with the point estimate once the
+parameters are pinned down, not failing — so "wider" is a claim about
+short windows, and a method that stayed wide forever would be wrong in
+the other direction. The design's expectation that the plug-in interval
+is "too narrow — systematically, and more so on short windows" is
+confirmed with the emphasis on the second clause.
+
+**Deferred: the portfolio posterior.** §3 promised a distribution of
+optimal weights as well, and it is not built. Re-optimising a
+mean-variance portfolio once per posterior draw is a different shape of
+work from a two-parameter forecast — the posterior is over a mean
+*vector*, the sampler has to scale with the number of assets, and each
+draw costs an optimisation rather than an exponential. Shipping it
+hurried, inside the step that also had to close stage 0, was the worse
+option. The seam is ready: `sample()` takes any log density, and
+`optimise_portfolio` already accepts a returns frame.
 
 ## A terminology trap worth naming
 

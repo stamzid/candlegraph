@@ -45,6 +45,7 @@ PAGES = (
     "Compare",
     "Portfolio",
     "Strategy",
+    "Simulation",
     "Forecast",
     "Agents",
     "News",
@@ -753,4 +754,69 @@ def test_the_strategy_dashboard_compares_every_rule_on_the_token() -> None:
     assert "Strategy Comparison" in text
     assert "Where the Edge Went" in text
     assert "Look-ahead Check" in text
+    assert not app.exception, [str(e) for e in app.exception]
+
+
+# --- the simulation dashboard ------------------------------------------------
+
+
+def test_the_simulation_dashboard_offers_both_questions() -> None:
+    """They answer different doubts and must not read as one control."""
+    app = run_app("Simulation")
+
+    text = " ".join(m.value for m in app.markdown)
+    captions = " ".join(c.value for c in app.caption)
+    assert "sample of size one" in captions
+    assert "Monte Carlo" in captions or "Monte Carlo" in text
+    assert not app.exception, [str(e) for e in app.exception]
+
+
+def test_the_simulation_dashboard_does_not_run_until_asked() -> None:
+    """Hundreds of backtests on every widget change would make the page
+    unusable; Streamlit re-runs the script on each one."""
+    app = run_app("Simulation")
+
+    captions = " ".join(c.value for c in app.caption)
+    assert "Press to" in captions
+    assert not app.exception, [str(e) for e in app.exception]
+
+
+def test_the_generator_picker_says_what_each_one_destroys() -> None:
+    app = run_app("Simulation")
+
+    picker = next(w for w in app.main.selectbox if w.label == "Path generator")
+    assert list(picker.options) == ["block", "iid", "gbm", "regime"]
+    assert picker.value == "block", "the default must not be IID"
+
+
+# --- the execution panel, made checkable on screen ---------------------------
+
+
+def test_the_execution_panel_states_the_lifecycle_and_the_offset() -> None:
+    """A reader should not have to open the source to match the engine
+    against the theory, which is what prompted this panel."""
+    app = run_app("Simulation")
+
+    text = " ".join(m.value for m in app.markdown)
+    assert "decide" in text and "delay" in text and "fill" in text
+    assert "execution_lag=k + 1" in text or "execution_lag = 1" in text
+    assert "stale" in text, "filling stale decisions is the thing shift(k) never says"
+    assert not app.exception, [str(e) for e in app.exception]
+
+
+def test_the_execution_panel_shows_a_worked_example_without_being_asked() -> None:
+    """The reconciliation proves correctness; the walkthrough shows the
+    mechanics, and it is useless behind a button nobody presses."""
+    app = run_app("Simulation")
+
+    text = " ".join(m.value for m in app.markdown)
+    assert "Worked Example" in text
+    assert any("latency_bars" in w.label for w in app.main.number_input)
+
+
+def test_the_forecast_dashboard_offers_the_posterior() -> None:
+    app = run_app("Forecast")
+
+    text = " ".join(m.value for m in app.markdown)
+    assert "Parameter Uncertainty" in text
     assert not app.exception, [str(e) for e in app.exception]

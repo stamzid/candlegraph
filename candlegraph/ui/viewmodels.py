@@ -26,6 +26,14 @@ from candlegraph.agents.observer import run_observer
 from candlegraph.agents.reporting import build_sinks
 from candlegraph.agents.stages import StageHook, StageRecord
 from candlegraph.analytics.arima import ArimaConfig, ArimaForecast, fit_forecast
+from candlegraph.analytics.events import (
+    ExecutionModel,
+    Reconciliation,
+    latency_cost,
+    reconcile,
+    run_execution,
+)
+from candlegraph.analytics.mcmc import MCMCError, PosteriorForecast, posterior_forecast
 from candlegraph.analytics.pairwise import PairwiseComparison, compare_pair
 from candlegraph.analytics.portfolio import (
     FrontierPoint,
@@ -61,6 +69,13 @@ from candlegraph.analytics.rolling import (
     periods_per_year,
     rolling_summary,
     simple_returns,
+)
+from candlegraph.analytics.simulation import (
+    DEFAULT_GENERATOR,
+    GENERATOR_NAMES,
+    GENERATORS,
+    SimulationError,
+    simulate_paths,
 )
 from candlegraph.ingestion.fills import (
     LINEAR,
@@ -103,6 +118,7 @@ from candlegraph.strategies import available, backtest, run_strategy
 from candlegraph.strategies.backtest import BacktestConfig, BacktestError, BacktestResult
 from candlegraph.strategies.backtest import compare as compare_backtests
 from candlegraph.strategies.base import StrategyResult
+from candlegraph.strategies.montecarlo import SimulationSummary, evaluate_strategy
 from candlegraph.tokens import get_token_registry
 from candlegraph.utils.logging_utils import service_logger
 
@@ -1363,6 +1379,158 @@ def build_lag_demonstration(
     )
 
 
+# --- simulation dashboard ------------------------------------------------------
+
+
+@dataclass
+class SimulationView:
+    """A Monte Carlo run, shaped for a screen."""
+
+    summary: SimulationSummary
+    fan: pd.DataFrame
+    """Percentile bands of the synthetic paths, for the envelope chart."""
+
+    @property
+    def headline(self) -> dict[str, Any]:
+        actual = self.summary.actual
+        return {
+            "paths": self.summary.n_paths,
+            "source_bars": self.summary.source_bars,
+            "method": self.summary.method,
+            "seed": self.summary.seed,
+            "actual_excess": actual.excess_return,
+            "actual_sharpe": actual.sharpe,
+            "median_excess": float(self.summary.outcomes["excess_return"].median()),
+            "p_value": self.summary.p_value(),
+        }
+
+    @property
+    def distribution(self) -> pd.Series:
+        """Excess return per path — the histogram's raw material."""
+        return self.summary.outcomes["excess_return"]
+
+    @property
+    def percentile_frame(self) -> pd.DataFrame:
+        """The distribution of every tracked metric, as a readable table."""
+        rows = []
+        for metric in self.summary.outcomes.columns:
+            bands = self.summary.percentiles(metric)
+            rows.append({"metric": metric, "actual": float(getattr(self.summary.actual, metric)), **bands})
+        return pd.DataFrame(rows)
+
+
+def build_simulation_view(
+    db: DatabaseManager,
+    symbol: str,
+    strategy: str,
+    days: int | None,
+    n_paths: int = 300,
+    method: str = DEFAULT_GENERATOR,
+    seed: int = 0,
+    config: BacktestConfig | None = None,
+    strategy_config: Any = None,
+) -> SimulationView:
+    """Monte Carlo one strategy on one token, for the Simulation dashboard.
+
+    Raises:
+        ViewError: too little history, or an unknown generator — both of
+            which are things the reader can fix.
+    """
+    prices = _one_symbol(db, symbol, days)
+    try:
+        summary = evaluate_strategy(
+            prices,
+            strategy,
+            n_paths=n_paths,
+            method=method,
+            seed=seed,
+            config=config,
+            strategy_config=strategy_config,
+        )
+        paths = simulate_paths(prices, n_paths=min(n_paths, 400), method=method, seed=seed)
+    except SimulationError as exc:
+        raise ViewError(str(exc)) from exc
+    return SimulationView(summary=summary, fan=paths.fan())
+
+
+def generator_catalogue() -> pd.DataFrame:
+    """What each path generator keeps and throws away.
+
+    Shown beside the picker because choosing a generator *is* choosing
+    what the answer can mean — an IID bootstrap answers a different
+    question than a block one, not the same question less well.
+    """
+    return pd.DataFrame(
+        [
+            {
+                "generator": name,
+                "preserves": GENERATORS[name].preserves,
+                "destroys": GENERATORS[name].destroys,
+            }
+            for name in GENERATOR_NAMES
+        ]
+    )
+
+
+def execution_walkthrough(bars: int = 8, latency_bars: int = 0) -> pd.DataFrame:
+    """A hand-sized worked example of the event lifecycle. Pure.
+
+    The reconciliation proves the engine is right; it does not show
+    *what* it does, and reading the source to check an implementation
+    against the theory is a poor substitute for the implementation
+    showing its work. This runs a deliberately trivial signal — flat,
+    long, long, flat, short... — through the real engine and tabulates
+    every step, so the one-bar offset and the cost timing are visible
+    rather than asserted.
+
+    Uses the real :func:`run_execution`, not a mock-up: an illustration
+    that could drift from the engine would be worse than none.
+    """
+    index = pd.date_range("2026-01-01", periods=bars, freq="h", tz="UTC")
+    # A flat price, so every number in the table is about execution and
+    # nothing is about the market moving.
+    prices = pd.Series(100.0, index=index, name="example")
+    pattern = [0.0, 1.0, 1.0, 0.0, -1.0, -1.0, 0.0, 0.0][:bars]
+    signals = pd.Series(pattern + [0.0] * (bars - len(pattern)), index=index)
+
+    run = run_execution(prices, signals, ExecutionModel(latency_bars=latency_bars, cost_bps=100.0))
+    frame = run.frame
+    turnover = frame["position"].diff().abs().fillna(frame["position"].abs())
+    return pd.DataFrame(
+        {
+            "bar": range(bars),
+            "decided (signal)": frame["signal"].to_numpy(),
+            "held during bar": frame["position"].to_numpy(),
+            "position changed": turnover.to_numpy(),
+            "cost paid": frame["costs"].to_numpy(),
+        }
+    )
+
+
+def build_execution_view(
+    db: DatabaseManager,
+    symbol: str,
+    strategy: str,
+    days: int | None,
+    config: BacktestConfig | None = None,
+    strategy_config: Any = None,
+) -> tuple[Reconciliation, pd.DataFrame]:
+    """The discrete-event reconciliation, and the price of each assumption.
+
+    Returns the reconciliation first because the table after it only
+    means anything if the two engines agree when the assumptions are put
+    back.
+    """
+    settings = config or BacktestConfig()
+    prices = _one_symbol(db, symbol, days)
+    signals = run_strategy(strategy, prices, strategy_config).signals
+    cost_bps = settings.fee_bps + settings.slippage_bps
+
+    check = reconcile(prices, signals, latency_bars=0, cost_bps=cost_bps)
+    table = latency_cost(prices, signals, latencies=(0, 1, 2, 4), cost_bps=cost_bps, fill_ratios=(1.0, 0.25))
+    return check, table
+
+
 # --- explanations (signals --explain in the UI) --------------------------------
 
 
@@ -1495,6 +1663,66 @@ def forecast_frame(prices: pd.Series, forecast: ArimaForecast) -> pd.DataFrame:
     last = pd.DatetimeIndex(prices.index)[-1]
     index = pd.date_range(last + pd.Timedelta(hours=1), periods=len(forecast.path), freq="h")
     return pd.DataFrame({"forecast": list(forecast.path)}, index=index)
+
+
+def build_posterior_forecast(
+    db: DatabaseManager,
+    symbol: str,
+    days: int | None,
+    steps: int = 24,
+    confidence: float = 0.95,
+    draws: int = 1500,
+    chains: int = 4,
+    seed: int = 0,
+) -> PosteriorForecast:
+    """An interval that includes parameter uncertainty, not just noise.
+
+    Raises:
+        ViewError: too little history, or a confidence outside (0, 1).
+    """
+    prices = _one_symbol(db, symbol, days)
+    try:
+        return posterior_forecast(
+            prices,
+            steps=steps,
+            confidence=confidence,
+            draws=draws,
+            chains=chains,
+            seed=seed,
+        )
+    except MCMCError as exc:
+        raise ViewError(str(exc)) from exc
+
+
+def posterior_interval_frame(forecast: PosteriorForecast) -> pd.DataFrame:
+    """The two intervals side by side, so the widening is readable.
+
+    Showing only the posterior would hide the entire point: the number
+    that matters is how much wider it is than the interval every other
+    forecast in this codebase reports.
+    """
+    return pd.DataFrame(
+        [
+            {
+                "interval": "point estimate (innovation noise only)",
+                "lower": forecast.plugin_lower,
+                "upper": forecast.plugin_upper,
+                "width": forecast.plugin_width,
+            },
+            {
+                "interval": "posterior (parameters also uncertain)",
+                "lower": forecast.lower,
+                "upper": forecast.upper,
+                "width": forecast.width,
+            },
+        ]
+    )
+
+
+def posterior_diagnostics_frame(forecast: PosteriorForecast) -> pd.DataFrame:
+    """Per-parameter posterior summary with R-hat and effective sample size."""
+    rows = [{"parameter": name, **stats} for name, stats in forecast.posterior.summary().items()]
+    return pd.DataFrame(rows)
 
 
 # --- agents dashboard --------------------------------------------------------

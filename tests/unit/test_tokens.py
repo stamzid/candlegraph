@@ -25,11 +25,19 @@ def write(tmp_path: Path, body: str) -> Path:
 
 
 def test_repo_tokens_file_loads_the_shipped_universe() -> None:
-    """The shipped config is what docker compose ingests."""
+    """The shipped config is what docker compose *knows about*.
+
+    It is no longer the same as what it ingests: since the `active` flag
+    landed, the file lists every token whose history is stored and the
+    worker polls only the active ones. The count grew by one when BNB was
+    added for the active five; the assertion is a floor rather than an
+    equality so adding a token is a config change, not a test change.
+    """
     registry = load_tokens(REPO_ROOT / "config" / "tokens.yaml")
 
-    assert len(registry) == 10
-    assert set(registry.symbols) >= {"WETH", "WBTC", "USDC", "SHIB", "GNO"}
+    assert len(registry) >= 10
+    assert len(registry.active) == 5, "see the stage 0 exit criterion"
+    assert set(registry.symbols) >= {"WETH", "WBTC", "USDC", "SHIB", "GNO", "BNB"}
     assert all(token.address.startswith("0x") for token in registry)
     assert all(token.name for token in registry)
     # Every shipped token carries an alias list for the knowledge layer.
@@ -158,3 +166,86 @@ def test_get_token_registry_follows_the_configured_path(
 
     assert get_token_registry().symbols == ("WBTC", "SHIB")
     assert get_token_registry() is get_token_registry()
+
+
+# --- the active flag (stage 0 closeout) --------------------------------------
+
+ACTIVE_YAML = """
+tokens:
+  - address: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    symbol: WETH
+    active: true
+  - address: "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+    symbol: WBTC
+  - address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+    symbol: USDC
+    active: false
+"""
+
+
+def test_a_token_without_the_flag_is_active(tmp_path: Path) -> None:
+    """A file written before the flag existed must be unchanged by it."""
+    registry = load_tokens(write(tmp_path, ACTIVE_YAML))
+
+    assert registry.by_symbol("WBTC") is not None
+    assert registry.by_symbol("WBTC").active is True  # type: ignore[union-attr]
+
+
+def test_ingestion_polls_only_the_active_tokens(tmp_path: Path) -> None:
+    registry = load_tokens(write(tmp_path, ACTIVE_YAML))
+
+    assert registry.active_symbols == ("WETH", "WBTC")
+    assert registry.inactive_symbols == ("USDC",)
+    assert len(registry.active_addresses) == 2
+
+
+def test_deactivating_a_token_does_not_hide_its_stored_history(tmp_path: Path) -> None:
+    """`active: false` means stop *fetching*, never forget.
+
+    Invariant 4 keeps the rows, so every lookup, the analytics layer and
+    the knowledge layer must still see the token. Removing the entry
+    instead would orphan its history, which is why a retired token stays
+    listed.
+    """
+    registry = load_tokens(write(tmp_path, ACTIVE_YAML))
+
+    assert registry.by_symbol("USDC") is not None, "still addressable"
+    assert "USDC" in registry.symbols, "still in the full list"
+    assert "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" in registry.addresses
+    assert "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" not in registry.active_addresses
+
+
+def test_a_non_boolean_flag_is_refused(tmp_path: Path) -> None:
+    """YAML turns `no` into False but `"false"` into a truthy string, so a
+    typo would silently keep a token in the poll."""
+    bad = ACTIVE_YAML.replace("active: false", 'active: "false"')
+
+    with pytest.raises(TokenConfigError, match="active must be true or false"):
+        load_tokens(write(tmp_path, bad))
+
+
+def test_deactivating_every_token_is_refused(tmp_path: Path) -> None:
+    """An ingest run that fetches nothing is almost certainly not meant."""
+    none_active = """
+tokens:
+  - address: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    symbol: WETH
+    active: false
+"""
+
+    with pytest.raises(TokenConfigError, match="every token is marked inactive"):
+        load_tokens(write(tmp_path, none_active))
+
+
+def test_the_shipped_config_tracks_exactly_the_five_the_roadmap_names() -> None:
+    """Stage 0's exit criterion: the stack ingests exactly five tokens
+    while `tokens.yaml` still lists the full set.
+
+    GNO and SHIB are there *because* their history is gapped — they are
+    the fixtures the gap-filling work is judged on.
+    """
+    registry = load_tokens(REPO_ROOT / "config" / "tokens.yaml")
+
+    assert set(registry.active_symbols) == {"WBTC", "WETH", "BNB", "GNO", "SHIB"}
+    assert len(registry.tokens) > 5, "the retired ones stay listed, or their history is orphaned"
+    assert set(registry.inactive_symbols) == {"USDC", "USDT", "DAI", "LINK", "UNI", "AAVE"}

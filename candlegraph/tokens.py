@@ -33,6 +33,12 @@ class Token:
     # Names a document might use for this token ("Ether", "Ethereum"). Config
     # for the knowledge layer's entity linking; empty means "symbol and name".
     aliases: tuple[str, ...] = ()
+    # Whether ingestion still polls it. `False` means "stop fetching new
+    # hours", never "forget": invariant 4 keeps the stored history, every
+    # analytics surface still reads it, and `by_symbol` still finds it.
+    # Defaults to True so a file written before this flag existed is
+    # unchanged by it.
+    active: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +54,31 @@ class TokenRegistry:
     @property
     def symbols(self) -> tuple[str, ...]:
         return tuple(token.symbol for token in self.tokens)
+
+    @property
+    def active(self) -> tuple[Token, ...]:
+        """The tokens ingestion still polls.
+
+        Everything else — lookups, analytics, the knowledge layer — works
+        from the full list. Deactivating a token stops it costing subgraph
+        calls; it does not hide the history already stored, which would
+        break invariant 4's promise that stored history is never lost.
+        """
+        return tuple(token for token in self.tokens if token.active)
+
+    @property
+    def active_addresses(self) -> tuple[str, ...]:
+        """What the ingest run asks the subgraph for."""
+        return tuple(token.address for token in self.active)
+
+    @property
+    def active_symbols(self) -> tuple[str, ...]:
+        return tuple(token.symbol for token in self.active)
+
+    @property
+    def inactive_symbols(self) -> tuple[str, ...]:
+        """Listed but no longer polled. Their stored history is still read."""
+        return tuple(token.symbol for token in self.tokens if not token.active)
 
     @property
     def symbol_by_address(self) -> dict[str, str]:
@@ -92,7 +123,26 @@ def _parse_entry(index: int, raw: Any) -> Token:
     if name is not None and not isinstance(name, str):
         raise TokenConfigError(f"tokens[{index}] name must be a string when present")
 
-    return Token(address=address, symbol=symbol, name=name, aliases=_parse_aliases(index, raw))
+    return Token(
+        address=address,
+        symbol=symbol,
+        name=name,
+        aliases=_parse_aliases(index, raw),
+        active=_parse_active(index, raw),
+    )
+
+
+def _parse_active(index: int, raw: dict[str, Any]) -> bool:
+    """Read the `active` flag, defaulting to True.
+
+    Strict about the type on purpose: YAML turns a bare `no` into `False`
+    but `"false"` into a non-empty string, which is truthy. Accepting
+    anything truthy would mean a typo silently keeps a token in the poll.
+    """
+    value = raw.get("active", True)
+    if not isinstance(value, bool):
+        raise TokenConfigError(f"tokens[{index}] active must be true or false, got {value!r}")
+    return value
 
 
 def _parse_aliases(index: int, raw: dict[str, Any]) -> tuple[str, ...]:
@@ -116,7 +166,8 @@ def load_tokens(path: Path) -> TokenRegistry:
 
     Raises:
         TokenConfigError: the file is absent, is not a token list, holds a
-            malformed address, or repeats an address or symbol.
+            malformed address, repeats an address or symbol, or marks every
+            token inactive.
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -138,7 +189,14 @@ def load_tokens(path: Path) -> TokenRegistry:
     # An alias shared by two tokens would make a document's mention ambiguous.
     _reject_duplicates(path, "alias", [a.casefold() for t in tokens for a in t.aliases])
 
-    return TokenRegistry(tokens=tokens)
+    registry = TokenRegistry(tokens=tokens)
+    if not registry.active:
+        raise TokenConfigError(
+            f"{path}: every token is marked inactive, so an ingest run would fetch nothing. "
+            "Deactivating a token stops it being polled; deactivating all of them stops the "
+            "worker doing anything at all, which is almost certainly not what was meant."
+        )
+    return registry
 
 
 def _reject_duplicates(path: Path, field: str, values: list[str]) -> None:

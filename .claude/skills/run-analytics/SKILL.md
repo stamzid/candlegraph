@@ -7,6 +7,25 @@ description: Run candlegraph's analytics — rolling volatility, mean-variance p
 
 Everything needs stored history first: `make up && make backfill days=90`.
 
+**Every command below has a `make` target.** If you find yourself typing
+`docker compose exec worker python -m candlegraph ...`, stop and check
+`make help` — the target exists, takes `ARGS`, and a test fails if a CLI
+subcommand a person would run interactively has none behind it.
+
+```sh
+make stats ARGS='WETH --window 24'       make compare ARGS='WETH WBTC'
+make signals ARGS='WETH --store'         make backtest ARGS='WETH --strategy all'
+make portfolio ARGS='--objective max_sharpe'
+make forecast ARGS='WETH --auto-order'   make forecast-posterior ARGS='WETH'
+make risk ARGS='WETH --benchmark WBTC'   make strategies
+```
+
+Only the **five active tokens** are ingested (WBTC, WETH, BNB, GNO,
+SHIB). The rest are still listed in `config/tokens.yaml` with
+`active: false` and their stored history is still readable, so
+`make compare ARGS='USDC WETH'` works on what was already collected — it
+just stops getting newer.
+
 ## Commands
 
 ```sh
@@ -75,6 +94,53 @@ This is the part that goes wrong. Three rules:
 
 `sharpe` here is annualised from hourly bars, so it is large in magnitude in
 both directions. Prefer `excess` and `max drawdown` for judgement.
+
+## Is the edge real, and would it have filled?
+
+A backtest is one number over the one path that happened. Two commands
+widen that, and they answer different doubts.
+
+```sh
+make simulate ARGS='WETH --strategy bollinger --paths 1000'
+make simulate-execution ARGS='WETH'
+```
+
+**`simulate`** re-runs the strategy over synthetic markets and reports a
+distribution plus an empirical p-value. Read the p-value, not the
+percentiles: it is the share of resampled markets that did at least as
+well, so **large means no edge**. Expect that outcome — Bollinger and
+crossover on hourly crypto routinely land near 0.5, which is the honest
+answer. The default generator is the stationary block bootstrap; `--method
+iid` is a *stricter* null (it destroys volatility clustering) rather than
+a worse one, and is worth running as a second opinion. Resampling
+reorders the moves that happened and invents no regime the window does
+not contain.
+
+**`simulate --execution`** reconciles the discrete-event engine against
+the vectorised backtester and prices its assumptions. The reconciliation
+must come back **AGREES** with zero differences; if it does not, do not
+reason about which engine is right, find out — every backtest in the repo
+depends on the answer. `latency_bars=k` is the same as
+`execution_lag=k+1`, the extra bar being structural rather than slow.
+
+## Does the forecast know what it does not know?
+
+```sh
+make forecast-posterior ARGS='WETH'
+```
+
+Samples the model's parameters instead of fitting a point estimate, so
+the interval covers parameter uncertainty as well as innovation noise.
+Two rules:
+
+- **Check R-hat and ESS before reading anything else.** The command exits
+  non-zero and prints `REFUSED` when the chains did not mix, because an
+  unconverged sampler produces confident nonsense and does not announce
+  itself. Raise `--draws` if it refuses.
+- **A widening near zero on a long window is correct**, not a failure. It
+  means the parameters are pinned down and the posterior agrees with the
+  point estimate. The number is informative on short windows: roughly
+  +30% at 40 bars, +5% at 200, nothing at 800.
 
 ## Tuning
 
