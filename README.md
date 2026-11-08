@@ -448,8 +448,18 @@ dashboard opens with a metric strip, and every chart carries a title that says w
   `candlegraph compare` prints, rather than only the joint five.
 - **Portfolio** — allocation donut, the risk budget (each asset's share of portfolio volatility),
   the efficient frontier with the solved portfolio starred, and the allocation's own VaR/CVaR.
-- **Strategy** — equity vs buy-and-hold net of costs, exposure timeline, strategy drawdown, and a
-  trade ledger of every position change.
+- **Strategy** — *does this rule beat holding the token, net of costs?* Opens with a **How this
+  backtest works** explainer, because a backtest whose assumptions are off-screen is unreadable:
+  the one-bar execution lag, the cost model, and why `excess` is the number to read before
+  `total return`. Then equity vs buy-and-hold, a **gross-against-net** chart answering "did the
+  signal fail or did the fees eat it", all thirteen metrics the CLI prints, a **comparison of
+  every registered strategy** on the token (what `backtest --strategy all` shows), exposure,
+  drawdown, and the trade ledger. Starting capital and execution lag are controls beside the
+  result; setting the lag to 0 is loudly labelled as not real.
+  The **look-ahead check** re-runs the same strategy at `execution_lag=0` and plots both curves.
+  Note it does not always flatter: a trend rule gains from the bias, a mean-reversion rule is
+  punished by it (it shorts the bar that just rose, then collects the rise). Both numbers are
+  equally unreal — the lesson is the size of the gap, not its sign.
 - **Forecast** — the ARIMA path with its confidence interval drawn at the horizon.
 - **Strategy → Explain** — the `signals --explain` surface: what is stored for the selected token
   and strategy shows for free; **Explain latest signal** runs the pipeline, and a checkbox decides

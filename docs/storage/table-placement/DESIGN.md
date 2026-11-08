@@ -1,7 +1,10 @@
 # Table placement: which tables are hypertables, and which stay plain
 
 **Status:** implemented — 2026-10-25; knowledge tables implemented as
-recorded 2026-10-30 (revision `f399ca0770a0`, all plain)
+recorded 2026-10-30 (revision `f399ca0770a0`, all plain); `token_hours_fill`
+recorded and implemented 2026-11-07 (revision `f116af87c3a2`, plain), and
+extended 2026-11-08 with `sigma_log` (`f513c5d75c55`) without changing its
+placement
 **Area:** `alembic/versions/`, `candlegraph/storage/statements.py`
 **Companion:** [`../timescaledb/DESIGN.md`](../timescaledb/DESIGN.md) — why we
 adopted the extension at all, and how the migration works.

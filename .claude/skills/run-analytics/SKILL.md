@@ -54,6 +54,11 @@ knowledge-layer provider exists; that is deliberate, not a bug.
 
 ## Reading a backtest honestly
 
+The **Strategy** dashboard states all of this on screen now — the execution
+lag, the cost model, every metric the CLI prints, a comparison across all
+registered strategies, and a gross-against-net chart showing where the edge
+went. Point a reader there before explaining it by hand.
+
 This is the part that goes wrong. Three rules:
 
 1. **Compare against buy and hold, not against zero.** The report prints
@@ -85,12 +90,18 @@ both directions. Prefer `excess` and `max drawdown` for judgement.
 | VaR "need at least 30 returns" | Too little history for a tail; widen `--days` |
 | Parametric VaR much smaller than historical | Fat tails; use `--method cornish_fisher` or `historical` |
 | No benchmark split printed | The benchmark is the token itself or is not tracked; pass `--benchmark` |
+| A chart has holes and you want them filled | `make fill` caches a gap estimate; `candlegraph fill --evaluate` scores the three estimators. Display only — `load_symbol_series` refuses a non-causal policy, so no backtest ever sees one |
 
 ## What not to change
 
-- **Never set `execution_lag=0`** to make a backtest look better. It exists
-  only to demonstrate the look-ahead bias, and a test pins that it inflates
-  returns.
+- **Never set `execution_lag=0`** to act on a result. It exists only to
+  demonstrate the look-ahead bias, and the Strategy dashboard's **Look-ahead
+  check** draws it. Note the bias does **not** always flatter: a trend rule
+  gains from it (it goes long on the bar it then earns), while a
+  mean-reversion rule is punished by it (it shorts the bar that just rose,
+  then collects the rise). Measured on the test fixture: crossover +4.69%,
+  Bollinger -37.53%. Both are equally unreal — the size of the gap is the
+  lesson, not its sign, and tests pin both directions.
 - **Never fit ARIMA on the whole series** and read its in-sample predictions
   back as signals. `arima_signal` refits on `prices[: i + 1]` for a reason,
   and `test_arima_never_fits_on_data_after_the_bar_it_scores` guards it.

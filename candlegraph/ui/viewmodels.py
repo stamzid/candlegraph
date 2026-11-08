@@ -13,6 +13,7 @@ needs and raises :class:`ViewError` with a sentence a trader can act on.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -98,10 +99,12 @@ from candlegraph.knowledge.sources.tavily import SOURCE_ID as TAVILY
 from candlegraph.knowledge.statements import knowledge_statements_for
 from candlegraph.settings import Settings
 from candlegraph.storage import DatabaseManager
-from candlegraph.strategies import backtest, run_strategy
-from candlegraph.strategies.backtest import BacktestConfig, BacktestResult
+from candlegraph.strategies import available, backtest, run_strategy
+from candlegraph.strategies.backtest import BacktestConfig, BacktestError, BacktestResult
+from candlegraph.strategies.backtest import compare as compare_backtests
 from candlegraph.strategies.base import StrategyResult
 from candlegraph.tokens import get_token_registry
+from candlegraph.utils.logging_utils import service_logger
 
 
 class ViewError(RuntimeError):
@@ -1186,6 +1189,23 @@ def build_portfolio_view(
 # --- strategy dashboard ------------------------------------------------------
 
 
+def format_metric(value: float, unit: str) -> str:
+    """One backtest number, rendered in its own unit. Pure.
+
+    A ratio and a percentage cannot share a format string, and a count is
+    neither. Getting this wrong reads as a 3000% Sharpe.
+    """
+    if not math.isfinite(value):
+        return "—"
+    match unit:
+        case "percent":
+            return f"{value:+.2%}" if value else "0.00%"
+        case "ratio":
+            return f"{value:.3f}"
+        case _:
+            return f"{int(value):,}"
+
+
 @dataclass
 class StrategyView:
     """A strategy run and its backtest, kept together for one screen."""
@@ -1213,6 +1233,57 @@ class StrategyView:
         trades["to"] = trades["to"].astype("int64")
         return trades[["from", "to", "price"]]
 
+    @property
+    def metrics_frame(self) -> pd.DataFrame:
+        """Every number ``candlegraph backtest`` prints, with its unit.
+
+        The screen used to show six of these and the CLI thirteen, so two
+        people reading the same backtest could reach different conclusions.
+        ``excess`` is first on purpose: it is the one to read before
+        ``total return``.
+        """
+        report = self.report
+        rows = [
+            ("excess vs buy & hold", report.excess_return, "percent"),
+            ("total return", report.total_return, "percent"),
+            ("buy & hold return", report.buy_and_hold_return, "percent"),
+            ("annualised return", report.annualised_return, "percent"),
+            ("annualised volatility", report.annualised_volatility, "percent"),
+            ("sharpe", report.sharpe, "ratio"),
+            ("sortino", report.sortino, "ratio"),
+            ("max drawdown", report.max_drawdown, "percent"),
+            ("costs paid", report.total_costs, "percent"),
+            ("exposure", report.exposure, "percent"),
+            ("win rate", report.win_rate, "percent"),
+            ("trades", float(report.trades), "count"),
+            ("bars", float(report.bars), "count"),
+        ]
+        frame = pd.DataFrame(rows, columns=["metric", "value", "unit"])
+        # A Styler formats by column, and these rows carry three different
+        # units, so the display string is built here where it is testable
+        # rather than guessed at in the script.
+        frame["display"] = [format_metric(v, u) for v, u in zip(frame["value"], frame["unit"], strict=True)]
+        return frame
+
+    @property
+    def cost_frame(self) -> pd.DataFrame:
+        """Where the edge went: gross against net, and costs cumulatively.
+
+        A strategy can be right about direction and still lose, and on
+        hourly bars at these fees that is the usual outcome. Plotting the
+        two curves together is the only way the question "did the signal
+        fail, or did the fees eat it" gets an answer on screen.
+        """
+        frame = self.report.frame
+        capital = self.report.config.initial_capital
+        return pd.DataFrame(
+            {
+                "gross of costs": capital * (1.0 + frame["gross_returns"].fillna(0.0)).cumprod(),
+                "net of costs": frame["equity"],
+                "costs paid": capital * frame["costs"].fillna(0.0).cumsum(),
+            }
+        )
+
 
 def build_strategy_view(
     db: DatabaseManager,
@@ -1226,6 +1297,70 @@ def build_strategy_view(
     prices = _one_symbol(db, symbol, days)
     result = run_strategy(strategy, prices, strategy_config)
     return StrategyView(strategy=result, report=backtest(result, config=backtest_config))
+
+
+def build_strategy_comparison(
+    db: DatabaseManager,
+    symbol: str,
+    days: int | None,
+    config: BacktestConfig | None = None,
+) -> pd.DataFrame:
+    """Every registered strategy on one token, side by side, at default settings.
+
+    ``candlegraph backtest --strategy all`` has always printed this and the
+    screen could only ever run one at a time, which made the most useful
+    question — *which of these works on this token* — the one the dashboard
+    could not answer.
+
+    Each strategy runs on its own default configuration, so this is a
+    starting point for a comparison rather than a tuned result; the single
+    run above is where the knobs are.
+    """
+    prices = _one_symbol(db, symbol, days)
+    results = []
+    for name in available():
+        try:
+            results.append(backtest(run_strategy(name, prices, None), config=config))
+        except (BacktestError, ValueError) as exc:
+            # One strategy failing is a row that says so, not a blank page.
+            service_logger.warning("comparison: %s failed on %s: %s", name, symbol, exc)
+    if not results:
+        raise ViewError(f"No strategy could run on {symbol} over that window.")
+    frame = compare_backtests(results)
+    return frame.sort_values("excess", ascending=False).reset_index(drop=True)
+
+
+def build_lag_demonstration(
+    db: DatabaseManager,
+    symbol: str,
+    strategy: str,
+    days: int | None,
+    strategy_config: Any = None,
+    config: BacktestConfig | None = None,
+) -> pd.DataFrame:
+    """The same strategy with and without the one-bar execution lag.
+
+    Invariant 15 is the easiest thing in this codebase to state and the
+    hardest to *feel*. Running the identical strategy at ``execution_lag=0``
+    — trading at a close it has already seen — and putting the two equity
+    curves side by side turns "look-ahead inflates returns" from a rule
+    into a number the reader can see.
+
+    This exists to be looked at, never to be acted on. The zero-lag column
+    is not a result; it is the bias, drawn.
+    """
+    base = config or BacktestConfig()
+    prices = _one_symbol(db, symbol, days)
+    result = run_strategy(strategy, prices, strategy_config)
+
+    honest = backtest(result, config=replace(base, execution_lag=1))
+    cheating = backtest(result, config=replace(base, execution_lag=0))
+    return pd.DataFrame(
+        {
+            "honest (lag 1 bar)": honest.frame["equity"],
+            "look-ahead (lag 0)": cheating.frame["equity"],
+        }
+    )
 
 
 # --- explanations (signals --explain in the UI) --------------------------------

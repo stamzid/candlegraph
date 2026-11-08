@@ -1,6 +1,8 @@
 # Statistics and models: the theory, and how candlegraph applies it
 
-**Status:** implemented — 2026-10-30. Describes the code in
+**Status:** implemented — 2026-10-30; §8 extended 2026-11-09 with the
+measured direction of look-ahead bias and the Strategy dashboard's surfaces.
+Describes the code in
 `candlegraph/analytics/` and `candlegraph/strategies/` as it is today; a
 section is added when a model lands (stage 4 adds momentum and GARCH).
 **Area:** `analytics/rolling.py`, `analytics/pairwise.py`,
@@ -489,8 +491,26 @@ the only sense that matters, and on hourly bars at 35 bps a side an active
 strategy routinely pays 15–20% of capital in costs over 90 days. A losing
 backtest is usually the honest answer, not a bug to tune away.
 
+**The direction of look-ahead bias is not uniform**, which is worth
+stating because the shorthand "removing the lag inflates returns" is false
+half the time. A trend-following rule goes long on the bar that rose and,
+without the lag, collects that same rise — flattered. A mean-reversion
+rule *shorts* the bar that rose and then collects it — punished, and
+heavily. Measured on the test fixture: crossover +4.69%, Bollinger
+-37.53%. Both numbers are equally unreal; the lesson is the size of the
+gap, not its sign. The **Strategy** dashboard draws both curves so this is
+visible rather than asserted.
+
 *In candlegraph:* `backtest`, `compare` in `strategies/backtest.py`;
-`candlegraph backtest WETH --strategy all`; the **Strategies** tab.
+`candlegraph backtest WETH --strategy all`; the **Strategy** dashboard,
+which states the lag and the cost model on screen, reports all thirteen
+metrics, compares every registered rule, and re-runs at `execution_lag=0`
+to show what the bias looks like.
+
+*Tested how far?* Over one price path — the one that happened. Stage 6
+(`../simulation/DESIGN.md`) is what turns that sample of size one into a
+distribution, and what checks the execution assumptions above against an
+explicit event model.
 
 ## 9. How the pieces connect
 
@@ -528,7 +548,7 @@ flowchart LR
 | pairwise | `compare_pair` | `compare` | `test_pairwise.py` (aligned bars only) |
 | Sharpe, Sortino, drawdown | `sharpe_ratio`, `sortino_ratio`, `max_drawdown` | every report | `test_rolling.py` |
 | MPT | `optimise_portfolio`, `efficient_frontier` | `portfolio`, Portfolio tab | `test_portfolio.py` |
-| backtest | `backtest`, `compare` | `backtest`, Strategies tab | `test_backtest.py` (lag, costs) |
+| backtest | `backtest`, `compare` | `backtest`, Strategy dashboard | `test_backtest.py` (lag, costs) |
 | VaR, CVaR, β split | `value_at_risk`, `conditional_value_at_risk`, `decompose_risk` | `risk`, `portfolio` | `test_risk.py` — see the risk document |
 
 ## Rejected alternatives

@@ -15,6 +15,7 @@ Run it with ``candlegraph ui`` (or ``streamlit run candlegraph/ui/app.py``).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any, cast
 
@@ -47,6 +48,7 @@ from candlegraph.ui.viewmodels import (
     available_symbols,
     build_agents_view,
     build_forecast,
+    build_lag_demonstration,
     build_market_view,
     build_method_scores,
     build_news_view,
@@ -54,6 +56,7 @@ from candlegraph.ui.viewmodels import (
     build_portfolio_view,
     build_quality_view,
     build_risk_view,
+    build_strategy_comparison,
     build_strategy_view,
     build_token_view,
     candle_frame,
@@ -1226,36 +1229,151 @@ def _explanation_panel(db: DatabaseManager, settings: Settings, view: Any, symbo
         )
 
 
+def _backtest_explainer(config: BacktestConfig) -> None:
+    """How the number on screen was produced. Open by default the first time.
+
+    The page used to show six metrics and no account of where they came
+    from, which makes a backtest unreadable: two people looking at the same
+    equity curve could disagree about whether it included costs.
+    """
+    with st.expander("How this backtest works — read once", expanded=False):
+        st.markdown(
+            f"""
+**A position is decided on one bar and earns the next one's return.**
+The strategy sees the close of bar *t* and cannot trade at a price it has
+not seen, so the position held during bar *t* is the one decided at
+*t-1* — `position = signal.shift({config.execution_lag})`. Removing that
+shift changes the result *silently*, and the direction depends on the
+rule: a trend-following signal is flattered, because it goes long on the
+very bar it then earns. A mean-reversion signal is punished, because it
+shorts the bar that just rose and then collects that rise. Neither number
+is real. The **Look-ahead check** below draws the gap for whichever
+strategy is selected.
+
+**Costs are charged on position changes, sized by the move.**
+Each bar pays `abs(change in position) * {config.fee_bps + config.slippage_bps:.0f} bps`
+({config.fee_bps:.0f} fee + {config.slippage_bps:.0f} slippage, both set in
+the sidebar), so flipping long to short costs twice as much as opening from
+flat. On hourly bars an active strategy routinely pays 15-20% of capital
+over 90 days.
+
+**Read `excess` before `total return`.** A strategy that made 18% while the
+token made 30% lost money in the only sense that matters. Buy-and-hold is
+the benchmark, not zero.
+
+**A losing backtest is usually the honest answer.** Costs and the execution
+lag are real. If `costs paid` exceeds `excess`, there is no edge here —
+that is a finding, not a parameter to tune away.
+
+Starting capital is **{config.initial_capital:,.0f}**; every currency figure
+on this page is against that.
+"""
+        )
+
+
 def _strategy_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+    st.subheader("Strategy — does this rule beat holding the token, net of costs?")
+
     left, right = st.columns(2)
     symbol = _pick(left, "Token", ctx["symbols"], "strategy_symbol", default_index(ctx["symbols"]))
     name = _pick(right, "Strategy", list(available()), "strategy_name", 1)
 
-    config = _strategy_config(name)
+    # Execution assumptions live beside the result they produce. The sidebar
+    # still owns fees and slippage; these two are backtest-only.
+    exec_cols = st.columns(2)
+    capital = float(
+        exec_cols[0].number_input(
+            "Starting capital",
+            min_value=100.0,
+            max_value=10_000_000.0,
+            value=float(ctx["backtest"].initial_capital),
+            step=1_000.0,
+            help="Every currency figure on this page is against this.",
+        )
+    )
+    lag = int(
+        exec_cols[1].number_input(
+            "Execution lag (bars)",
+            min_value=0,
+            max_value=24,
+            value=1,
+            step=1,
+            help="Bars between deciding and trading. 1 is the honest default. "
+            "0 means trading at a close the strategy has already seen — look-ahead.",
+        )
+    )
+    config = replace(ctx["backtest"], initial_capital=capital, execution_lag=lag)
+    if lag == 0:
+        st.error(
+            "**Execution lag 0 — these numbers are not real.** The strategy is trading at a "
+            "price it had already seen when it decided, so every figure below is contaminated "
+            "by look-ahead (invariant 15). Note it does not always flatter: a mean-reversion "
+            "rule is *punished* by it. Useful to look at once; never to act on."
+        )
+
+    st.caption(
+        f"Costs come from the sidebar: **{config.fee_bps:.0f} bps fee + "
+        f"{config.slippage_bps:.0f} bps slippage** per side, charged on every position change. "
+        f"Risk-free rate **{config.risk_free_rate:.2%}/yr** feeds the Sharpe and Sortino."
+    )
+    _backtest_explainer(config)
+
+    strategy_config = _strategy_config(name)
     if name == "arima":
         st.caption("ARIMA refits on every cadence bar, so a long window takes a moment.")
 
     with st.spinner("Running…"):
-        view = build_strategy_view(db, symbol, name, ctx["days"], config, ctx["backtest"])
+        view = build_strategy_view(db, symbol, name, ctx["days"], strategy_config, config)
 
     report = view.report
     cols = st.columns(6)
-    cols[0].metric("Total return", _pct(report.total_return))
-    cols[1].metric("vs buy & hold", _pct(report.buy_and_hold_return), delta=f"{report.excess_return:+.2%}")
-    cols[2].metric("Sharpe", f"{report.sharpe:.2f}")
-    cols[3].metric("Max drawdown", _pct(report.max_drawdown))
-    cols[4].metric("Trades", f"{report.trades:,}")
+    cols[0].metric(
+        "Excess vs buy & hold",
+        _pct(report.excess_return),
+        help="The number to read first. Positive means the rule beat simply holding.",
+    )
+    cols[1].metric("Total return", _pct(report.total_return))
+    cols[2].metric("Buy & hold", _pct(report.buy_and_hold_return))
+    cols[3].metric("Sharpe", f"{report.sharpe:.2f}")
+    cols[4].metric("Max drawdown", _pct(report.max_drawdown))
     cols[5].metric(
         "Costs paid",
         _pct(report.total_costs),
         help="Fees + slippage as a fraction of capital. If this beats the excess, there is no edge.",
     )
 
+    if report.total_costs > abs(report.excess_return) and report.excess_return <= 0:
+        st.info(
+            f"Costs ({report.total_costs:.1%}) exceed anything this rule earned over holding. "
+            "At these fees the signal would have to be considerably better to survive; that is "
+            "a finding about hourly trading, not a reason to tune the parameters."
+        )
+
     _title(
         "Equity — strategy vs buy & hold, net of costs",
-        "If the orange line is below the blue one, holding was better.",
+        "Both start at the same capital. If the strategy line is below the other, holding won.",
     )
     st.line_chart(view.equity_frame, height=320)
+
+    left, right = st.columns(2)
+    with left:
+        _title(
+            "Where the Edge Went — gross against net",
+            "The gap between the two lines is the cumulative cost of trading.",
+        )
+        st.line_chart(view.cost_frame, height=240)
+    with right:
+        _title(
+            "Look-ahead Check — what removing the lag would claim",
+            "The same strategy trading at a close it had already seen. A trend rule is "
+            "flattered by this and a mean-reversion rule is punished — the lesson is the size "
+            "of the gap, not its sign. Invariant 15 exists so neither can happen by accident.",
+        )
+        with st.spinner("Re-running without the lag…"):
+            st.line_chart(
+                build_lag_demonstration(db, symbol, name, ctx["days"], strategy_config, config),
+                height=240,
+            )
 
     left, right = st.columns(2)
     with left:
@@ -1265,7 +1383,48 @@ def _strategy_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any])
         _title("Underwater — strategy drawdown")
         st.area_chart(report.frame[["drawdown"]], height=200, color=DOWN)
 
-    _title(f"Trade Ledger — every position change (latest signal: {view.strategy.latest.name})")
+    left, right = st.columns([2, 3])
+    with left:
+        _title("Every Number — the full report", "The same thirteen `candlegraph backtest` prints.")
+        st.dataframe(
+            view.metrics_frame[["metric", "display"]].rename(columns={"display": "value"}),
+            width="stretch",
+            hide_index=True,
+        )
+    with right:
+        _title(
+            f"Strategy Comparison — every rule on {symbol}, at its defaults",
+            "What `backtest --strategy all` prints. Ranked by excess over buy & hold; these "
+            "are default settings, so treat it as where to start rather than a verdict.",
+        )
+        try:
+            with st.spinner("Backtesting every strategy…"):
+                table = build_strategy_comparison(db, symbol, ctx["days"], config)
+        except ViewError as exc:
+            st.info(str(exc))
+        else:
+            st.dataframe(
+                table.style.format(
+                    {
+                        "total_return": "{:+.2%}",
+                        "buy_and_hold": "{:+.2%}",
+                        "excess": "{:+.2%}",
+                        "sharpe": "{:.2f}",
+                        "max_drawdown": "{:.1%}",
+                        "exposure": "{:.0%}",
+                    }
+                ).map(
+                    lambda v: f"color: {UP}" if isinstance(v, float) and v > 0 else f"color: {DOWN}",
+                    subset=["excess"],
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+
+    _title(
+        f"Trade Ledger — last 30 position changes of {report.trades:,} "
+        f"(latest signal: {view.strategy.latest.name})"
+    )
     st.dataframe(view.trades_frame.tail(30).style.format({"price": "{:,.4f}"}), width="stretch")
 
     _explanation_panel(db, settings, view, symbol, name)

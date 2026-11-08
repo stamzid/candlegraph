@@ -349,23 +349,26 @@ unfalsifiable.
 
 | Stage | Landed so far | Still to land | Exit criterion |
 |---|---|---|---|
-| **0. Descriptive statistics, deeper** | `candlegraph compare WETH WBTC` over aligned bars. | The `active` flag in `config/tokens.yaml`; the `FillPolicy` gap-filling seam with its no-look-ahead test. Was paused while stage 1 finished; it is next. | `compare` prints correlation, beta and relative performance (met); the stack ingests exactly the five active tokens; `FillPolicy` exists with a no-look-ahead test |
+| **0. Descriptive statistics, deeper** | `candlegraph compare WETH WBTC` over aligned bars; the descriptive display audited and completed (Quality dashboard, gap map, gap shading, per-leg Compare numbers); the `FillPolicy` seam with its no-look-ahead test; `linear`, `causal` and `bridge` estimators cached in `token_hours_fill` and comparable via `candlegraph fill --evaluate`. | The `active` flag in `config/tokens.yaml` — independent of the rest, and the only thing left. | `compare` prints correlation, beta and relative performance (met); `FillPolicy` exists with a no-look-ahead test (met); the stack ingests exactly the five active tokens (remaining) |
+| **6. Simulation and strategy evaluation** | The backtester made legible: execution lag and cost model stated on screen, all thirteen metrics, cross-strategy comparison, look-ahead demonstration. | Monte Carlo and discrete-event simulation; MCMC posteriors. `docs/rollout/ROLLOUT.md` sequences it. | `candlegraph simulate` prints a distribution with an empirical p-value; a zero-latency discrete-event run matches the vectorised backtester; `forecast --posterior` is wider than the point estimate, with R-hat |
 
 ### Next
 
-0. **Descriptive statistics, deeper.** Pairwise comparison between any two
-   tracked tokens (*delivered*: `candlegraph compare WETH WBTC`, computed
-   over aligned bars only — hours both tokens traded). Still to land: an
-   `active` flag in `config/tokens.yaml` trimming the test run to five
-   active tokens (WBTC, WETH, BNB, plus GNO and SHIB chosen for their
-   gapped history), and the recorded gap-filling policy — linear
-   interpolation for display only, a causal estimator for anything a
-   strategy consumes, nothing ever written to the database. The tradeoff
-   is in `docs/roadmap/DESIGN.md`.
+0. **Descriptive statistics, deeper.** Mostly delivered. Pairwise
+   comparison over aligned bars only; the descriptive display audited and
+   completed; and the gap-filling policy behind `FillPolicy`, where every
+   policy declares whether it is causal and `load_symbol_series` refuses
+   the ones that are not. Three estimators (`linear`, `causal`, `bridge`)
+   are cached in `token_hours_fill` — **never** in `token_hours_data`, so
+   coverage stays falsifiable — one selected at a time, and
+   `candlegraph fill --evaluate` scores them against held-out real hours.
+   Still to land: an `active` flag in `config/tokens.yaml` trimming the
+   test run to five tokens (WBTC, WETH, BNB, plus GNO and SHIB chosen for
+   their gapped history).
    *Exit:* `candlegraph compare WETH WBTC` prints correlation, beta and
-   relative performance over aligned bars (met); the stack ingests exactly
-   the five active tokens; the fill policy exists behind `FillPolicy` with
-   a no-look-ahead test.
+   relative performance over aligned bars (met); the fill policy exists
+   behind `FillPolicy` with a no-look-ahead test (met); the stack ingests
+   exactly the five active tokens (remaining).
 1. ~~**Knowledge graph and signaller.**~~ *Delivered 2026-11-06.* Assets,
    sources, documents and chunks in Postgres with pgvector; Tavily for web
    search under a budget; news attached to the prices already stored, so a
@@ -392,6 +395,25 @@ unfalsifiable.
    knowledge graph, and an alerting agent with deduplication and cooldowns.
    *Exit:* a market event produces exactly one cited alert, and an identical
    event inside the cooldown produces none.
+6. **Simulation and strategy evaluation.** *(In progress — next after
+   stage 0's remaining flag; the numbers are identities, not a queue.)*
+   Three simulators with three jobs: **Monte Carlo** over resampled and
+   modelled paths, so a backtest reports a distribution and an empirical
+   p-value rather than a sample of size one; **discrete-event**
+   simulation as the reference implementation the vectorised backtester
+   is checked against, which is how the `shift(1)` and the flat bps cost
+   get a price; and **MCMC** posteriors, so forecast intervals include
+   parameter uncertainty and portfolio weights come with a distribution.
+   Every simulator reuses `strategies/backtest.py`; a second
+   implementation of `position * returns` is how invariant 15 comes back.
+   Nothing simulated is written to `token_hours_data`. The argument is in
+   `docs/analytics/simulation/DESIGN.md`.
+   *Exit:* `candlegraph simulate WETH --strategy bollinger --paths 1000`
+   prints the distribution of excess return with an empirical p-value; a
+   zero-latency discrete-event run reproduces the vectorised backtester to
+   tolerance and reports what one bar of latency costs; and
+   `candlegraph forecast WETH --posterior` prints an interval wider than
+   the point-estimate one, with R-hat reported.
 
 Prefer adding columns and a migration over reshaping the hourly tables; the
 natural keys are settled. A table added from here gets its placement

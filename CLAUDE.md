@@ -61,7 +61,20 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   almost always answered by `make runs` and `make report`, not by the API log.
 - A losing backtest is usually the honest answer, not a bug to tune away.
   Check `excess` (versus buy and hold) and `costs paid` before touching
-  parameters; see the `run-analytics` skill.
+  parameters; see the `run-analytics` skill. The Strategy dashboard states
+  the lag and the cost model on screen and compares every registered rule,
+  so send a reader there rather than explaining it again. Its **look-ahead
+  check** re-runs at `execution_lag=0`: do not describe that as "inflating
+  returns" — it flatters a trend rule and *punishes* a mean-reversion one,
+  and both tests pin the direction.
+- Gap estimates are display-only and live in their own table. Three
+  estimators (`linear`, `causal`, `bridge`) can hold a value for the same
+  missing hour so they can be compared; exactly one is selected at a time.
+  `load_symbol_series` refuses a non-causal policy outright, so no strategy
+  or backtest can consume one by accident, and nothing is ever written to
+  `token_hours_data` — `make fill`, `make fill-status`, `make fill-evaluate`.
+  When adding an estimator, the band must be scaled by volatility estimated
+  from *before* each gap, or the uncertainty quietly looks ahead.
 - The UI's logic belongs in `candlegraph/ui/viewmodels.py`, never in the
   Streamlit script — that is what makes it testable.
 - Low coverage in `make report` is frequently correct — a token with no swaps

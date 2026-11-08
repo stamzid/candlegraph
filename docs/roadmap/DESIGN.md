@@ -23,12 +23,18 @@ the test suite:
 | **Time-series storage** | The three series tables are TimescaleDB hypertables chunked on `period_start_unix`; the state and ledger tables deliberately are not. | `make test-integration` (`test_timescale.py`) |
 | **Knowledge graph and signaller** (stage 1, 2026-11-06) | The eight corpus tables on pgvector, assets and aliases from `tokens.yaml`, the document pipeline, local embeddings, Tavily under a budget with the `source_call` ledger, hybrid retrieval bounded by `published_at <= bar`, `signals --explain` with its citation validator on the CLI, GraphQL and the UI, four observer findings, and the read-only MCP server. | `candlegraph signals WETH --strategy bollinger --explain`, with no LLM key; `make mcp` |
 
-One stage is open — stage 0, resumed 2026-11-06 and now being built in
-four steps tracked in [`../rollout/ROLLOUT.md`](../rollout/ROLLOUT.md):
+Two stages are open:
 
 | In progress | Landed | Remaining | Exit criterion |
 |---|---|---|---|
-| **0. Descriptive statistics, deeper** | `candlegraph compare` over aligned bars; the descriptive display, audited and completed — the Quality dashboard's gap map, gap shading on the Token candles, and the per-leg Compare numbers (rollout step 1). | The `active` token flag; the `FillPolicy` seam and the two estimators (rollout steps 2–4). | met for `compare`; the five active tokens and the no-look-ahead fill test remain |
+| **0. Descriptive statistics, deeper** | `candlegraph compare` over aligned bars; the descriptive display audited and completed (gap map, gap shading, per-leg Compare numbers); the `FillPolicy` seam with its no-look-ahead test; linear, causal and bridge estimators cached in `token_hours_fill` and comparable. | The `active` flag in `config/tokens.yaml` — independent of everything else here, and the only thing between this stage and delivered. | `compare` prints correlation, beta and relative performance (met); `FillPolicy` exists with a no-look-ahead test (met); the stack ingests exactly the five active tokens (**remaining**) |
+| **6. Simulation and strategy evaluation** | The backtester made legible: the execution lag and cost model stated on screen, all thirteen metrics, a cross-strategy comparison, and a look-ahead demonstration (rollout step 1). | Monte Carlo and discrete-event (step 2); MCMC posteriors and closeout (step 3). | in [`../analytics/simulation/DESIGN.md`](../analytics/simulation/DESIGN.md) |
+
+Stage 6 is being built out of numeric order, which is normal here — stage
+1 was delivered while stage 0 was paused. The numbers are identities, not
+a queue. It comes next because the deterministic layer it tests is
+finished and the question it answers — *is this edge luck?* — is the one
+standing between a backtest and a decision.
 
 The descriptive-display step came first on purpose: rule 2 below asks for
 filled bars to be *flagged*, which presupposes a surface that tells an
@@ -56,14 +62,17 @@ flowchart TB
   subgraph next["Next"]
     direction TB
     DS["0 · Descriptive statistics, deeper<br/>active tokens · gap policy"]
+    SIM["6 · Simulation<br/>Monte Carlo · discrete event · MCMC"]
     H["2 · Harness<br/>pipelines · event bus · OTel"]
     TM["3 · Traditional markets<br/>NASDAQ · NYSE"]
     MS["4 · Models and strategies<br/>momentum · more models"]
     MA["5 · Market-watch agents<br/>RSS observer · alerting"]
-    DS --> H --> TM --> MS --> MA
+    DS --> SIM --> H --> TM --> MS --> MA
   end
 
   AN -.-> DS
+  ST -.->|"the thing being<br/>tested"| SIM
+  SIM -.->|"walk-forward becomes<br/>a command"| MS
   ST -.->|"signals carry<br/>explanations"| KG
   ING -.-> H
   MCP -.->|"a pipeline<br/>becomes a tool"| H
@@ -455,6 +464,57 @@ permission to actually alarm.
 **Exit criterion.** A market event visible in the feeds produces exactly one
 alert with a citation, and a second identical event within the cooldown
 produces none.
+
+---
+
+## 6. Simulation and strategy evaluation
+
+**Goal.** Stop reporting one number per strategy over the one price path
+that happened. A backtest is a sample of size one; this stage gives the
+deterministic layer a way to say how much of its result was luck, how
+much depended on execution assumptions, and how wrong its parameters
+might be.
+
+**What it adds.** Three simulators with three different jobs, which is
+the whole design decision —
+[`../analytics/simulation/DESIGN.md`](../analytics/simulation/DESIGN.md)
+has the argument, the generator comparison and the terminology trap:
+
+- **Monte Carlo.** Synthetic paths — stationary block bootstrap by
+  default, plus GBM, ARIMA-residual and Markov regime-switching
+  generators — run through the *existing* backtester, producing a
+  distribution of Sharpe, excess and drawdown and an empirical p-value
+  for "this rule has an edge". It also gives ARIMA's confidence interval
+  the calibration test it has never had.
+- **Discrete-event simulation.** An explicit decide → delay → fill event
+  queue, built not to replace the vectorised backtester but to be the
+  reference implementation it is checked against. At zero latency the two
+  must agree to floating-point tolerance; relaxing one assumption at a
+  time then measures what `shift(1)` and a flat bps cost are worth.
+- **MCMC.** Posteriors over model parameters, so forecast intervals
+  include parameter uncertainty rather than innovation noise alone, and
+  portfolio weights come with a distribution instead of a point. A
+  hand-rolled Metropolis-Hastings with R-hat and ESS; no new dependency
+  for two- and three-parameter models.
+
+**Why here.** It needs the deterministic layer finished, which stage 0
+completed, and it is what stands between a backtest and a decision.
+Stage 4's walk-forward evaluation becomes straightforward once this
+exists, and the discrete-event work is the natural place the harness
+(stage 2) will later get its execution model.
+
+**What it must not become.** A second implementation of
+`position * returns`. Every simulator reuses `strategies/backtest.py`, so
+invariants 15-17 cannot drift inside it. Nothing simulated is written to
+`token_hours_data`, for the same reason filled rows are not.
+
+**Exit criterion.** `candlegraph simulate WETH --strategy bollinger
+--paths 1000` prints the distribution of excess return with an empirical
+p-value against the real backtest; a zero-latency discrete-event run
+reproduces the vectorised backtester to tolerance and reports what one
+bar of latency costs; and `candlegraph forecast WETH --posterior` prints
+an interval wider than the point-estimate one, with R-hat reported and a
+refusal if the chain has not converged.
 
 ---
 

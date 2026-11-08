@@ -19,6 +19,7 @@ from candlegraph.analytics.arima import ArimaConfig, ArimaForecast
 from candlegraph.analytics.portfolio import PortfolioConfig
 from candlegraph.analytics.risk import RiskConfig
 from candlegraph.ingestion.quality import Gap
+from candlegraph.strategies import available
 from candlegraph.strategies.backtest import BacktestConfig
 from candlegraph.strategies.bollinger import BollingerConfig
 from candlegraph.ui.viewmodels import (
@@ -34,6 +35,7 @@ from candlegraph.ui.viewmodels import (
     build_portfolio_view,
     build_quality_view,
     build_risk_view,
+    build_strategy_comparison,
     build_strategy_view,
     build_token_view,
     candle_frame,
@@ -43,6 +45,7 @@ from candlegraph.ui.viewmodels import (
     default_portfolio_symbols,
     fill_overlay,
     forecast_frame,
+    format_metric,
     gap_lane_segments,
     load_prices,
     longest_gaps,
@@ -1418,3 +1421,105 @@ def test_the_comparison_is_empty_rather_than_failing_on_a_fresh_database() -> No
 def test_refreshing_rejects_an_estimator_that_does_not_exist() -> None:
     with pytest.raises(ViewError, match="unknown estimator"):
         run_fill_refresh_now(FakeDatabase(), ["WETH"], method="telepathy")
+
+
+# --- backtesting, made legible ----------------------------------------------
+
+
+def strategy_db(bars: int = 400) -> FakeDatabase:
+    return FakeDatabase(
+        get_price_history=price_rows("WBTC", bars),
+        coverage_report=[coverage_row("WBTC")],
+    )
+
+
+def test_the_screen_reports_every_number_the_cli_prints() -> None:
+    """Six on screen and thirteen in the terminal let two readers disagree."""
+    view = build_strategy_view(strategy_db(), "WBTC", "bollinger", None, None, FREE)
+
+    metrics = dict(zip(view.metrics_frame["metric"], view.metrics_frame["value"], strict=True))
+
+    assert set(metrics) == {
+        "excess vs buy & hold",
+        "total return",
+        "buy & hold return",
+        "annualised return",
+        "annualised volatility",
+        "sharpe",
+        "sortino",
+        "max drawdown",
+        "costs paid",
+        "exposure",
+        "win rate",
+        "trades",
+        "bars",
+    }
+    assert metrics["excess vs buy & hold"] == pytest.approx(view.report.excess_return)
+    assert metrics["sharpe"] == pytest.approx(view.report.sharpe)
+    assert metrics["bars"] == float(view.report.bars)
+
+
+def test_excess_is_listed_before_total_return() -> None:
+    """The one to read first, placed first. A strategy that made 18% while
+    the token made 30% lost money in the only sense that matters."""
+    view = build_strategy_view(strategy_db(), "WBTC", "bollinger", None, None, FREE)
+
+    assert list(view.metrics_frame["metric"])[:3] == [
+        "excess vs buy & hold",
+        "total return",
+        "buy & hold return",
+    ]
+
+
+def test_each_metric_is_rendered_in_its_own_unit() -> None:
+    """A ratio and a percentage cannot share a format string; getting it
+    wrong reads as a 3000% Sharpe."""
+    assert format_metric(0.1234, "percent") == "+12.34%"
+    assert format_metric(-0.5, "percent") == "-50.00%"
+    assert format_metric(1.2345, "ratio") == "1.234"
+    assert format_metric(17.0, "count") == "17"
+    assert format_metric(float("nan"), "ratio") == "—"
+
+
+def test_the_cost_frame_separates_the_signal_from_the_fees() -> None:
+    """ "Did the signal fail, or did the fees eat it" is otherwise unanswerable."""
+    costly = BacktestConfig(fee_bps=50.0, slippage_bps=10.0)
+    view = build_strategy_view(strategy_db(), "WBTC", "bollinger", None, None, costly)
+
+    frame = view.cost_frame
+
+    assert list(frame.columns) == ["gross of costs", "net of costs", "costs paid"]
+    assert (frame["gross of costs"] >= frame["net of costs"] - 1e-6).all(), "costs only subtract"
+    assert frame["costs paid"].is_monotonic_increasing, "cumulative, never refunded"
+    assert frame["costs paid"].iloc[-1] > 0
+
+
+def test_a_free_backtest_has_no_gap_between_gross_and_net() -> None:
+    view = build_strategy_view(strategy_db(), "WBTC", "bollinger", None, None, FREE)
+
+    frame = view.cost_frame
+
+    assert frame["costs paid"].iloc[-1] == pytest.approx(0.0)
+    assert frame["gross of costs"].iloc[-1] == pytest.approx(frame["net of costs"].iloc[-1])
+
+
+# --- the comparison the dashboard could never do ----------------------------
+
+
+def test_every_strategy_is_compared_on_one_token_ranked_by_excess() -> None:
+    """`backtest --strategy all` printed this; the screen ran one at a time,
+    so the most useful question could not be asked of it."""
+    table = build_strategy_comparison(strategy_db(), "WBTC", None, FREE)
+
+    assert set(table["strategy"]) == set(available())
+    assert table["excess"].is_monotonic_decreasing, "best first"
+    assert (table["symbol"] == "WBTC").all()
+    assert {"total_return", "buy_and_hold", "sharpe", "max_drawdown", "exposure"} <= set(table.columns)
+
+
+def test_a_window_with_no_history_is_a_readable_refusal() -> None:
+    with pytest.raises(ViewError, match="No stored price history"):
+        build_strategy_comparison(FakeDatabase(), "WBTC", None, FREE)
+
+
+# --- the look-ahead, drawn ---------------------------------------------------

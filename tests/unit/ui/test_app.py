@@ -708,3 +708,49 @@ def test_the_chosen_estimator_survives_a_dashboard_switch() -> None:
     app.sidebar.radio[0].set_value("Quality").run()
 
     assert next(w for w in app.main.selectbox if w.label == "Estimator").value == "bridge"
+
+
+# --- the backtest, made legible ---------------------------------------------
+
+
+def test_the_strategy_dashboard_explains_how_the_backtest_works() -> None:
+    """It used to show six numbers and no account of where they came from."""
+    app = run_app("Strategy")
+
+    text = " ".join(m.value for m in app.markdown)
+    # The expander's body, which is where the rules actually are.
+    assert "position is decided on one bar and earns the next" in text
+    assert "shift" in text, "the execution lag must be stated, not assumed"
+    assert "Costs are charged on position changes" in text
+    assert "Read `excess` before `total return`" in text
+    assert "losing backtest is usually the honest answer" in text
+    assert not app.exception, [str(e) for e in app.exception]
+
+
+def test_the_strategy_dashboard_shows_the_costs_it_is_charging() -> None:
+    """They live in the sidebar, far from the result they drive."""
+    app = run_app("Strategy")
+
+    captions = " ".join(c.value for c in app.caption)
+    assert "bps fee" in captions and "slippage" in captions
+
+
+def test_zero_execution_lag_is_labelled_as_not_real() -> None:
+    """A control that can produce a lie has to say so where it is used."""
+    app = run_app("Strategy")
+    next(w for w in app.main.number_input if "Execution lag" in w.label).set_value(0).run()
+
+    errors = " ".join(e.value for e in app.error)
+    assert "not real" in errors and "look-ahead" in errors
+    assert "does not always flatter" in errors, "the bias has a direction that depends on the rule"
+
+
+def test_the_strategy_dashboard_compares_every_rule_on_the_token() -> None:
+    """`backtest --strategy all` printed this; the screen ran one at a time."""
+    app = run_app("Strategy")
+
+    text = " ".join(m.value for m in app.markdown)
+    assert "Strategy Comparison" in text
+    assert "Where the Edge Went" in text
+    assert "Look-ahead Check" in text
+    assert not app.exception, [str(e) for e in app.exception]
