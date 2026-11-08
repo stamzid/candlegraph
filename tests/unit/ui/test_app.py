@@ -654,3 +654,57 @@ def test_reset_leaves_a_pending_backfill_confirmation_alone() -> None:
     assert "backfill_pending" in app.session_state, "a confirmation is not a preference"
     app.sidebar.radio[0].set_value("Compare").run()
     assert next(w for w in app.main.selectbox if w.label == "Token A").value == "WETH"
+
+
+# --- choosing a gap estimator on the Quality dashboard ----------------------
+
+
+def test_the_quality_dashboard_offers_all_three_estimators() -> None:
+    gappy_db()
+    app = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    app.run()
+    app.sidebar.radio[0].set_value("Quality").run()
+
+    picker = next(w for w in app.main.selectbox if w.label == "Estimator")
+    assert list(picker.options) == ["linear", "causal", "bridge"]
+    assert picker.value == "linear", "the default keeps existing behaviour"
+    assert not app.exception, [str(e) for e in app.exception]
+
+
+def test_selecting_a_causal_estimator_says_a_strategy_could_use_it() -> None:
+    """The one distinction a reader must not get wrong, stated on selection."""
+    gappy_db()
+    app = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    app.run()
+    app.sidebar.radio[0].set_value("Quality").run()
+
+    next(w for w in app.main.selectbox if w.label == "Estimator").set_value("causal").run()
+
+    assert any("could safely consume" in m.value for m in app.success)
+    assert not app.exception, [str(e) for e in app.exception]
+
+
+def test_selecting_a_look_ahead_estimator_warns_instead() -> None:
+    gappy_db()
+    app = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    app.run()
+    app.sidebar.radio[0].set_value("Quality").run()
+
+    next(w for w in app.main.selectbox if w.label == "Estimator").set_value("bridge").run()
+
+    warnings = " ".join(w.value for w in app.warning)
+    assert "Display only" in warnings and "could not have had" in warnings
+
+
+def test_the_chosen_estimator_survives_a_dashboard_switch() -> None:
+    """It drives the Token chart too, so forgetting it would change that page."""
+    gappy_db()
+    app = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    app.run()
+    app.sidebar.radio[0].set_value("Quality").run()
+    next(w for w in app.main.selectbox if w.label == "Estimator").set_value("bridge").run()
+
+    app.sidebar.radio[0].set_value("Token").run()
+    app.sidebar.radio[0].set_value("Quality").run()
+
+    assert next(w for w in app.main.selectbox if w.label == "Estimator").value == "bridge"

@@ -232,7 +232,7 @@ a failing one always is.
 | `portfolio [--objective X] [--risk-free-rate R]` | Mean-variance allocation |
 | `forecast SYMBOL [--auto-order]` | ARIMA point forecast and interval |
 | `risk SYMBOL [--benchmark X] [--confidence C] [--horizon N] [--method M]` | VaR, CVaR, drawdown, and the systematic/idiosyncratic split |
-| `fill [SYMBOLS…] [--days N] [--max-fill N] [--clear] [--status]` | Recompute the display-only fill cache for hours with no stored row. Writes `token_hours_fill` only; no strategy reads it |
+| `fill [SYMBOLS…] [--method M] [--all-methods] [--days N] [--max-fill N] [--clear] [--status] [--evaluate]` | Recompute the gap-estimate cache for hours with no stored row, score the estimators against held-out real hours, or report what is cached. Writes `token_hours_fill` only |
 | `ui` | Run the Streamlit UI |
 | `observe [--strict] [--json] [--sinks X]` | Run the run-observer agent once and post its report |
 | `janitor [--open-pr] [--strict] [--checks X]` | Run the CI janitor once: checks, mechanical fixes, draft PR |
@@ -359,28 +359,51 @@ Uniswap emits no row for an hour with no swaps, so a thin token's history has ho
 may be drawn in their place depends entirely on **who is asking**, and that rule is code rather
 than convention: every fill policy declares whether it is *causal*.
 
-| Policy | Uses | Causal | Who may consume it |
-|---|---|---|---|
-| `none` | nothing — the hole stays | yes | anyone; the honest default for aligned-bar statistics |
-| `drop` | only hours every symbol has | yes | anyone |
-| `ffill` | the last price before the gap | yes | anyone, including strategies |
-| `interpolate` | a line between the bars **either side** | **no** | display only |
+| Policy | Uses | Error bar | Causal | Who may consume it |
+|---|---|---|---|---|
+| `none` | nothing — the hole stays | — | yes | anyone; the honest default for aligned-bar statistics |
+| `drop` | only hours every symbol has | — | yes | anyone |
+| `ffill` | the last price before the gap | no | yes | anyone, including strategies |
+| `interpolate` (`linear`) | a line between the bars **either side** | no | **no** | display only |
+| `causal` | Kalman local-level forecast from before the gap | **yes**, widens as √hours | yes | anyone, including strategies |
+| `bridge` | Brownian bridge pinned to both observed ends | **yes**, widest mid-gap | **no** | display only |
 
-Linear interpolation reads the price *after* the gap, so a strategy consuming it would trade on
-information it could not have had. `load_symbol_series` — the loader every strategy, signal and
-backtest goes through — **refuses** a non-causal policy rather than quietly downgrading it, and
-`apply_fill` returns a `synthetic` mask so a filled cell stays distinguishable wherever it
-travels. A gap longer than the cap (24h) is left alone entirely, not partly filled.
+The two model-based estimators work in **log** space — a random walk in logs cannot produce a
+negative price, and a 1% move costs the same at 3 as at 30,000. Both are deterministic: they
+return the posterior *mean* rather than a sampled path, because a chart that changes on every
+reload is not something an operator can reason about. What they add over a straight line is the
+admission of uncertainty: `sigma_log` per filled hour, rendered as a ribbon that widens with the
+gap. `causal`'s mean coincides with a forward fill; the band is the point. A local-linear-trend
+variant was rejected — a twenty-hour extrapolated trend is a confident fabrication.
 
-The estimates are cached so a dashboard does not recompute them on every widget change:
+Anything that trades is protected at the seam, not by convention. `load_symbol_series` — the
+loader every strategy, signal and backtest goes through — **refuses** a non-causal policy rather
+than quietly downgrading it, and `apply_fill` returns a `synthetic` mask so a filled cell stays
+distinguishable wherever it travels. A gap longer than the cap (24h) is left alone entirely, not
+partly filled.
+
+### The cache
+
+Estimates are stored so a dashboard does not recompute them on every widget change. The three
+estimators are **alternatives for the same missing hour, not layers**: all three can be cached
+(`method` is part of the natural key) so they can be compared, and exactly one is selected at a
+time by `FILL_METHOD`, `--method`, or the Quality dashboard's picker.
 
 ```sh
-make fill                # recompute for every token with stored history
-make fill-status         # what is cached, per token and method
-candlegraph fill WETH --max-fill 12 --clear
+make fill                                  # the selected estimator, every token
+make fill ARGS="--all-methods"             # all three, so they can be compared
+make fill-status                           # what is cached, per token and estimator
+make fill-evaluate                         # score them against hours we already know
+candlegraph fill WETH --method bridge --max-fill 12
+candlegraph fill --clear --all-methods
 ```
 
-They go in `token_hours_fill` — **never** in `token_hours_data`. Only missing hours are stored,
+`--evaluate` is how "which estimator is best" gets a falsifiable answer: real hours are held
+out, each estimator re-guesses them, and the error is reported. Expect `bridge` and `linear` to
+beat `causal` on most tokens — they win *because* they read the bar after the gap, which is
+exactly why they are display only. On a genuinely gappy token the ranking can invert.
+
+Rows go in `token_hours_fill` — **never** in `token_hours_data`. Only missing hours are stored,
 each with the length of the run it belongs to, so the data-quality report keeps measuring what
 was actually ingested and coverage can still be falsified. It is the one table in the database
 that is deleted from: an estimate for an hour that has since been ingested is wrong, not stale.
@@ -401,14 +424,16 @@ dashboard opens with a metric strip, and every chart carries a title that says w
 - **Token** — hourly candlesticks with the Bollinger envelope, volume, rolling volatility,
   the z-score stretch gauge, the drawdown-from-peak curve, band width (the squeeze) and %B.
   Hours with no stored row are shaded on the candles and counted as a coverage figure, so a
-  chart with holes in it cannot be mistaken for a continuous one; where the fill cache has an
-  estimate, it is drawn as a **dashed** bridge anchored on the real bars either side.
+  chart with holes in it cannot be mistaken for a continuous one; where the cache has an
+  estimate it is drawn as a **dashed** bridge anchored on the real bars either side, under a
+  shaded ±1 s.d. ribbon when the selected estimator has one.
 - **Quality** — can this history be trusted, and where is it thin? A **gap map** (one lane per
   token: green where hours are stored, amber where they are missing), the distribution of gap
   lengths (constant drizzle is a quiet market; one long bar is an ingestion failure), field
   completeness (a blank field is `NULL` — *not collected* — never a real zero), per-token
-  coverage and staleness, the longest gaps, any impossible rows, and the **fill cache** with a
-  button to recompute it. It reads the same
+  coverage and staleness, the longest gaps, any impossible rows, and the **gap estimators**:
+  pick one of the three, see in a sentence whether a strategy could consume it, recompute one
+  or all of them, and score them against hours whose real price is already known. It reads the same
   `quality.build_report` that `candlegraph report` and the `data_quality_report` MCP tool read,
   so the three cannot disagree. Read-only: nothing here fills a gap or writes a row.
 - **Risk** — VaR and CVaR at a chosen confidence, horizon and estimator; the return histogram

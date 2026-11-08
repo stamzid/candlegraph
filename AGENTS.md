@@ -31,8 +31,9 @@ a target, and never let CI run something that is not one either.
 | One ingest pass | `make ingest` |
 | Backfill 90 days | `make backfill days=90` |
 | Data-quality report | `make report` (`candlegraph report [--json]`) |
-| Recompute the display-only fill cache | `make fill` (`candlegraph fill [SYMBOLS] [--days N] [--max-fill N] [--clear]`) |
+| Recompute the gap-estimate cache | `make fill` (`candlegraph fill [SYMBOLS] [--method linear\|causal\|bridge] [--all-methods] [--days N] [--max-fill N] [--clear]`) |
 | What the fill cache holds | `make fill-status` (`candlegraph fill --status`) |
+| Score the estimators against held-out real hours | `make fill-evaluate` (`candlegraph fill --evaluate [--gap-hours N]`) |
 | Recent ingest runs | `make runs` |
 | Sync assets and aliases from `tokens.yaml` | `make sync-assets` (in the stack) or `candlegraph knowledge sync-assets` |
 | The embedding model server's log (Ollama is part of `make up`; the first start pulls `bge-m3`) | `make logs-ollama` |
@@ -89,6 +90,8 @@ candlegraph/
     arima.py           ARIMA fitting, order selection, forecasting.
     risk.py            VaR, CVaR, systematic/idiosyncratic split, the risk report. Pure.
     rates.py           RateProvider seam: nominal and real risk-free rate; constant today, Tavily planned.
+    statespace.py      Gap estimators: local-level Kalman filter (causal) and Brownian bridge
+                       (two-sided). Pure; posterior mean plus the standard deviation of it.
     prices.py          Stored rows -> aligned pandas frames.
   strategies/
     base.py            Signal, StrategyResult, and the registry.
@@ -163,7 +166,7 @@ schema.graphql       Generated. `make sdl`; a test fails if it is stale.
 | `pool_hours_data` | one row per pool per hour | `(pool_id, period_start_unix)` | **hypertable** |
 | `ingest_run` | one row per ingest run | `run_id` | plain |
 | `signal` | one row per strategy, symbol and bar | `(strategy, symbol, period_start_unix)` | **hypertable** |
-| `token_hours_fill` | one row per **missing** token-hour, per method | `(token_id, period_start_unix, method)` | plain — a cache, and the one table that is deleted from |
+| `token_hours_fill` | one row per **missing** token-hour, per estimator | `(token_id, period_start_unix, method)` | plain — a cache, and the one table that is deleted from |
 | `agent_run` | one row per agent graph run | `run_id` | plain |
 | `asset` | one row per knowledge entity (token addresses today) | `id` | plain |
 | `source` | one row per document source (`tavily`, `rss:<feed>`, `manual`) | `id` | plain |

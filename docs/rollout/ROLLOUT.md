@@ -1,6 +1,6 @@
 # Rollout: stage 0 — descriptive statistics, deeper
 
-**Status:** current — opened 2026-11-06, steps 1-3 of 4 done (2026-11-07). This is **the**
+**Status:** complete — opened 2026-11-06, all four steps done 2026-11-08. Ready to archive once stage 0's remaining roadmap item (the `active` token flag) lands. This is **the**
 current rollout: when someone says "the plan" or "step N", they mean this
 file. Finished rollouts move to [`archive/`](archive/).
 **Designs this executes:** [`../roadmap/DESIGN.md`](../roadmap/DESIGN.md)
@@ -18,7 +18,7 @@ touching numbers, `release-check` before calling a step done.
 | 1 | Descriptive display: audit the UI against the analytics layer and close the gaps | M | — | **done** 2026-11-06 |
 | 2 | `FillPolicy` seam: the causal estimate anything a strategy consumes may use | M | — | **done** 2026-11-07 |
 | 3 | Linear interpolation estimator, display-only, capped and flagged, cached in `token_hours_fill` | M | 2 | **done** 2026-11-07 |
-| 4 | Kalman / Brownian-bridge estimator, with the `synthetic` flag through `to_wide` | L | 2, 3 | todo |
+| 4 | Kalman / Brownian-bridge estimators, selectable and comparable | L | 2, 3 | **done** 2026-11-08 |
 
 **Combining steps in one session:** 3 follows 2 naturally and the two can
 share a session if 2 lands early. **Do not combine 4 with anything** — it
@@ -199,6 +199,54 @@ cannot be estimated is to decline to fill, not to guess.
 behaviour has not moved, `synthetic` reaches every consumer of `to_wide`,
 and a strategy fed filled bars produces signals identical to one fed the
 gaps.
+
+**Outcome (2026-11-08).** Done. Two estimators landed rather than one,
+because the design's own table distinguishes them and only the split makes
+the causal rule meaningful:
+
+* **`causal`** — a local-level (random-walk-plus-noise) Kalman forecast.
+  Flat mean, band widening as `sqrt(hours)`. Causal, so it is the one form
+  a strategy could consume. A local-linear-trend variant was **rejected**:
+  a twenty-hour extrapolated slope on hourly crypto is a confident
+  fabrication, and a wrong level is recoverable in a way a wrong direction
+  is not.
+* **`bridge`** — a Brownian bridge in log space pinned to the observed bars
+  either side. Mean is log-linear, band widest halfway across. It reads the
+  bar *after* the gap, so it is display only however accurate it is.
+
+Both are deterministic. The design notes a *sampled* path would preserve
+the variance budget exactly; that was rejected because a chart that changes
+on every reload is not something an operator can reason about. What they
+return instead is the posterior mean plus `sigma_log`, so "we do not know"
+is representable — the one thing linear interpolation cannot do, and the
+reason the comparison table listed "a point with no error bar" as its cost.
+
+The subtle part was **where the volatility comes from**. Scaling the causal
+band by volatility measured over the whole column would be a quiet
+look-ahead: invisible in the mean, wrong in anything that sized a position
+by it. So `causal` estimates sigma from the bars strictly *before* each
+gap, and an early gap with too little history behind it gets a mean and no
+band rather than a borrowed one. There is a test for exactly that, and it
+caught a fixture of mine that had the hole in the wrong place.
+
+**Added beyond the design, at the user's request:** all three estimators
+share `token_hours_fill`, keyed apart by `method`, so the same missing hour
+can hold three competing estimates and they can be compared. Exactly one is
+*selected* at a time — `FILL_METHOD`, `candlegraph fill --method`, or the
+Quality dashboard's picker — because they are alternatives, not layers.
+`--all-methods` computes each in turn; `--evaluate` holds out hours whose
+real price is known and scores every estimator against them, which is the
+only falsifiable answer to "which is best". On the first real run it
+reported `linear` and `bridge` within 0.2 bps of each other on the liquid
+tokens and `causal` ~60% worse — and on **GNO**, the deliberately gappy
+token, `causal` *won*. That inversion is the kind of thing the feature
+exists to surface.
+
+Migration `f513c5d75c55` adds the nullable `sigma_log`; it stays `NULL` for
+`linear`, because "this estimator has no error bar" is not "the error bar
+is zero" (invariant 11's rule, applied to an estimate). No change to the
+natural key, no change to default behaviour: `FILL_METHOD` defaults to
+`linear` and `load_symbol_series` still never reads this table.
 
 ---
 

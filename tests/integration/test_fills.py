@@ -13,7 +13,13 @@ from datetime import UTC, datetime
 
 import pytest
 
-from candlegraph.ingestion.fills import LINEAR, fill_cache_summary, load_fills, refresh_fill_cache
+from candlegraph.ingestion.fills import (
+    LINEAR,
+    METHODS,
+    fill_cache_summary,
+    load_fills,
+    refresh_fill_cache,
+)
 from candlegraph.storage import DatabaseManager
 from tests.integration.test_timescale import BASE, HOUR, hour_record, write_hours
 
@@ -126,3 +132,78 @@ def test_the_fill_table_is_keyed_on_token_hour_and_method(db: DatabaseManager) -
     )
 
     assert {row["column_name"] for row in rows} == {"token_id", "period_start_unix", "method"}
+
+
+# --- three estimators against a real database -------------------------------
+
+
+def test_all_three_methods_coexist_for_the_same_missing_hour(gapped: DatabaseManager) -> None:
+    """The natural key includes `method`, which is what makes them comparable.
+
+    Without this the second estimator would overwrite the first and there
+    would be nothing to compare.
+    """
+    for method in METHODS:
+        refresh_fill_cache(gapped, ["WBTC"], method=method, now=NOW)
+
+    stored = {m: load_fills(gapped, ["WBTC"], method=m) for m in METHODS}
+
+    assert all(len(frame) == 2 for frame in stored.values())
+    hours = {m: list(frame["period_start_unix"]) for m, frame in stored.items()}
+    assert len({tuple(v) for v in hours.values()}) == 1, "the same two hours, three ways"
+    # Three different answers for one hour is the point.
+    first = {m: frame["price_usd"].iloc[0] for m, frame in stored.items()}
+    assert first["causal"] == pytest.approx(102.0), "flat forecast"
+    assert first["linear"] != pytest.approx(first["causal"])
+
+    total = gapped.fetch_all(
+        f"SELECT COUNT(*) AS n FROM {gapped.schema}.token_hours_fill",
+        None,
+    )
+    assert total[0]["n"] == 6, "two hours x three methods"
+
+
+def test_the_error_bar_round_trips_through_the_database(gapped: DatabaseManager) -> None:
+    """`sigma_log` is NULL for linear and a real number for the model forms."""
+    for method in METHODS:
+        refresh_fill_cache(gapped, ["WBTC"], method=method, now=NOW)
+
+    assert load_fills(gapped, ["WBTC"], method="linear")["sigma_log"].isna().all()
+    bridge = load_fills(gapped, ["WBTC"], method="bridge")["sigma_log"]
+    assert bridge.notna().all()
+    assert (bridge > 0).all(), "a stored band is positive, never zero"
+
+
+def test_clearing_one_method_leaves_the_others_intact(gapped: DatabaseManager) -> None:
+    for method in METHODS:
+        refresh_fill_cache(gapped, ["WBTC"], method=method, now=NOW)
+
+    removed = gapped.execute(gapped.sql.delete_fills_for_method, {"method": "linear", "symbols": ["WBTC"]})
+
+    assert removed == 2
+    assert load_fills(gapped, ["WBTC"], method="linear").empty
+    assert len(load_fills(gapped, ["WBTC"], method="bridge")) == 2
+
+
+def test_a_real_row_supersedes_every_method_at_once(gapped: DatabaseManager) -> None:
+    """An observation beats all three estimates of it, not just the selected one."""
+    for method in METHODS:
+        refresh_fill_cache(gapped, ["WBTC"], method=method, now=NOW)
+
+    write_hours(gapped, [hour_record(BASE + 3 * HOUR, price="103.5")])
+    removed = gapped.execute(gapped.sql.delete_superseded_fills, None)
+
+    assert removed == 3, "one per method"
+    for method in METHODS:
+        assert list(load_fills(gapped, ["WBTC"], method=method)["period_start_unix"]) == [BASE + 4 * HOUR]
+
+
+def test_the_summary_counts_banded_hours_per_method(gapped: DatabaseManager) -> None:
+    for method in METHODS:
+        refresh_fill_cache(gapped, ["WBTC"], method=method, now=NOW)
+
+    summary = fill_cache_summary(gapped).set_index("method")
+
+    assert int(summary.loc["linear", "hours_with_band"]) == 0
+    assert int(summary.loc["bridge", "hours_with_band"]) == 2
+    assert int(summary.loc["bridge", "filled_hours"]) == 2

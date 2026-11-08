@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,6 +19,12 @@ DEFAULT_SUBGRAPH_ID = "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
 GATEWAY_BASE_URL = "https://gateway.thegraph.com/api/subgraphs/id"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+# The gap estimators a deployment may select between. Declared as an alias
+# rather than inline so the annotation is a real type and not a string ruff
+# will try to unquote.
+FillMethod = Literal["linear", "causal", "bridge"]
 
 
 class Settings(BaseSettings):
@@ -71,6 +78,13 @@ class Settings(BaseSettings):
     # An hour with no Uniswap activity legitimately has no row, so a token is
     # only flagged when coverage falls below this fraction of the window.
     min_expected_coverage: float = Field(default=0.80, ge=0.0, le=1.0)
+    # Which gap estimator the fill cache and the dashboards select by
+    # default. The three are alternatives for the same missing hour, never
+    # layers, so exactly one is active: `linear` (straight line, no error
+    # bar, looks ahead), `causal` (Kalman local-level, past data only) or
+    # `bridge` (Brownian bridge pinned to both ends, most accurate, looks
+    # ahead). `linear` keeps the default behaviour where it has always been.
+    fill_method: FillMethod = "linear"
 
     # --- Analytics ---------------------------------------------------------
     # Annual risk-free rate used for Sharpe ratios and mean-variance

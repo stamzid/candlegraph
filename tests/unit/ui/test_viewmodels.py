@@ -28,6 +28,7 @@ from candlegraph.ui.viewmodels import (
     build_agents_view,
     build_forecast,
     build_market_view,
+    build_method_scores,
     build_news_view,
     build_pair_view,
     build_portfolio_view,
@@ -45,6 +46,7 @@ from candlegraph.ui.viewmodels import (
     gap_lane_segments,
     load_prices,
     longest_gaps,
+    method_catalogue,
     observed_gaps,
     range_lane_segments,
     run_backfill,
@@ -1277,9 +1279,13 @@ def test_the_quality_view_knows_when_the_cache_is_behind_the_gaps(
 
     view = build_quality_view(quality_db(), settings)
 
-    assert view.cached_hours == 0
+    assert view.cached_hours() == 0
+    assert view.cached_hours("bridge") == 0
+    assert view.cached_methods == [], "nothing computed yet"
     assert view.fillable_hours == 10, "one 10-hour gap, inside the 24h cap"
-    assert view.cache_is_stale is True
+    # Per estimator, because the three are alternatives: a combined count
+    # across all of them would read as 3x the gaps they actually cover.
+    assert all(view.cache_is_stale(method) for method in ("linear", "causal", "bridge"))
 
 
 def test_a_gap_longer_than_the_cap_is_not_counted_as_fillable(
@@ -1300,3 +1306,115 @@ def test_a_gap_longer_than_the_cap_is_not_counted_as_fillable(
 def test_refreshing_the_cache_from_the_ui_refuses_an_empty_selection() -> None:
     with pytest.raises(ViewError, match="No tokens"):
         run_fill_refresh_now(FakeDatabase(), [])
+
+
+# --- choosing between the three estimators ----------------------------------
+
+
+def fill_row(index: int, method: str, price: str, sigma: str | None) -> dict[str, Any]:
+    return {
+        "symbol": "WETH",
+        "token_id": "0xweth",
+        "period_start_unix": BASE + index * HOUR,
+        "method": method,
+        "price_usd": Decimal(price),
+        "close": None,
+        "sigma_log": None if sigma is None else Decimal(sigma),
+        "gap_hours": 2,
+        "computed_at": datetime(2026, 11, 8, tzinfo=UTC),
+    }
+
+
+def token_db(method: str, sigma: str | None) -> FakeDatabase:
+    rows = price_rows("WETH", 60)
+    del rows[30:32]
+    return FakeDatabase(
+        get_price_history=rows,
+        coverage_report=[coverage_row("WETH")],
+        get_token_hours_fill=[fill_row(i, method, "123", sigma) for i in (30, 31)],
+    )
+
+
+def test_only_the_selected_estimator_is_read() -> None:
+    """Exactly one at a time — they are alternatives, not layers."""
+    db = token_db("causal", "0.01")
+
+    view = build_token_view(db, "WETH", None, window=5, fill_method="causal")
+
+    assert view.fill_method == "causal"
+    assert view.filled_hours == 2
+    asked = [params for label, params in db.fetches if label == "get_token_hours_fill"]
+    assert asked and all(params["method"] == "causal" for params in asked)
+
+
+def test_an_estimator_with_an_error_bar_produces_a_price_ribbon() -> None:
+    """Stored in log space, so the band is multiplicative and never negative."""
+    view = build_token_view(token_db("bridge", "0.01"), "WETH", None, window=5, fill_method="bridge")
+
+    assert view.has_band
+    ribbon = view.fill_band()
+    assert list(ribbon.columns) == ["lower", "upper"]
+    assert len(ribbon) == 2
+    assert (ribbon["lower"] > 0).all(), "a price band cannot cross zero"
+    assert (ribbon["lower"] < 123.0).all() and (ribbon["upper"] > 123.0).all()
+    # exp(+/-0.01) around 123.
+    assert ribbon["upper"].iloc[0] == pytest.approx(123.0 * np.exp(0.01))
+
+
+def test_an_estimator_without_an_error_bar_draws_no_ribbon() -> None:
+    """A straight line cannot say how unsure it is, and must not pretend to."""
+    view = build_token_view(token_db("linear", None), "WETH", None, window=5, fill_method="linear")
+
+    assert view.filled_hours == 2, "the estimate is still drawn"
+    assert not view.has_band
+    assert view.fill_band().empty
+
+
+def test_a_wider_band_is_asymmetric_in_price_terms() -> None:
+    """Because the model is of log prices: a 50% fall and a 100% rise are
+    the same move, and the ribbon has to show that."""
+    view = build_token_view(token_db("causal", "0.5"), "WETH", None, window=5, fill_method="causal")
+
+    ribbon = view.fill_band()
+    above = ribbon["upper"].iloc[0] - 123.0
+    below = 123.0 - ribbon["lower"].iloc[0]
+    assert above > below
+
+
+# --- the catalogue and the measured comparison ------------------------------
+
+
+def test_the_catalogue_names_every_estimator_and_who_may_consume_it() -> None:
+    catalogue = method_catalogue().set_index("method")
+
+    assert list(catalogue.index) == ["linear", "causal", "bridge"]
+    assert catalogue.loc["causal", "consumable_by"] == "a strategy"
+    assert catalogue.loc["linear", "consumable_by"] == "display only"
+    assert catalogue.loc["bridge", "consumable_by"] == "display only"
+    assert catalogue.loc["linear", "error_bar"] == "no"
+    assert catalogue.loc["bridge", "error_bar"] == "yes"
+
+
+def test_the_measured_comparison_ranks_the_estimators_best_first() -> None:
+    db = FakeDatabase(
+        get_price_history=price_rows("WETH", 900) + price_rows("WBTC", 900, seed=9),
+        coverage_report=[coverage_row("WETH"), coverage_row("WBTC")],
+    )
+
+    scores = build_method_scores(db, ["WETH", "WBTC"])
+
+    assert set(scores["method"]) == {"linear", "causal", "bridge"}
+    assert scores["mae_bps"].is_monotonic_increasing, "best first"
+    # Pooled across both tokens rather than taken from whichever ran last.
+    assert (scores["hours"] > 0).all()
+    assert scores.loc[scores["method"] == "causal", "consumable_by"].iloc[0] == "a strategy"
+
+
+def test_the_comparison_is_empty_rather_than_failing_on_a_fresh_database() -> None:
+    assert build_method_scores(FakeDatabase(), ["WETH"]).empty
+    assert build_method_scores(FakeDatabase(), []).empty
+
+
+def test_refreshing_rejects_an_estimator_that_does_not_exist() -> None:
+    with pytest.raises(ViewError, match="unknown estimator"):
+        run_fill_refresh_now(FakeDatabase(), ["WETH"], method="telepathy")

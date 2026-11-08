@@ -63,11 +63,17 @@ from candlegraph.analytics.rolling import (
 )
 from candlegraph.ingestion.fills import (
     LINEAR,
+    METHOD_SUMMARY,
     FillSummary,
+    MethodScore,
     fill_cache_summary,
     load_fills,
     method_is_causal,
     refresh_fill_cache,
+    score_methods,
+)
+from candlegraph.ingestion.fills import (
+    METHODS as FILL_METHODS,
 )
 from candlegraph.ingestion.quality import (
     HOUR,
@@ -453,6 +459,32 @@ class TokenView:
         return fill_overlay(self.prices, self.fills)
 
     @property
+    def has_band(self) -> bool:
+        """Whether the selected estimator said how unsure it is."""
+        return self.filled_hours > 0 and bool(self.fills["sigma_log"].notna().any())
+
+    def fill_band(self, z: float = 1.0) -> pd.DataFrame:
+        """The estimate's uncertainty as a price ribbon, ``z`` standard deviations.
+
+        ``sigma_log`` is stored in log space because the estimators model
+        log prices, so the band is multiplicative: ``price * exp(±z·sigma)``.
+        That is what makes it asymmetric in price terms, and right — a price
+        cannot go below zero however wide the band gets.
+
+        Empty for an estimator that has no error bar, which is the honest
+        rendering of "a straight line cannot tell you".
+        """
+        if not self.has_band:
+            return pd.DataFrame(columns=["lower", "upper"])
+        fills = self.fills.dropna(subset=["sigma_log"])
+        spread = np.exp(z * fills["sigma_log"].to_numpy(dtype="float64"))
+        price = fills["price_usd"].to_numpy(dtype="float64")
+        return pd.DataFrame(
+            {"lower": price / spread, "upper": price * spread},
+            index=pd.DatetimeIndex(fills["timestamp"]),
+        )
+
+    @property
     def bars(self) -> int:
         return len(self.prices)
 
@@ -721,11 +753,27 @@ class QualityView:
     fill_cache: pd.DataFrame = field(default_factory=pd.DataFrame)
     """One row per (symbol, method): how many hours are cached and how old."""
 
-    @property
-    def cached_hours(self) -> int:
+    def cached_hours(self, method: str | None = None) -> int:
+        """Hours cached, for one estimator or for all of them together.
+
+        Per method, because the three are alternatives: "600 hours cached"
+        across three estimators of the same 200 hours would be a misleading
+        number to show beside a gap count.
+        """
         if self.fill_cache.empty:
             return 0
-        return int(self.fill_cache["filled_hours"].astype("int64").sum())
+        rows = self.fill_cache
+        if method is not None:
+            rows = rows[rows["method"] == method]
+        return int(rows["filled_hours"].astype("int64").sum()) if not rows.empty else 0
+
+    @property
+    def cached_methods(self) -> list[str]:
+        """Which estimators have anything stored, in presentation order."""
+        if self.fill_cache.empty:
+            return []
+        present = set(self.fill_cache["method"])
+        return [method for method in FILL_METHODS if method in present]
 
     @property
     def fillable_hours(self) -> int:
@@ -735,10 +783,9 @@ class QualityView:
         within = self.gaps[self.gaps["hours"] <= DEFAULT_MAX_FILL]
         return int(within["hours"].sum())
 
-    @property
-    def cache_is_stale(self) -> bool:
-        """Whether a refresh would change anything a reader can see."""
-        return self.cached_hours != self.fillable_hours
+    def cache_is_stale(self, method: str) -> bool:
+        """Whether recomputing ``method`` would change anything a reader sees."""
+        return self.cached_hours(method) != self.fillable_hours
 
     @property
     def min_expected_coverage(self) -> float:
@@ -807,6 +854,76 @@ def build_quality_view(
     )
 
 
+def method_catalogue() -> pd.DataFrame:
+    """The three estimators, what each does, and who may consume it.
+
+    Shown beside the picker because "which one should I choose" is not
+    answerable from three words in a dropdown, and because the causal /
+    display-only split is the one thing a reader must not get wrong.
+    """
+    return pd.DataFrame(
+        [
+            {
+                "method": method,
+                "consumable_by": "a strategy" if method_is_causal(method) else "display only",
+                "error_bar": "no" if method == LINEAR else "yes",
+                "what_it_does": METHOD_SUMMARY[method],
+            }
+            for method in FILL_METHODS
+        ]
+    )
+
+
+def build_method_scores(
+    db: DatabaseManager, symbols: list[str], days: int | None = None, gap_hours: int = 4
+) -> pd.DataFrame:
+    """Score every estimator against hours whose real price is already known.
+
+    Pooled across the chosen tokens so one thin symbol cannot decide the
+    ranking. Errors are relative, so tokens at very different prices are
+    comparable; the column is basis points because the numbers are small.
+
+    Empty when there is not enough history to hold anything out, which is a
+    normal state on a fresh database rather than an error.
+    """
+    columns = ["method", "consumable_by", "hours", "mae_bps", "rmse_bps", "worst_pct"]
+    if not symbols:
+        return pd.DataFrame(columns=columns)
+
+    frame = load_price_frame(db, symbols, days=days, fill="none")
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    pooled: dict[str, list[MethodScore]] = {}
+    for symbol in symbols:
+        if symbol not in frame.columns:
+            continue
+        for score in score_methods(frame[symbol], gap_hours=gap_hours):
+            pooled.setdefault(score.method, []).append(score)
+
+    rows = []
+    for method in FILL_METHODS:
+        scores = pooled.get(method)
+        if not scores:
+            continue
+        hours = sum(score.hours for score in scores)
+        rows.append(
+            {
+                "method": method,
+                "consumable_by": "a strategy" if method_is_causal(method) else "display only",
+                "hours": hours,
+                # Weighted by how many hours each symbol contributed, so a
+                # token with twelve held-out hours does not count as much as
+                # one with twelve hundred.
+                "mae_bps": sum(s.mae * s.hours for s in scores) / hours * 10_000,
+                "rmse_bps": sum(s.rmse * s.hours for s in scores) / hours * 10_000,
+                "worst_pct": max(s.worst for s in scores) * 100,
+            }
+        )
+    frame_out = pd.DataFrame(rows, columns=columns)
+    return frame_out.sort_values("mae_bps").reset_index(drop=True) if not frame_out.empty else frame_out
+
+
 def run_fill_refresh_now(db: DatabaseManager, symbols: list[str], method: str = LINEAR) -> FillSummary:
     """Recompute and store the display-only fills. The one write this page makes.
 
@@ -817,8 +934,8 @@ def run_fill_refresh_now(db: DatabaseManager, symbols: list[str], method: str = 
     """
     if not symbols:
         raise ViewError("No tokens with stored history to fill.")
-    if method_is_causal(method):  # pragma: no cover - no causal method exists yet
-        raise ViewError(f"{method!r} is causal and belongs in the strategy path, not this cache.")
+    if method not in FILL_METHODS:
+        raise ViewError(f"unknown estimator {method!r}; known: {', '.join(FILL_METHODS)}")
     return refresh_fill_cache(db, symbols, method=method)
 
 

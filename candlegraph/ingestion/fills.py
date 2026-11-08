@@ -25,10 +25,12 @@ Three rules this module obeys, all of them load-bearing:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from candlegraph.analytics.prices import (
@@ -42,14 +44,29 @@ from candlegraph.analytics.prices import (
 from candlegraph.ingestion.quality import HOUR, group_missing_hours
 from candlegraph.storage import DatabaseManager
 
-# The estimator whose output this cache holds today. Step 4 of the stage-0
-# rollout adds a causal one; `method` is part of the natural key so the two
-# can coexist without either overwriting the other.
+# The three estimators this cache can hold. `method` is part of the natural
+# key, so all three may hold an estimate for the *same* missing hour — which
+# is what makes them comparable. Only one is ever *selected* for display or
+# for a read; they are alternatives, not layers.
 LINEAR = "linear"
+CAUSAL = "causal"
+BRIDGE = "bridge"
 
-# Which policy each stored method corresponds to, so a reader of the cache
-# can ask `fill_rule(...)` whether it is safe to trade on. Today: it is not.
-METHOD_POLICY: dict[str, FillPolicy] = {LINEAR: "interpolate"}
+# Which fill policy each stored method corresponds to, so a reader of the
+# cache can ask `fill_rule(...)` whether it is safe to trade on.
+METHOD_POLICY: dict[str, FillPolicy] = {
+    LINEAR: "interpolate",
+    CAUSAL: "causal",
+    BRIDGE: "bridge",
+}
+# Presentation order: cheapest and least honest first, best last.
+METHODS: tuple[str, ...] = (LINEAR, CAUSAL, BRIDGE)
+
+METHOD_SUMMARY: dict[str, str] = {
+    LINEAR: "straight line across the gap; no error bar, and look-ahead",
+    CAUSAL: "Kalman local-level forecast; past data only, band widens as sqrt(hours)",
+    BRIDGE: "Brownian bridge pinned to both ends; most accurate, look-ahead",
+}
 
 
 @dataclass(frozen=True)
@@ -93,6 +110,14 @@ def method_is_causal(method: str) -> bool:
     return fill_rule(policy).causal if policy is not None else False
 
 
+def _finite(value: Any) -> float | None:
+    """A float the database can store, or ``None`` for anything that is not."""
+    if value is None or pd.isna(value):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
 def fill_rows(
     symbol: str,
     token_id: str,
@@ -100,12 +125,17 @@ def fill_rows(
     synthetic: pd.Series,
     method: str,
     computed_at: datetime,
+    sigma: pd.Series | None = None,
 ) -> list[dict[str, Any]]:
     """Synthetic cells of one symbol's series as rows ready to upsert. Pure.
 
     ``gap_hours`` is the length of the whole run each filled hour belongs to,
-    not the position within it: interpolation yields a point with no error
-    bar, and the run length is the honest proxy for how much to trust it.
+    not the position within it, so a reader can tell a one-hour fill from a
+    twenty-hour guess whatever produced it.
+
+    ``sigma_log`` is the estimator's own standard deviation in log space, and
+    stays ``NULL`` for the estimators that have none. "No error bar" is not
+    "an error bar of zero" — invariant 11's rule, applied to an estimate.
     """
     marked = pd.DatetimeIndex(synthetic.index[synthetic.to_numpy()])
     if marked.empty:
@@ -129,6 +159,7 @@ def fill_rows(
                 "price_usd": None if value is None or pd.isna(value) else float(value),
                 "close": None,
                 "gap_hours": span[moment],
+                "sigma_log": _finite(sigma.get(timestamp)) if sigma is not None else None,
                 "computed_at": computed_at,
             }
         )
@@ -196,7 +227,15 @@ def refresh_fill_cache(
         token_id = token_ids.get(symbol)
         if token_id is None:
             continue
-        rows = fill_rows(symbol, token_id, result.frame[symbol], result.synthetic[symbol], method, moment)
+        rows = fill_rows(
+            symbol,
+            token_id,
+            result.frame[symbol],
+            result.synthetic[symbol],
+            method,
+            moment,
+            sigma=result.sigma[symbol] if symbol in result.sigma.columns else None,
+        )
         holes = observed[symbol].isna()
         gaps = group_missing_hours([int(ts.timestamp()) for ts in holes.index[holes.to_numpy()]])
         summary.runs.append(
@@ -222,6 +261,90 @@ def refresh_fill_cache(
     return summary
 
 
+@dataclass(frozen=True)
+class MethodScore:
+    """How one estimator did on hours whose real price we actually know."""
+
+    method: str
+    hours: int
+    mae: float
+    """Mean absolute error as a fraction of the true price."""
+    rmse: float
+    """Root mean squared error, same units. Punishes the occasional howler."""
+    worst: float
+    """Largest single relative error."""
+    causal: bool
+
+    @property
+    def mae_bps(self) -> float:
+        return self.mae * 10_000
+
+
+def score_methods(
+    prices: pd.Series,
+    gap_hours: int = 4,
+    stride: int = 23,
+    max_fill: int | None = DEFAULT_MAX_FILL,
+) -> list[MethodScore]:
+    """Hold out observed hours, re-estimate them, and measure the error. Pure.
+
+    "Which estimator is best" is otherwise a matter of taste. This answers it
+    the only way that is falsifiable: punch synthetic holes of ``gap_hours``
+    into a series we have the real prices for, run each estimator over the
+    damaged copy, and compare what came back with what was really there.
+
+    ``stride`` spaces the holes out so they never touch, and is deliberately
+    coprime-ish with the day so the sample is not all the same hour of the
+    clock. Errors are relative, so tokens priced at 3 and at 30,000 are
+    comparable.
+
+    The result will usually rank ``bridge`` best, and that is not a reason to
+    feed it to a strategy: it wins *because* it reads the bar after the gap.
+    ``causal`` is the one to compare against the others honestly, being the
+    only one that could have been computed at the time.
+    """
+    from candlegraph.analytics.prices import apply_fill
+
+    clean = prices.dropna().astype("float64")
+    if len(clean) < gap_hours * 3 or gap_hours < 1:
+        return []
+
+    # Hole starts: leave a bar at each end so every gap has both endpoints.
+    starts = list(range(1, len(clean) - gap_hours - 1, max(stride, gap_hours + 1)))
+    if not starts:
+        return []
+
+    damaged = clean.copy()
+    held_out: list[int] = []
+    for start in starts:
+        held_out.extend(range(start, start + gap_hours))
+    positions = np.array(held_out, dtype="int64")
+    damaged.iloc[positions] = float("nan")
+
+    truth = clean.to_numpy(dtype="float64")[positions]
+    frame = damaged.to_frame(name="series")
+
+    scores = []
+    for method in METHODS:
+        estimated = apply_fill(frame, fill=METHOD_POLICY[method], max_fill=max_fill)
+        guess = estimated.frame["series"].to_numpy(dtype="float64")[positions]
+        usable = np.isfinite(guess) & np.isfinite(truth) & (truth > 0)
+        if not usable.any():
+            continue
+        error = np.abs(guess[usable] - truth[usable]) / truth[usable]
+        scores.append(
+            MethodScore(
+                method=method,
+                hours=int(usable.sum()),
+                mae=float(np.mean(error)),
+                rmse=float(np.sqrt(np.mean(error**2))),
+                worst=float(np.max(error)),
+                causal=method_is_causal(method),
+            )
+        )
+    return sorted(scores, key=lambda score: score.mae)
+
+
 def load_fills(
     db: DatabaseManager,
     symbols: list[str],
@@ -236,7 +359,15 @@ def load_fills(
     window, which is not an error — it is what an un-refreshed cache looks
     like.
     """
-    columns = ["symbol", "timestamp", "period_start_unix", "price_usd", "gap_hours", "method"]
+    columns = [
+        "symbol",
+        "timestamp",
+        "period_start_unix",
+        "price_usd",
+        "sigma_log",
+        "gap_hours",
+        "method",
+    ]
     if not symbols:
         return pd.DataFrame(columns=columns)
 
@@ -254,6 +385,9 @@ def load_fills(
 
     frame = pd.DataFrame(rows)
     frame["price_usd"] = pd.to_numeric(frame["price_usd"], errors="coerce").astype("float64")
+    if "sigma_log" not in frame:
+        frame["sigma_log"] = float("nan")
+    frame["sigma_log"] = pd.to_numeric(frame["sigma_log"], errors="coerce").astype("float64")
     frame["period_start_unix"] = frame["period_start_unix"].astype("int64")
     frame["timestamp"] = pd.to_datetime(frame["period_start_unix"], unit="s", utc=True)
     return frame[columns]
@@ -265,6 +399,7 @@ def fill_cache_summary(db: DatabaseManager) -> pd.DataFrame:
         "symbol",
         "method",
         "filled_hours",
+        "hours_with_band",
         "longest_gap_hours",
         "first_unix",
         "last_unix",

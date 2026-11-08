@@ -540,7 +540,8 @@ def test_fill_refreshes_the_cache_and_says_it_is_display_only(
 
     out = capsys.readouterr().out
     assert "2 hour(s) written" in out
-    assert "display only" in out and "not causal" in out
+    assert "display only" in out and "looks ahead" in out
+    assert "Nothing here is read by" in out
     assert any(label == "insert_token_hours_fill" for label, _ in db.upserts)
 
 
@@ -577,3 +578,147 @@ def test_fill_with_no_stored_history_says_so_rather_than_failing(
 ) -> None:
     assert main(["fill"]) == 0
     assert "no stored history" in capsys.readouterr().out
+
+
+def test_fill_computes_one_estimator_at_a_time(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """They are alternatives for the same hour, so --method takes one value."""
+    db = fill_env(tokens_file, monkeypatch)
+
+    assert main(["fill", "--method", "bridge"]) == 0
+
+    out = capsys.readouterr().out
+    assert "fill cache (bridge" in out
+    written = [r for label, r in db.upserts if label == "insert_token_hours_fill"]
+    assert written and all(row["method"] == "bridge" for row in written[0])
+
+
+def test_fill_says_whether_the_chosen_estimator_looks_ahead(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fill_env(tokens_file, monkeypatch)
+    assert main(["fill", "--method", "causal"]) == 0
+    assert "safe for a strategy" in capsys.readouterr().out
+
+    fill_env(tokens_file, monkeypatch)
+    assert main(["fill", "--method", "bridge"]) == 0
+    assert "looks ahead" in capsys.readouterr().out
+
+
+def test_fill_all_methods_computes_each_in_turn(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """So the same gap holds all three and they can be compared."""
+    db = fill_env(tokens_file, monkeypatch)
+
+    assert main(["fill", "--all-methods"]) == 0
+
+    out = capsys.readouterr().out
+    assert all(f"fill cache ({m}" in out for m in ("linear", "causal", "bridge"))
+    methods = {row["method"] for _, rows in db.upserts for row in rows}
+    assert methods == {"linear", "causal", "bridge"}
+
+
+def test_fill_clear_scopes_to_the_chosen_estimator(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Clearing one must not destroy the comparison with the others."""
+    db = fill_env(tokens_file, monkeypatch)
+
+    assert main(["fill", "--clear", "--method", "causal"]) == 0
+
+    cleared = [params for label, params in db.executed if label == "delete_fills_for_method"]
+    assert [params["method"] for params in cleared] == ["causal"]
+    assert "causal" in capsys.readouterr().out
+
+
+def test_fill_clear_all_methods_empties_every_estimator(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = fill_env(tokens_file, monkeypatch)
+
+    assert main(["fill", "--clear", "--all-methods"]) == 0
+
+    cleared = [params["method"] for label, params in db.executed if label == "delete_fills_for_method"]
+    assert cleared == ["linear", "causal", "bridge"]
+
+
+def test_fill_rejects_an_estimator_that_does_not_exist(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fill_env(tokens_file, monkeypatch)
+    with pytest.raises(SystemExit):
+        main(["fill", "--method", "telepathy"])
+
+
+def test_fill_evaluate_scores_every_estimator_against_known_prices(
+    tokens_file: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ "Which is best" answered by holding out real hours, not by taste."""
+    from decimal import Decimal
+
+    hour = 3600
+    base = 1_700_000_000 // (24 * hour) * (24 * hour)
+    rng = __import__("numpy").random.default_rng(3)
+    walk = 100 * __import__("numpy").exp(rng.normal(0, 0.01, 900).cumsum())
+    rows = [
+        {
+            "symbol": "WBTC",
+            "token_id": "0xwbtc",
+            "period_start_unix": base + i * hour,
+            "timestamp": datetime.fromtimestamp(base + i * hour, tz=UTC),
+            "open": Decimal(str(p)),
+            "high": Decimal(str(p)),
+            "low": Decimal(str(p)),
+            "close": Decimal(str(p)),
+            "price_usd": Decimal(str(p)),
+            "volume_usd": Decimal("1000"),
+            "total_value_locked_usd": Decimal("5000"),
+        }
+        for i, p in enumerate(walk)
+    ]
+    monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
+    monkeypatch.setattr("candlegraph.cli.get_settings", lambda: make_settings(tokens_file=str(tokens_file)))
+    db = FakeDatabase(
+        get_price_history=rows,
+        coverage_report=[
+            {
+                "token_id": "0xwbtc",
+                "symbol": "WBTC",
+                "stored_hours": 900,
+                "expected_hours": 900,
+                "first_unix": base,
+                "last_unix": base + 899 * hour,
+            }
+        ],
+    )
+    set_db(db)
+
+    assert main(["fill", "--evaluate"]) == 0
+
+    out = capsys.readouterr().out
+    assert all(method in out for method in ("linear", "causal", "bridge"))
+    assert "MAE" in out and "held-out hours" in out
+    assert "not a licence to trade on it" in out
+    assert db.upserts == [], "evaluating writes nothing"
+
+
+def test_fill_status_lists_what_each_estimator_does(
+    cli_env: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["fill", "--status"]) == 0
+    assert "fill cache is empty" in capsys.readouterr().out
+
+
+def test_the_parser_offers_exactly_the_estimators_that_exist() -> None:
+    """The parser names them without importing ingestion at start-up.
+
+    Two lists that must agree, so one test holds them together rather than
+    a comment asking nicely.
+    """
+    from candlegraph.cli import FILL_METHODS
+    from candlegraph.ingestion.fills import METHOD_POLICY, METHODS
+
+    assert FILL_METHODS == METHODS
+    assert set(FILL_METHODS) == set(METHOD_POLICY)

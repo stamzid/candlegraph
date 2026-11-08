@@ -167,7 +167,41 @@ The two candidates, and what each trades away:
 4. The estimator work (bridge/Kalman, per-token volatility estimation, the
    `synthetic` flag plumbed through `to_wide`) is this stage's remaining
    build item, behind a new `FillPolicy` value so the default behaviour
-   does not move.
+   does not move. *(Delivered 2026-11-08, rollout step 4.)*
+
+**Delivered, 2026-11-08.** Both forms exist as `FillPolicy` members:
+`causal` (local-level Kalman forecast — flat mean, band widening as
+`sqrt(hours)`, past data only) and `bridge` (Brownian bridge in log space
+pinned to both observed ends — log-linear mean, band widest mid-gap, and a
+look-ahead). Both are deterministic posterior means; a *sampled* path
+would preserve the variance budget exactly and was rejected, because a
+chart that changes on every reload cannot be reasoned about. What they add
+over a line is `sigma_log`, which is the "interval that widens with gap
+length" this table's **Uncertainty** row asked for.
+
+Two refinements the build forced, recorded here so the document stays
+true to the code:
+
+- **A drift term is not used.** A local-linear-trend model would
+  extrapolate the last observed slope across the gap; on hourly crypto a
+  twenty-hour extrapolated trend is a confident fabrication, and a wrong
+  level is recoverable in a way a wrong direction is not. The consequence
+  is that `causal`'s mean coincides with a capped forward fill — the band
+  is what it adds, not the point.
+- **The causal band is scaled by volatility estimated from before each
+  gap**, not from the whole series. The whole-series shortcut would be a
+  look-ahead that is invisible in the mean and wrong in anything that
+  sized a position by the band. A gap with too little history behind it
+  therefore gets a mean and no band, which is the honest answer.
+
+All three estimators share one cache table, keyed apart by `method`, so a
+missing hour can hold three competing estimates. They are **alternatives,
+not layers**: exactly one is selected at a time (`FILL_METHOD`, the CLI's
+`--method`, or the dashboard picker). `candlegraph fill --evaluate` holds
+out hours whose real price is known and scores each estimator, which is
+what turns "which is best" from a matter of taste into a measurement —
+and the answer is not uniform, because a flat forecast can beat
+interpolation on a token whose gaps are genuine market quiet.
 
 **What was rejected.** Writing filled rows **into `token_hours_data`**
 (breaks the `NULL`-means-not-collected contract and corrupts coverage,

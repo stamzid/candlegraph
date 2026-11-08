@@ -21,6 +21,11 @@ from typing import Any
 from candlegraph.settings import Settings, get_settings
 from candlegraph.utils.logging_utils import configure_logging, service_logger
 
+# The three gap estimators, named here so the parser can offer them without
+# importing the ingestion package at start-up. `candlegraph.ingestion.fills`
+# owns the real list and a test holds the two together.
+FILL_METHODS = ("linear", "causal", "bridge")
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="candlegraph", description=__doc__.splitlines()[0])
@@ -63,12 +68,42 @@ def _parser() -> argparse.ArgumentParser:
         help="longest run of missing hours that may be filled (default: 24). "
         "Beyond it the hole stays, whole.",
     )
+    # One estimator per run. They are alternatives for the same missing hour,
+    # not layers, so there is no way to ask for two at once; `--all-methods`
+    # computes each in turn so they can be compared.
+    fill.add_argument(
+        "--method",
+        choices=FILL_METHODS,
+        default=None,
+        help="which estimator to compute (default: FILL_METHOD, normally linear). "
+        "linear = straight line, no error bar, look-ahead; causal = Kalman "
+        "local-level, past data only, safe for a strategy; bridge = Brownian "
+        "bridge pinned to both ends, most accurate, look-ahead",
+    )
+    fill.add_argument(
+        "--all-methods",
+        action="store_true",
+        help="compute every estimator in turn, so the same gap holds all three and they can be compared",
+    )
     fill.add_argument(
         "--clear",
         action="store_true",
-        help="delete the cached fills instead of recomputing them",
+        help="delete the cached fills instead of recomputing them (the chosen method, "
+        "or every method with --all-methods)",
     )
     fill.add_argument("--status", action="store_true", help="print what is cached and exit")
+    fill.add_argument(
+        "--evaluate",
+        action="store_true",
+        help="hold out hours whose real price is known, re-estimate them with every "
+        "method, and report the error of each",
+    )
+    fill.add_argument(
+        "--gap-hours",
+        type=int,
+        default=4,
+        help="width of the synthetic holes --evaluate punches (default: 4)",
+    )
 
     sub.add_parser("strategies", help="list the available strategies")
 
@@ -378,18 +413,30 @@ def _report(settings: Settings, days: int | None, strict: bool, as_json: bool = 
     return 0 if report.ok or not strict else 1
 
 
-def _fill(args: argparse.Namespace) -> int:
-    """Recompute, clear, or report on the display-only fill cache.
+def _fill(settings: Settings, args: argparse.Namespace) -> int:
+    """Recompute, clear, evaluate, or report on the fill cache.
 
-    Nothing a strategy reads goes through here: the cache holds linear
-    interpolation, which uses the gap's right endpoint and is therefore not
-    causal. `candlegraph backtest` and `signals` load observations only.
+    Three estimators share the table, keyed apart by `method`, so the same
+    missing hour can hold all three and they can be compared. Only one is
+    ever *selected* at a time — they are alternatives, not layers.
+
+    Two of the three look ahead and are display only. `causal` does not, but
+    nothing reads this cache on a strategy's behalf regardless: `backtest`
+    and `signals` load observations through `load_symbol_series`, which has
+    never touched this table.
     """
-    from candlegraph.analytics.prices import DEFAULT_MAX_FILL
-    from candlegraph.ingestion.fills import LINEAR, fill_cache_summary, refresh_fill_cache
+    from candlegraph.analytics.prices import DEFAULT_MAX_FILL, fill_rule
+    from candlegraph.ingestion.fills import (
+        METHOD_SUMMARY,
+        METHODS,
+        fill_cache_summary,
+        refresh_fill_cache,
+    )
     from candlegraph.storage import get_db
 
     db = get_db()
+    chosen = args.method or settings.fill_method
+    methods = list(METHODS) if args.all_methods else [chosen]
 
     def stored_symbols() -> list[str]:
         """Symbols with rows, read straight from the coverage query."""
@@ -401,14 +448,19 @@ def _fill(args: argparse.Namespace) -> int:
         if cached.empty:
             print("the fill cache is empty; run `candlegraph fill` to populate it")
             return 0
-        print(f"{'symbol':<10}{'method':<10}{'hours':>8}{'longest':>9}  computed")
+        print(f"{'symbol':<10}{'method':<9}{'hours':>7}{'banded':>8}{'longest':>9}  computed")
         for record in cached.to_dict("records"):
             longest = int(record["longest_gap_hours"] or 0)
             print(
-                f"{record['symbol']:<10}{record['method']:<10}"
-                f"{int(record['filled_hours']):>8}{longest:>8}h  "
-                f"{record['computed_at']:%Y-%m-%d %H:%M}"
+                f"{record['symbol']:<10}{record['method']:<9}"
+                f"{int(record['filled_hours']):>7}{int(record['hours_with_band'] or 0):>8}"
+                f"{longest:>8}h  {record['computed_at']:%Y-%m-%d %H:%M}"
             )
+        print()
+        for method in METHODS:
+            rule = fill_rule(_policy_for(method))
+            flag = "causal" if rule.causal else "display only"
+            print(f"  {method:<8} {flag:<13} {METHOD_SUMMARY[method]}")
         return 0
 
     symbols = list(args.symbols) or stored_symbols()
@@ -416,29 +468,84 @@ def _fill(args: argparse.Namespace) -> int:
         print("no stored history to fill; run `make backfill days=90` first")
         return 0
 
+    if args.evaluate:
+        return _fill_evaluate(settings, db, symbols, args)
+
     if args.clear:
-        removed = db.execute(db.sql.delete_fills_for_method, {"method": LINEAR, "symbols": symbols})
-        print(f"cleared {removed} cached fill(s) for {len(symbols)} symbol(s)")
+        total = 0
+        for method in methods:
+            total += db.execute(db.sql.delete_fills_for_method, {"method": method, "symbols": symbols})
+        print(f"cleared {total} cached fill(s) for {len(symbols)} symbol(s) across {', '.join(methods)}")
         return 0
 
-    summary = refresh_fill_cache(
-        db,
-        symbols,
-        days=args.days,
-        max_fill=args.max_fill if args.max_fill is not None else DEFAULT_MAX_FILL,
-    )
+    cap = args.max_fill if args.max_fill is not None else DEFAULT_MAX_FILL
+    for method in methods:
+        summary = refresh_fill_cache(db, symbols, method=method, days=args.days, max_fill=cap)
+        rule = fill_rule(_policy_for(method))
+        banner = "causal — safe for a strategy" if rule.causal else "display only — looks ahead"
+        print(
+            f"fill cache ({summary.method}, {banner}): {summary.rows_written} hour(s) "
+            f"written across {len(summary.runs)} symbol(s)"
+        )
+        for run in summary.runs:
+            if run.filled_hours or run.skipped_hours:
+                print(
+                    f"  {run.symbol:<10}{run.filled_hours:>6} filled"
+                    f"{run.skipped_hours:>7} left (gap over the cap)"
+                    f"   {run.gaps} gap(s), longest {run.longest_gap_hours}h"
+                )
+    print("Nothing here is read by `backtest` or `signals`; the cache is for display.")
+    return 0
+
+
+def _policy_for(method: str) -> str:
+    from candlegraph.ingestion.fills import METHOD_POLICY
+
+    return METHOD_POLICY[method]
+
+
+def _fill_evaluate(settings: Settings, db: Any, symbols: list[str], args: argparse.Namespace) -> int:
+    """Score every estimator against hours whose real price we already have.
+
+    "Which one is best" is otherwise a matter of taste. Holding out observed
+    hours and re-estimating them is the falsifiable version.
+    """
+    from candlegraph.analytics.prices import load_price_frame
+    from candlegraph.ingestion.fills import score_methods
+
+    window = args.days if args.days is not None else settings.analytics_lookback_days
+    frame = load_price_frame(db, symbols, days=window, fill="none")
+    if frame.empty:
+        print("no stored history to evaluate against")
+        return 0
+
     print(
-        f"fill cache ({summary.method}): {summary.rows_written} hour(s) written "
-        f"across {len(summary.runs)} symbol(s)"
+        f"Holding out {args.gap_hours}-hour stretches of real prices and re-estimating "
+        f"them. Error is relative, so tokens at different prices compare."
     )
-    for run in summary.runs:
-        if run.filled_hours or run.skipped_hours:
+    any_scored = False
+    for symbol in symbols:
+        if symbol not in frame.columns:
+            continue
+        scores = score_methods(frame[symbol], gap_hours=args.gap_hours)
+        if not scores:
+            print(f"\n{symbol}: not enough history to evaluate")
+            continue
+        any_scored = True
+        print(f"\n{symbol}  ({scores[0].hours} held-out hours)")
+        print(f"  {'method':<9}{'MAE':>10}{'RMSE':>10}{'worst':>9}  consumable by")
+        for score in scores:
+            who = "a strategy" if score.causal else "display only"
             print(
-                f"  {run.symbol:<10}{run.filled_hours:>6} filled"
-                f"{run.skipped_hours:>7} left (gap over the cap)"
-                f"   {run.gaps} gap(s), longest {run.longest_gap_hours}h"
+                f"  {score.method:<9}{score.mae_bps:>9.1f}b{score.rmse * 10_000:>9.1f}b"
+                f"{score.worst * 100:>8.2f}%  {who}"
             )
-    print("display only: linear interpolation is not causal, so no strategy reads this.")
+    if any_scored:
+        print(
+            "\nA lower error is not a licence to trade on it: `bridge` wins because it "
+            "reads the bar *after* the gap. Among estimates that could have been made at "
+            "the time, `causal` is the only entry."
+        )
     return 0
 
 
@@ -1129,7 +1236,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         case "runs":
             return _runs(args.limit)
         case "fill":
-            return _fill(args)
+            return _fill(settings, args)
         case "strategies":
             return _strategies_cmd()
         case "ui":

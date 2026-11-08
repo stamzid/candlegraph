@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -234,8 +235,15 @@ def test_every_fill_policy_declares_whether_it_is_causal() -> None:
         "drop": True,
         "ffill": True,
         "interpolate": False,
+        # The Kalman local-level filter conditions on the past only, which is
+        # the whole reason it exists beside the bridge.
+        "causal": True,
+        # The bridge is pinned to the bar *after* the gap. More accurate, and
+        # unusable by anything that trades.
+        "bridge": False,
     }
-    assert is_causal("ffill") and not is_causal("interpolate")
+    assert is_causal("ffill") and is_causal("causal")
+    assert not is_causal("interpolate") and not is_causal("bridge")
 
 
 def test_an_unknown_fill_policy_names_the_real_ones() -> None:
@@ -434,3 +442,96 @@ def test_a_strategy_run_is_identical_whether_or_not_the_seam_exists() -> None:
     assert run_strategy("bollinger", registry_free, None).signals.equals(
         run_strategy("bollinger", through_seam, None).signals
     )
+
+
+# --- the model-based estimators through the seam ---------------------------
+
+
+def gappy_frame(n: int = 60, hole: slice = slice(30, 34), seed: int = 5) -> pd.DataFrame:
+    """A random walk with an interior hole, long enough to estimate sigma."""
+    rng = np.random.default_rng(seed)
+    walk = 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.01, n)))
+    series = pd.Series(walk, index=pd.date_range("2026-01-01", periods=n, freq="h", tz="UTC"))
+    series.iloc[hole] = float("nan")
+    return series.to_frame("WBTC")
+
+
+def test_the_causal_estimator_does_not_move_when_a_future_bar_does() -> None:
+    """The property that makes it safe for a strategy, as behaviour.
+
+    Its mirror image is `test_interpolation_rewrites_a_past_bar_when_a_future_one_arrives`:
+    same experiment, opposite result, and that pair is the seam's whole
+    justification. Note the volatility it scales the band by is estimated
+    from bars *before* each gap for exactly this reason — a whole-series
+    sigma would be a quiet look-ahead in the band.
+    """
+    frame = gappy_frame()
+    moved = frame.copy()
+    moved.iloc[40:] = moved.iloc[40:] * 3.0  # everything after the gap changes
+
+    before = apply_fill(frame, fill="causal")
+    after = apply_fill(moved, fill="causal")
+
+    assert after.frame["WBTC"].iloc[:40].equals(before.frame["WBTC"].iloc[:40])
+    assert after.sigma["WBTC"].iloc[:40].equals(before.sigma["WBTC"].iloc[:40])
+
+
+def test_the_bridge_does_move_when_a_future_bar_does() -> None:
+    """Which is why it is display only, however accurate it is."""
+    frame = gappy_frame()
+    moved = frame.copy()
+    moved.iloc[34] = moved.iloc[34] * 2.0  # the bar the bridge is pinned to
+
+    before = apply_fill(frame, fill="bridge").frame["WBTC"].iloc[30:34]
+    after = apply_fill(moved, fill="bridge").frame["WBTC"].iloc[30:34]
+
+    assert not np.allclose(before.to_numpy(), after.to_numpy())
+
+
+def test_only_the_model_based_estimators_carry_an_error_bar() -> None:
+    """A straight line cannot say how unsure it is; that asymmetry is the point."""
+    frame = gappy_frame()
+
+    assert apply_fill(frame, fill="causal").has_bands
+    assert apply_fill(frame, fill="bridge").has_bands
+    assert not apply_fill(frame, fill="interpolate").has_bands
+    assert not apply_fill(frame, fill="ffill").has_bands
+
+
+def test_an_uncertainty_is_reported_only_where_a_value_was_invented() -> None:
+    result = apply_fill(gappy_frame(), fill="bridge")
+
+    assert result.sigma["WBTC"].notna().equals(result.synthetic["WBTC"])
+
+
+def test_the_model_estimators_respect_the_cap_like_every_other_policy() -> None:
+    frame = gappy_frame(hole=slice(30, 40))
+
+    for policy in ("causal", "bridge"):
+        result = apply_fill(frame, fill=policy, max_fill=4)
+
+        assert result.filled_cells == 0, policy
+        assert result.frame["WBTC"].isna().sum() == 10, policy
+
+
+def test_a_series_too_short_to_model_is_left_alone_rather_than_guessed_at() -> None:
+    index = pd.date_range("2026-01-01", periods=3, freq="h", tz="UTC")
+    frame = pd.DataFrame({"WBTC": [1.0, float("nan"), 3.0]}, index=index)
+
+    result = apply_fill(frame, fill="causal")
+
+    # Two observations is enough for a mean but not for a volatility: the
+    # value appears, the band does not.
+    assert result.filled_cells == 1
+    assert result.sigma["WBTC"].isna().all()
+
+
+def test_the_causal_mean_matches_a_forward_fill_but_adds_the_band() -> None:
+    """Documented equivalence, pinned so a future change to either is deliberate."""
+    frame = gappy_frame()
+
+    causal = apply_fill(frame, fill="causal")
+    carried = apply_fill(frame, fill="ffill")
+
+    assert causal.frame["WBTC"].round(9).equals(carried.frame["WBTC"].round(9))
+    assert causal.has_bands and not carried.has_bands

@@ -119,6 +119,9 @@ fill: ## Recompute the display-only fill cache for hours with no stored row
 fill-status: ## Show what the fill cache holds, per token and method
 	$(COMPOSE) exec worker python -m candlegraph fill --status
 
+fill-evaluate: ## Score every gap estimator against hours whose real price is known
+	$(COMPOSE) exec worker python -m candlegraph fill --evaluate $(ARGS)
+
 sync-assets: ## Load asset rows (addresses, symbols, aliases) from config/tokens.yaml into the stack
 	$(COMPOSE) exec worker python -m candlegraph knowledge sync-assets
 

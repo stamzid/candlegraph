@@ -25,9 +25,11 @@ import streamlit as st
 from candlegraph.agents.stages import format_stage
 from candlegraph.analytics.arima import ArimaConfig
 from candlegraph.analytics.portfolio import OBJECTIVES, Objective, PortfolioConfig
-from candlegraph.analytics.prices import DEFAULT_MAX_FILL
+from candlegraph.analytics.prices import DEFAULT_MAX_FILL, fill_rule
 from candlegraph.analytics.rates import real_rate
 from candlegraph.analytics.risk import METHODS, Method, RiskConfig
+from candlegraph.ingestion.fills import METHOD_POLICY, METHOD_SUMMARY
+from candlegraph.ingestion.fills import METHODS as FILL_METHODS
 from candlegraph.settings import Settings, get_settings
 from candlegraph.storage import DatabaseManager, get_db
 from candlegraph.strategies import available
@@ -46,6 +48,7 @@ from candlegraph.ui.viewmodels import (
     build_agents_view,
     build_forecast,
     build_market_view,
+    build_method_scores,
     build_news_view,
     build_pair_view,
     build_portfolio_view,
@@ -61,6 +64,7 @@ from candlegraph.ui.viewmodels import (
     gap_lane_segments,
     load_stored_explanation,
     longest_gaps,
+    method_catalogue,
     range_lane_segments,
     run_backfill,
     run_explain_now,
@@ -312,7 +316,18 @@ def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) ->
     window = int(mid.number_input("Rolling window (bars)", 2, 2000, settings.rolling_window, 1))
     num_std = float(right.number_input("Band width (std)", 0.5, 5.0, 2.0, 0.25))
 
-    view = build_token_view(db, symbol, ctx["days"], window, num_std, settings.analytics_interval_hours)
+    # Whichever estimator the Quality dashboard has selected. They are
+    # alternatives, so exactly one is drawn.
+    method = _prefs().get("fill_method", settings.fill_method)
+    view = build_token_view(
+        db,
+        symbol,
+        ctx["days"],
+        window,
+        num_std,
+        settings.analytics_interval_hours,
+        fill_method=str(method),
+    )
     latest = view.latest
 
     cols = st.columns(6)
@@ -383,6 +398,22 @@ def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) ->
     # The cached estimate, drawn as a dashed bridge anchored on the real bars
     # either side. Dashed and separately named because it is not an
     # observation and must never read as one.
+    # The estimator's own uncertainty, under the dashed mean so the mean
+    # stays readable. Only the model-based forms have one; a straight line
+    # has no band, and drawing none is the honest rendering of that.
+    ribbon = view.fill_band()
+    if not ribbon.empty:
+        figure.add_trace(
+            go.Scatter(
+                x=list(ribbon.index) + list(ribbon.index[::-1]),
+                y=list(ribbon["upper"]) + list(ribbon["lower"][::-1]),
+                fill="toself",
+                fillcolor="rgba(255,171,0,0.18)",
+                line={"width": 0},
+                hoverinfo="skip",
+                name="estimate, 1 s.d.",
+            )
+        )
     overlay = view.fill_overlay
     if not overlay.empty:
         figure.add_trace(
@@ -400,18 +431,29 @@ def _token_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) ->
 
     if view.gaps:
         if view.filled_hours:
+            causal = fill_rule(METHOD_POLICY[str(view.fill_method)]).causal
+            band_note = (
+                " The shaded ribbon is ±1 standard deviation: it widens with the gap, which is "
+                "the model admitting it has stopped knowing."
+                if view.has_band
+                else " This estimator carries no error bar — a one-hour fill and a twenty-hour "
+                "guess are drawn identically."
+            )
+            consumable = (
+                "It uses only data from before each gap, so it is the one form a strategy could consume."
+                if causal
+                else "It reads the bar *after* the gap, so it is display only: nothing that trades sees it."
+            )
             st.caption(
                 f"{view.filled_hours} of {view.missing_hours} missing hour(s) are drawn from the "
-                f"**{view.fill_method}** fill cache (dashed). Display only: linear interpolation "
-                "uses the price *after* the gap, so no strategy or backtest reads it, and a "
-                "filled stretch understates realised volatility — the bands above are drawn "
-                "from observations alone."
+                f"**{view.fill_method}** estimate (dashed). {consumable}{band_note} The Bollinger "
+                "bands and every statistic on this page are computed from observations alone."
             )
         else:
             st.caption(
-                f"{view.missing_hours} missing hour(s) are shown as gaps only. "
-                "Run `make fill` (or the Quality dashboard's refresh) to cache an estimate for "
-                "the short ones."
+                f"{view.missing_hours} missing hour(s) are shown as gaps only — the "
+                f"**{view.fill_method}** cache has nothing for this window. Run `make fill` "
+                "or use the Quality dashboard to compute it."
             )
 
     _title("Volume Pulse — USD traded per candle")
@@ -504,6 +546,23 @@ def _gap_map(view: Any) -> None:
     _plot(figure, height=max(200, 34 * len(symbols)))
 
 
+def _run_fill(db: DatabaseManager, view: Any, methods: list[str]) -> None:
+    """Recompute one or more estimators, reporting each. The page's only write."""
+    symbols = list(view.tokens["symbol"])
+    try:
+        for method in methods:
+            with st.spinner(f"Estimating with {method}…"):
+                done = run_fill_refresh_now(db, symbols, method=method)
+            st.success(
+                f"`{done.method}`: cached {done.rows_written} estimated hour(s) across "
+                f"{len(done.runs)} token(s)."
+            )
+    except ViewError as exc:
+        st.error(str(exc))
+    else:
+        st.rerun()
+
+
 def _quality_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
     st.subheader("Quality — can this history be trusted, and where is it thin?")
     view = build_quality_view(db, settings, ctx["days"])
@@ -557,46 +616,110 @@ def _quality_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) 
         )
 
     _title(
-        "Fill Cache — estimates for the short gaps, computed once",
-        "Linear interpolation, stored in `token_hours_fill` so a dashboard reads it instead of "
-        "recomputing on every widget change. It never touches `token_hours_data`, so the "
-        "coverage above is unaffected by anything here, and it is display only — no strategy "
-        "or backtest reads these rows.",
+        "Gap Estimators — three ways to guess, one selected",
+        "Stored in `token_hours_fill` so a dashboard reads an estimate instead of recomputing "
+        "it on every widget change. They are **alternatives for the same missing hour, not "
+        "layers**: all three can be cached so you can compare them, and exactly one is selected "
+        "for display. Nothing here touches `token_hours_data`, so the coverage above is "
+        "unaffected by anything on this panel.",
     )
-    cache_cols = st.columns([1, 1, 2])
-    cache_cols[0].metric("Hours cached", f"{view.cached_hours:,}")
+
+    method = _pick(
+        st,
+        "Estimator",
+        list(FILL_METHODS),
+        "fill_method",
+        FILL_METHODS.index(settings.fill_method) if settings.fill_method in FILL_METHODS else 0,
+        help="Which estimate the Token dashboard draws, and which one the button below "
+        "recomputes. Only one is ever active.",
+    )
+    rule = fill_rule(METHOD_POLICY[method])
+    (st.success if rule.causal else st.warning)(
+        f"**{method}** — {METHOD_SUMMARY[method]}. "
+        + (
+            "Causal: it uses only data from before the gap, so this is the one form a "
+            "strategy could safely consume."
+            if rule.causal
+            else "Display only: it reads the bar *after* the gap, so a backtest fed this "
+            "would be trading on information it could not have had."
+        )
+    )
+
+    cache_cols = st.columns([1, 1, 1, 2])
+    cache_cols[0].metric(f"Hours cached ({method})", f"{view.cached_hours(method):,}")
     cache_cols[1].metric(
         "Fillable hours",
         f"{view.fillable_hours:,}",
         help=f"Missing hours whose run is {DEFAULT_MAX_FILL}h or shorter. A longer gap is left "
-        "alone: beyond the cap a straight line is fiction.",
+        "alone: beyond the cap any line is fiction.",
     )
-    with cache_cols[2]:
-        if st.button(
-            "↻ Recompute fill cache",
-            type="primary" if view.cache_is_stale else "secondary",
-            help="Writes to token_hours_fill only. No market data is touched and no network is used.",
+    cache_cols[2].metric(
+        "Estimators cached",
+        f"{len(view.cached_methods)} / {len(FILL_METHODS)}",
+        help="Cache all three to compare them on the same gaps.",
+    )
+    stale = view.cache_is_stale(method)
+    with cache_cols[3]:
+        compute, compute_all = st.columns(2)
+        if compute.button(
+            f"↻ Compute {method}",
+            type="primary" if stale else "secondary",
+            width="stretch",
+            help="Writes to token_hours_fill only. No market data is touched, no network used.",
         ):
-            try:
-                with st.spinner("Interpolating…"):
-                    done = run_fill_refresh_now(db, list(view.tokens["symbol"]))
-            except ViewError as exc:
-                st.error(str(exc))
-            else:
-                st.success(
-                    f"Cached {done.rows_written} estimated hour(s) across "
-                    f"{len(done.runs)} token(s) using `{done.method}`."
-                )
-                st.rerun()
-        elif view.cache_is_stale:
-            st.caption("The cache does not match the gaps above — recompute to refresh it.")
+            _run_fill(db, view, [method])
+        if compute_all.button(
+            "↻ Compute all three",
+            width="stretch",
+            help="So the same gaps hold every estimate and the comparison below is like for like.",
+        ):
+            _run_fill(db, view, list(FILL_METHODS))
+        if stale:
+            st.caption(f"`{method}` does not match the gaps above — recompute to refresh it.")
+
+    st.dataframe(method_catalogue(), width="stretch", hide_index=True)
 
     if not view.fill_cache.empty:
+        _title("What is cached, per token and estimator")
         st.dataframe(
             view.fill_cache.style.format({"computed_at": "{:%Y-%m-%d %H:%M}"}, na_rep="—"),
             width="stretch",
             hide_index=True,
         )
+
+    _title(
+        "Which Estimator Is Best — measured, not argued",
+        "Real hours are held out, each estimator re-guesses them, and the error is what you "
+        "see. Lower is better — but a low error is not a licence to trade on it: `bridge` "
+        "wins *because* it reads the bar after the gap. Among estimates that could have been "
+        "made at the time, `causal` is the only entry.",
+    )
+    if st.button("Score the estimators", help="Pure computation over stored prices; writes nothing."):
+        with st.spinner("Holding out hours and re-estimating…"):
+            st.session_state["fill_scores"] = build_method_scores(
+                db, list(view.tokens["symbol"]), days=ctx["days"]
+            )
+    scores = st.session_state.get("fill_scores")
+    if scores is None:
+        st.caption("Press the button to score them against hours whose real price is known.")
+    elif scores.empty:
+        st.info("Not enough stored history to hold any hours out yet.")
+    else:
+        st.dataframe(
+            scores.style.format({"mae_bps": "{:,.1f}", "rmse_bps": "{:,.1f}", "worst_pct": "{:.2f}%"}),
+            width="stretch",
+            hide_index=True,
+        )
+        best = scores.iloc[0]
+        causal_only = scores[scores["consumable_by"] == "a strategy"]
+        note = f"Best overall: **{best['method']}** at {best['mae_bps']:,.1f} bps."
+        if not causal_only.empty:
+            safe = causal_only.iloc[0]
+            note += (
+                f" Best that a strategy could consume: **{safe['method']}** at "
+                f"{safe['mae_bps']:,.1f} bps — the price of not looking ahead."
+            )
+        st.caption(note)
 
     _title(
         "Gap Map — where the hours are missing",

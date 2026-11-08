@@ -13,17 +13,19 @@ says which policy it used.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import itertools
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
+import numpy as np
 import pandas as pd
 
 from candlegraph.storage import DatabaseManager
 from candlegraph.tokens import TokenRegistry
 
 PriceColumn = Literal["close", "price_usd", "open", "high", "low"]
-FillPolicy = Literal["ffill", "drop", "none", "interpolate"]
+FillPolicy = Literal["ffill", "drop", "none", "interpolate", "causal", "bridge"]
 
 HOUR = 3600
 # Beyond a day, a carried or interpolated price is fiction rather than a
@@ -95,7 +97,26 @@ FILL_RULES: dict[str, FillRule] = {
         summary="Straight line between the last real bar before the gap and the first after it.",
         caveat="Uses the gap's right endpoint — a future price. Display only. A straight line "
         "has zero local variance, so every rolling standard deviation overlapping a filled "
-        "stretch is understated: Bollinger bands tighten and z-scores inflate.",
+        "stretch is understated: Bollinger bands tighten and z-scores inflate. It also has no "
+        "error bar at all: a one-hour fill and a twenty-hour guess look identical.",
+    ),
+    "causal": FillRule(
+        "causal",
+        causal=True,
+        summary="Kalman local-level forecast: the flat random-walk path, with a band that "
+        "widens as sqrt(hours).",
+        caveat="Uses only data before the gap, so a strategy may consume it. The mean "
+        "coincides with a forward fill; what it adds is the admission of uncertainty.",
+    ),
+    "bridge": FillRule(
+        "bridge",
+        causal=False,
+        summary="Brownian bridge in log space, pinned to the observed bars either side, with a "
+        "band widest halfway across.",
+        caveat="Conditions on the bar *after* the gap, so it is display only. More accurate "
+        "than either one-sided estimate and the only one that says how unsure it is "
+        "where it matters — but the posterior mean is still a smooth path, so realised "
+        "volatility over a filled stretch is understated.",
     ),
 }
 
@@ -235,6 +256,19 @@ class FilledFrame:
     frame: pd.DataFrame
     synthetic: pd.DataFrame
     policy: str
+    sigma: pd.DataFrame = field(default_factory=pd.DataFrame)
+    """One standard deviation of each filled cell, in **log** space.
+
+    ``NaN`` everywhere for the policies that have no error bar — which is
+    most of them, and is the honest answer rather than a zero. Only the
+    model-based estimators (``causal``, ``bridge``) populate it, and that
+    asymmetry is the point: a straight line cannot tell you how unsure it is.
+    """
+
+    @property
+    def has_bands(self) -> bool:
+        """Whether this policy produced an uncertainty band at all."""
+        return not self.sigma.empty and bool(self.sigma.notna().to_numpy().any())
 
     @property
     def filled_cells(self) -> int:
@@ -286,16 +320,75 @@ def _interpolate(wide: pd.DataFrame, max_fill: int | None) -> pd.DataFrame:
     return pd.DataFrame(columns, index=wide.index) if columns else wide.copy()
 
 
+def _model_fill(wide: pd.DataFrame, policy: str, max_fill: int | None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The state-space estimators, gap by gap. Returns ``(filled, sigma)``.
+
+    Everything happens in log space (see :mod:`analytics.statespace`) and
+    comes back as prices. Over-long runs are left alone, exactly as the
+    other capped policies leave them.
+
+    The ``causal`` branch estimates volatility from the observations
+    **strictly before each gap**, not from the whole column. Using the whole
+    series would be a quiet look-ahead: the band — and so anything that
+    sized a position by it — would depend on bars that had not happened.
+    """
+    from candlegraph.analytics.statespace import brownian_bridge, estimate_sigma, local_level_forecast
+
+    filled = wide.copy()
+    sigma_frame = pd.DataFrame(np.nan, index=wide.index, columns=wide.columns, dtype="float64")
+
+    for name in wide.columns:
+        values = statespace_logs(wide[name]).to_numpy(dtype="float64")
+        observed = np.flatnonzero(np.isfinite(values))
+        if observed.size < 2:
+            continue
+
+        # Built as plain arrays and assigned once per column: positional
+        # frame writes inside the loop are both slower and untypeable.
+        prices = wide[name].to_numpy(dtype="float64").copy()
+        bands = np.full(prices.shape, np.nan)
+        whole_sigma = estimate_sigma(values[observed])
+
+        for first, second in itertools.pairwise(observed):
+            steps = int(second - first - 1)
+            if steps < 1 or (max_fill is not None and steps > max_fill):
+                continue
+
+            if policy == "causal":
+                # Only what was knowable at the left edge of this gap.
+                trailing = values[observed[observed <= first]]
+                estimate = local_level_forecast(values[first], steps, estimate_sigma(trailing))
+            else:
+                estimate = brownian_bridge(values[first], values[second], steps, whole_sigma)
+
+            prices[first + 1 : second] = estimate.prices()
+            bands[first + 1 : second] = estimate.sigma
+
+        filled[name] = prices
+        sigma_frame[name] = bands
+
+    return filled, sigma_frame
+
+
+def statespace_logs(prices: pd.Series) -> pd.Series:
+    """Log prices for the estimators. Thin wrapper, kept here for one import."""
+    from candlegraph.analytics.statespace import log_series
+
+    return log_series(prices)
+
+
 def apply_fill(
     wide: pd.DataFrame, fill: FillPolicy = "ffill", max_fill: int | None = DEFAULT_MAX_FILL
 ) -> FilledFrame:
     """Resolve missing hours under one policy, and say which cells it invented.
 
-    Pure: a frame in, a frame and its synthetic mask out. Every caller that
-    needs to tell an observation from an estimate goes through here.
+    Pure: a frame in, a frame plus its synthetic mask and uncertainty out.
+    Every caller that needs to tell an observation from an estimate goes
+    through here.
     """
     rule = fill_rule(fill)
     missing = wide.isna()
+    sigma = pd.DataFrame(np.nan, index=wide.index, columns=wide.columns, dtype="float64")
 
     match rule.name:
         case "ffill":
@@ -304,6 +397,8 @@ def apply_fill(
             filled = wide.dropna(how="any")
         case "interpolate":
             filled = _interpolate(wide, max_fill)
+        case "causal" | "bridge":
+            filled, sigma = _model_fill(wide, rule.name, max_fill)
         case _:
             filled = wide.copy()
 
@@ -312,7 +407,8 @@ def apply_fill(
     # False by construction — which is the truth: nothing was invented.
     was_missing = missing.reindex(index=filled.index, columns=filled.columns, fill_value=False)
     synthetic = was_missing & filled.notna()
-    return FilledFrame(frame=filled, synthetic=synthetic, policy=rule.name)
+    sigma = sigma.reindex(index=filled.index, columns=filled.columns).where(synthetic)
+    return FilledFrame(frame=filled, synthetic=synthetic, policy=rule.name, sigma=sigma)
 
 
 def to_wide(

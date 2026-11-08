@@ -175,12 +175,13 @@ FILL_COLUMNS = (
     "price_usd",
     "close",
     "gap_hours",
+    "sigma_log",
     "computed_at",
 )
 
 _FILL_TEMPLATE = (
     "(%(token_id)s,%(symbol)s,%(period_start_unix)s,%(method)s,"
-    "%(price_usd)s,%(close)s,%(gap_hours)s,%(computed_at)s)"
+    "%(price_usd)s,%(close)s,%(gap_hours)s,%(sigma_log)s,%(computed_at)s)"
 )
 
 
@@ -580,6 +581,7 @@ def statements_for(schema: str) -> Statements:
             price_usd,
             close,
             gap_hours,
+            sigma_log,
             computed_at
         FROM {ns}.token_hours_fill
         WHERE symbol = ANY(%(symbols)s)
@@ -618,6 +620,7 @@ def statements_for(schema: str) -> Statements:
             symbol,
             method,
             COUNT(*) AS filled_hours,
+            COUNT(sigma_log) AS hours_with_band,
             MAX(gap_hours) AS longest_gap_hours,
             MIN(period_start_unix) AS first_unix,
             MAX(period_start_unix) AS last_unix,
