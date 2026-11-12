@@ -170,13 +170,13 @@ name is wrong for a bigger reason.
 ```python
 @dataclass(frozen=True)
 class Job:
-    name: str                      # "ingest", "observer", "janitor", later "fetch_news"
+    name: str  # "ingest", "observer", "janitor", later "fetch_news"
     run: Callable[[JobContext], RunOutcome]
-    schedule: Schedule             # Every(seconds) today; Daily(at=...) when a job needs it
-    interval_setting: str          # the Settings field the interval is read from; 0 disables
+    schedule: Schedule  # Every(seconds) today; Daily(at=...) when a job needs it
+    interval_setting: str  # the Settings field the interval is read from; 0 disables
     role: Literal["worker", "agents"]  # which process selects it by default
-    writes: frozenset[str]         # "market_data", "ledger", "knowledge", "cache", "reports"
-    description: str               # one line; `candlegraph jobs` prints it
+    writes: frozenset[str]  # "market_data", "ledger", "knowledge", "cache", "reports"
+    description: str  # one line; `candlegraph jobs` prints it
 ```
 
 - **`schedule` keeps the settings it already has.** `DATA_POLL_INTERVAL`,
@@ -201,19 +201,20 @@ class Job:
 class JobContext:
     settings: Settings
     db: DatabaseManager
-    run: Run                       # run_id, trigger, started_at, parent_run_id
-    now: datetime                  # the clock, injected; every job already takes `now`
-    on_stage: StageHook | None     # the --progress stream
-    params: Mapping[str, Any]      # lookback_days for a backfill; open_pr for the janitor
+    run: Run  # run_id, trigger, started_at, parent_run_id
+    now: datetime  # the clock, injected; every job already takes `now`
+    on_stage: StageHook | None  # the --progress stream
+    params: Mapping[str, Any]  # lookback_days for a backfill; open_pr for the janitor
+
 
 @dataclass(frozen=True)
 class RunOutcome:
-    outcome: Outcome               # SUCCEEDED | PARTIAL | FAILED
-    counts: Mapping[str, int] = {} # tokens_written, findings_total, documents_stored, ...
-    errors: Mapping[str, str] = {} # per-target errors, the ingest shape
+    outcome: Outcome  # SUCCEEDED | PARTIAL | FAILED
+    counts: Mapping[str, int] = {}  # tokens_written, findings_total, documents_stored, ...
+    errors: Mapping[str, str] = {}  # per-target errors, the ingest shape
     verdict: Severity | None = None  # agents only: the worst finding
-    detail: Mapping[str, Any] = {} # JSON-safe; stages land here
-    payload: Any = None            # IngestResult / AgentReport, for the caller that wants it
+    detail: Mapping[str, Any] = {}  # JSON-safe; stages land here
+    payload: Any = None  # IngestResult / AgentReport, for the caller that wants it
 ```
 
 The context is the contract a stage 2 pipeline step receives, and the
