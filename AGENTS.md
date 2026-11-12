@@ -360,9 +360,13 @@ unfalsifiable.
 
 ### In progress
 
-Nothing. Stages 0 and 6 both closed on 2026-11-10 and
-`docs/rollout/ROLLOUT.md` records that there is no current rollout, with
-four costed suggestions for what to pick up next.
+**Harness pre-work** (opened 2026-11-11): one runner under the ingest
+worker, the agents process and the API's in-process ingest — a `Job`
+registry, one `run_job`, one scheduler builder, one shape of a run across
+`ingest_run` and `agent_run`. Design in `docs/harness/runner/DESIGN.md`
+(proposed); the step-by-step plan is `docs/rollout/ROLLOUT.md`. It is
+the first third of stage 2, done first because it is the only piece that
+gets harder once the harness lands on top of it.
 
 ### Next
 

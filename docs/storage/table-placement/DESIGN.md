@@ -234,6 +234,27 @@ A separate table avoids both:
   becoming consumable by a strategy by accident — the read path filters on
   method, and `load_symbol_series` never reads this table at all.
 
+## The generic `run` ledger (harness pre-work, rollout step 3) — plain, proposed
+
+Recorded here before the migration is written, as the rule requires. The
+harness design (`docs/harness/runner/DESIGN.md`) keeps `ingest_run` and
+`agent_run` as the detailed ledgers of the jobs that have one, and adds a
+generic `run` table for jobs that do not — the first is the scheduled
+news fetch; stage 2's pipeline runs follow. A read-only view, `run_log`,
+unions all three into one vocabulary; a view is not a table and needs no
+placement, but it pins a column list, so every migration that touches
+one of the three tables must recreate it.
+
+| Table | 1. Observation grain | 2. Time-ordered writes | 3. Range reads | 4. Unbounded growth | Placement |
+|---|---|---|---|---|---|
+| `run` | no: a record that something ran | no: opened, then updated by `run_id` | newest-first, like the other ledgers | yes, slowly | **plain**, like `ingest_run` |
+
+The same two-phase row as `ingest_run` — inserted as `running`, updated
+at the end by `run_id` — and therefore the same reason it is not a
+hypertable: the closing `UPDATE` carries no time coordinate. Rows per
+year at one daily job are in the hundreds; at stage 2's hourly pipelines,
+tens of thousands. Revisit together with `ingest_run`, not before.
+
 ## How to apply this to a new table
 
 Ask the four questions in "The rule" before writing the migration, and record

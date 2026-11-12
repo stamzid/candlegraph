@@ -371,6 +371,16 @@ per concern.
   into typed objects with pydantic, the way `settings.py` and `tokens.py`
   already do.
 
+**Pre-work, opened 2026-11-11.** Before any of the above, the three
+clock-driven loops (the ingest worker, the agents process, the API's
+optional in-process ingest) are folded onto one runner — a `Job`
+registry, one `run_job`, one scheduler builder, and one shape of a run
+with the outcome and verdict axes separated and a `parent_run_id` ready
+for pipelines. [`../harness/runner/DESIGN.md`](../harness/runner/DESIGN.md)
+is the design; [`../rollout/ROLLOUT.md`](../rollout/ROLLOUT.md) is the
+plan. Everything in "What it adds" is then a layer on that runner rather
+than a rewrite of two of them.
+
 **Exit criterion.** A single `candlegraph run pipelines/hourly.yaml`
 executes ingest, validation, analysis and signal generation as one
 orchestrated run, emits traces, and records the run in a ledger.
