@@ -408,6 +408,8 @@ def agent_runs(agent: str | None = None, limit: int = 10) -> dict[str, Any]:
             [
                 "run_id",
                 "agent",
+                "trigger",
+                "outcome",
                 "status",
                 "started_at",
                 "finished_at",

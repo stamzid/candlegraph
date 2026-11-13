@@ -184,7 +184,7 @@ def test_the_api_serves_even_when_every_ingest_run_fails(
     def always_fails(*_args: Any, **_kwargs: Any) -> None:
         raise ConnectionError("subgraph is gone")
 
-    monkeypatch.setattr("candlegraph.ingestion.runner.run_ingest", always_fails)
+    monkeypatch.setattr("candlegraph.ingestion.runner.ingest_job_body", always_fails)
     settings = make_settings(tokens_file=str(tokens_file), ingest_enabled=True, data_poll_interval=3600)
 
     with TestClient(create_app(settings)) as client:
@@ -195,21 +195,20 @@ def test_the_api_serves_even_when_every_ingest_run_fails(
 # --- the job itself --------------------------------------------------------
 
 
-def test_the_ingest_job_delegates_to_run_ingest(
+def test_the_ingest_job_runs_the_ingest_body_with_the_process_database(
     tokens_file: Path, db: FakeDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
-    calls: list[tuple[Any, ...]] = []
-    monkeypatch.setattr("candlegraph.ingestion.runner.run_ingest", lambda *a, **k: calls.append((a, k)))
+    calls: list[Any] = []
+    monkeypatch.setattr("candlegraph.ingestion.runner.ingest_job_body", lambda ctx: calls.append(ctx))
     settings = make_settings(tokens_file=str(tokens_file))
 
     tick_for(JOBS["ingest"])(settings)
 
-    assert len(calls) == 1
-    (database, registry, passed_settings), _kwargs = calls[0]
-    assert database is db
-    assert registry.symbols == ("WBTC", "SHIB")
-    assert passed_settings is settings
+    (ctx,) = calls
+    assert ctx.db is db
+    assert ctx.settings is settings
+    assert ctx.run.trigger == "scheduled"
 
 
 def test_the_ingest_job_never_raises(

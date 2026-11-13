@@ -551,7 +551,11 @@ def test_run_observer_now_posts_to_the_ledger_and_returns_the_report(tokens_file
     report = run_observer_now(settings, db)
 
     assert report.agent == "observer"
-    assert "insert_agent_run" in [label for label, _ in db.executed]
+    writes = [(label, params) for label, params in db.executed if "agent_run" in label]
+    assert [label for label, _ in writes] == ["open_agent_run", "close_agent_run"]
+    # The row says the UI started it, and carries the report's own run id.
+    assert all(params is not None and params["trigger"] == "ui" for _, params in writes)
+    assert writes[1][1] is not None and writes[1][1]["run_id"] == report.run_id
 
 
 # --- sensible defaults ---------------------------------------------------------------

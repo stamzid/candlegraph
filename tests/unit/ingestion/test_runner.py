@@ -620,3 +620,42 @@ tokens:
     assert result.ok, result.errors
     assert "WBTC" not in result.hours_by_symbol, "an inactive token is not polled"
     assert "WETH" in result.hours_by_symbol
+
+
+# --- stages (harness rollout step 2) -----------------------------------------
+
+
+def test_an_ingest_pass_records_four_stages_in_order(registry: TokenRegistry, frozen_now: datetime) -> None:
+    """Same shape as an observer run: `ingest --progress` prints these lines."""
+    client = FakeSubgraphClient(pages={WBTC: [hour_rows(WBTC, [1, 2])]}, tokens=[{"id": WBTC}])
+    seen: list[str] = []
+
+    result = ingest_once(
+        FakeDatabase(), client, registry, make_settings(), frozen_now, on_stage=lambda r: seen.append(r.name)
+    )
+
+    assert seen == ["token_metadata", "token_hours", "pool_discovery", "pool_hours"]
+    assert [s.name for s in result.stages] == seen
+    hours = result.stages[1]
+    assert hours.status == "ok" and hours.detail["rows"] == 2 and hours.detail["by_symbol"]["WBTC"] == 2
+    assert all(s.duration_seconds is not None for s in result.stages)
+
+
+def test_a_failing_token_marks_its_stage_as_an_error(registry: TokenRegistry, frozen_now: datetime) -> None:
+    client = FakeSubgraphClient(tokens=[{"id": WBTC}], fail={WBTC: "gateway exploded"})
+
+    result = ingest_once(FakeDatabase(), client, registry, token_settings(), frozen_now)
+
+    by_name = {s.name: s for s in result.stages}
+    assert by_name["token_hours"].status == "error" and by_name["token_hours"].detail["errors"] == 1
+    assert by_name["token_metadata"].status == "ok"
+
+
+def test_with_pools_off_the_pool_stages_are_skipped_not_missing(
+    registry: TokenRegistry, frozen_now: datetime
+) -> None:
+    result = ingest_once(FakeDatabase(), FakeSubgraphClient(), registry, token_settings(), frozen_now)
+
+    by_name = {s.name: s for s in result.stages}
+    assert by_name["pool_discovery"].status == "skipped"
+    assert by_name["pool_hours"].detail == {"reason": "INGEST_POOLS is off"}

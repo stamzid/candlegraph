@@ -18,6 +18,7 @@ from candlegraph.agents.base import AgentReport, Finding, Severity
 from candlegraph.agents.ledger import recent_agent_runs, record_agent_run
 from candlegraph.agents.observer import run_observer
 from candlegraph.agents.reporting import LedgerSink
+from candlegraph.harness import JOBS, run_job
 from candlegraph.ingestion import ledger
 from candlegraph.knowledge.documents import RawDocument, ensure_source, store_document
 from candlegraph.knowledge.statements import knowledge_statements_for
@@ -145,9 +146,15 @@ def test_the_observer_finds_a_stale_ledger_and_a_gap_on_the_liquid_token(
     seed_hours(agent_db, SHIB, "SHIB", 192, volume_usd=500, skip=range(40, 48))
     seed_run(agent_db, NOW - timedelta(minutes=40))  # stale: 300s * 3 = 15m, critical at 30m
 
-    report = run_observer(
-        make_settings(), db=agent_db, registry=registry, now=NOW, sinks=[LedgerSink(agent_db)]
+    # Through the harness, as production runs it: the harness writes the row.
+    run = run_job(
+        JOBS["observer"],
+        make_settings(),
+        trigger="manual",
+        params={"sinks": [LedgerSink(agent_db)], "registry": registry, "now": NOW},
+        db=agent_db,
     )
+    report = run.payload
 
     by_kind = {(f.kind, f.subject): f for f in report.findings}
     assert by_kind[("stale", "ingest")].severity == Severity.CRITICAL
@@ -157,6 +164,8 @@ def test_the_observer_finds_a_stale_ledger_and_a_gap_on_the_liquid_token(
 
     (row,) = recent_agent_runs(agent_db, agent="observer")
     assert row["status"] == "critical"
+    assert row["outcome"] == "succeeded" and row["trigger"] == "manual"
+    assert str(row["run_id"]) == run.run_id == report.run_id
     assert json.dumps(row["findings"])  # already decoded JSONB
 
 
@@ -253,3 +262,53 @@ def test_an_empty_database_is_informational_not_critical(
     kinds = {f.kind: f.severity for f in report.findings}
     assert kinds["stale"] == Severity.INFO
     assert kinds["missing_token"] == Severity.CRITICAL
+
+
+# --- one shape of a run (harness rollout step 2) --------------------------------
+
+
+def test_run_log_reads_both_ledgers_in_one_vocabulary(agent_db: DatabaseManager) -> None:
+    from candlegraph.agents.ledger import close_agent_run, open_agent_run
+
+    seed_run(agent_db, NOW - timedelta(minutes=10))
+    good = "22222222-2222-2222-2222-222222222222"
+    crashed = "33333333-3333-3333-3333-333333333333"
+    for run_id, error in ((good, None), (crashed, "Boom: x")):
+        open_agent_run(agent_db, run_id, "observer", "scheduled", NOW)
+        report = AgentReport("observer", run_id, NOW, NOW, error=error)
+        close_agent_run(
+            agent_db,
+            run_id=run_id,
+            agent="observer",
+            trigger="scheduled",
+            outcome="failed" if error else "succeeded",
+            started_at=NOW,
+            finished_at=NOW + timedelta(seconds=2),
+            report=report,
+        )
+
+    rows = agent_db.fetch_all(agent_db.sql.get_run_log, {"limit": 10, "job": None})
+    by_id = {str(r["run_id"]): r for r in rows}
+    assert {r["job"] for r in rows} == {"ingest", "observer"}
+    assert by_id[good]["outcome"] == "succeeded" and by_id[good]["verdict"] == "ok"
+    # A crashed graph: failed, and no verdict — not a verdict of "error".
+    assert by_id[crashed]["outcome"] == "failed" and by_id[crashed]["verdict"] is None
+    ingest = next(r for r in rows if r["job"] == "ingest")
+    assert ingest["outcome"] == "succeeded" and ingest["verdict"] is None
+
+    only = agent_db.fetch_all(agent_db.sql.get_run_log, {"limit": 10, "job": "ingest"})
+    assert [r["job"] for r in only] == ["ingest"]
+
+
+def test_a_run_opened_and_never_closed_is_visible_as_running(agent_db: DatabaseManager) -> None:
+    """The detector two-phase rows buy: a process that died mid-run leaves a trace.
+
+    It stays out of recent_agent_runs, whose readers expect a finished row.
+    """
+    from candlegraph.agents.ledger import open_agent_run
+
+    open_agent_run(agent_db, "44444444-4444-4444-4444-444444444444", "observer", "ui", NOW)
+
+    (row,) = agent_db.fetch_all(agent_db.sql.get_run_log, {"limit": 10, "job": "observer"})
+    assert row["outcome"] == "running" and row["finished_at"] is None and row["trigger"] == "ui"
+    assert recent_agent_runs(agent_db, agent="observer") == []

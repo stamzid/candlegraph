@@ -7,11 +7,25 @@ handlers are attached by :func:`configure_logging`, which the entrypoint calls.
 from __future__ import annotations
 
 import logging
+from contextvars import ContextVar
 
 LOGGER_NAME = "candlegraph"
-LOG_FORMAT = "%(levelname)s: %(asctime)s %(name)s %(message)s"
+LOG_FORMAT = "%(levelname)s: %(asctime)s %(name)s %(message)s%(run)s"
 
 service_logger = logging.getLogger(LOGGER_NAME)
+
+# Set by harness.run_job for the length of a run, so every line logged inside
+# the run can be matched to its ledger row.
+current_run_id: ContextVar[str | None] = ContextVar("current_run_id", default=None)
+
+
+class RunIdFilter(logging.Filter):
+    """Adds ``run=<first 8 chars of run_id>`` to lines logged during a run."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        run_id = current_run_id.get()
+        record.run = f" run={run_id[:8]}" if run_id else ""
+        return True
 
 
 def configure_logging(level: str = "INFO") -> logging.Logger:
@@ -24,6 +38,7 @@ def configure_logging(level: str = "INFO") -> logging.Logger:
     if not service_logger.handlers:
         handler = logging.StreamHandler()
         handler.setFormatter(logging.Formatter(LOG_FORMAT))
+        handler.addFilter(RunIdFilter())
         service_logger.addHandler(handler)
     service_logger.propagate = False
     return service_logger

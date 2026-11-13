@@ -117,7 +117,9 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
 - This repo is often checked out as several git worktrees at once. Compose
   deliberately has no fixed project name, so each worktree gets its own stack;
   do not add `name:` to `docker-compose.yaml`. If ports clash, set
-  `POSTGRES_HOST_PORT` and `APP_HOST_PORT`.
+  `POSTGRES_HOST_PORT`, `APP_HOST_PORT`, `UI_HOST_PORT` and
+  `OLLAMA_HOST_PORT` — a second stack fails on Ollama's 11434 even when
+  the first two are unique.
 - Two worktrees whose directories share a basename also share a Compose
   project, and therefore a database volume. The symptom is `alembic` failing
   with `Can't locate revision identified by <hash>` — a revision from the

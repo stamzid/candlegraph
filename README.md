@@ -82,6 +82,7 @@ Backfill history and check what you got:
 make backfill days=90                    # ~5 min for ten tokens
 make report                              # coverage, gaps, field completeness
 make runs                                # the ingest ledger
+make runs ARGS='--all'                   # every job (ingest, observer, janitor), with trigger and outcome
 make jobs                                # the registered jobs and their schedules
 make serve ARGS='--port auto'            # the API locally, on a free port if 8000 is the stack's
 ```

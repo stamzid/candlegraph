@@ -271,11 +271,11 @@ def test_make_missing_is_critical() -> None:
 # --- plumbing --------------------------------------------------------------
 
 
-def test_the_ledger_sink_records_the_run(fake_db: FakeDatabase) -> None:
+def test_the_graph_writes_no_ledger_row_itself(fake_db: FakeDatabase) -> None:
+    """Since harness step 2 the agent_run row is written by the harness, not by publish."""
     janitor(FakeShell(clean_git()), db=fake_db)
 
-    label, params = fake_db.executed[0]
-    assert label == "insert_agent_run" and params is not None and params["agent"] == "janitor"
+    assert fake_db.executed == []
 
 
 def test_output_is_redacted_before_it_reaches_the_report() -> None:

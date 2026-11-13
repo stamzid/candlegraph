@@ -61,6 +61,7 @@ def start_run(
     lookback_days: int | None = None,
     now: datetime | None = None,
     run_id: str | None = None,
+    parent_run_id: str | None = None,
 ) -> RunRecord:
     """Open a ledger row for a run that is about to begin.
 
@@ -82,6 +83,7 @@ def start_run(
                 "trigger": record.trigger,
                 "started_at": record.started_at,
                 "lookback_days": record.lookback_days,
+                "parent_run_id": parent_run_id,
             },
         )
     except Exception as exc:

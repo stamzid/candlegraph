@@ -9,11 +9,19 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from pathlib import Path
 
 import httpx
 import pytest
 
+from candlegraph.tokens import load_tokens
+
 pytestmark = pytest.mark.e2e
+
+# Read from the same file the stack reads, so adding or deactivating a token
+# does not break this suite. Only active tokens are polled; an inactive one
+# has no candles on a freshly created volume, which is correct.
+REGISTRY = load_tokens(Path(__file__).resolve().parents[2] / "config" / "tokens.yaml")
 
 CHART_QUERY = """
 query getChartData($tokenSymbol: String!, $timeUnitInHours: Int!) {
@@ -59,13 +67,13 @@ def test_status_is_healthy(api: httpx.Client) -> None:
 def test_the_configured_tokens_are_served(api: httpx.Client) -> None:
     data = graphql(api, "{ supportedTokens }")
 
-    assert len(data["supportedTokens"]) == 10
-    assert {"WETH", "WBTC", "USDC", "SHIB", "GNO"} <= set(data["supportedTokens"])
+    # Every configured token is served, active or not: an inactive token keeps its history.
+    assert set(data["supportedTokens"]) == set(REGISTRY.symbols)
 
 
-@pytest.mark.parametrize("symbol", ["WETH", "WBTC", "USDC", "LINK", "GNO"])
-def test_each_token_has_ingested_candles(api: httpx.Client, symbol: str) -> None:
-    """Proves the live subgraph ingest actually landed data for every token."""
+@pytest.mark.parametrize("symbol", REGISTRY.active_symbols)
+def test_each_active_token_has_ingested_candles(api: httpx.Client, symbol: str) -> None:
+    """Proves the live subgraph ingest actually landed data for every token it polls."""
     payload = graphql(api, CHART_QUERY, tokenSymbol=symbol, timeUnitInHours=1)["getChartData"]
 
     assert payload["tokenMetadata"]["symbol"] == symbol

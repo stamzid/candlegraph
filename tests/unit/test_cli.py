@@ -972,3 +972,75 @@ def test_every_analytics_command_has_a_make_target() -> None:
     assert (subcommands - services) <= targets, (
         f"no make target for: {sorted(subcommands - services - targets)}"
     )
+
+
+# --- runs --job / --all (harness rollout step 2) -----------------------------
+
+
+def _log_row(job: str, trigger: str | None, outcome: str, verdict: str | None) -> dict[str, Any]:
+    return {
+        "run_id": "abcdef12-0000-0000-0000-000000000000",
+        "job": job,
+        "trigger": trigger,
+        "outcome": outcome,
+        "verdict": verdict,
+        "started_at": datetime(2026, 11, 13, 9, tzinfo=UTC),
+        "finished_at": None,
+        "duration_seconds": None,
+        "parent_run_id": None,
+        "detail": {},
+    }
+
+
+def test_runs_job_reads_the_run_log_with_trigger_and_outcome(
+    cli_env: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli_env.reads["get_run_log"] = [
+        _log_row("observer", "ui", "succeeded", "warning"),
+        _log_row("observer", None, "running", None),
+    ]
+
+    assert main(["runs", "--job", "observer"]) == 0
+
+    out = capsys.readouterr().out
+    assert "ui" in out and "succeeded" in out and "warning" in out
+    assert "running" in out  # an unfinished run is listed, not hidden
+    (label, params) = cli_env.fetches[-1]
+    assert label == "get_run_log" and params == {"limit": 10, "job": "observer"}
+
+
+def test_runs_all_reads_every_job_and_bare_runs_still_reads_ingest_run(
+    cli_env: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["runs", "--all"]) == 0
+    assert cli_env.fetches[-1] == ("get_run_log", {"limit": 10, "job": None})
+
+    assert main(["runs"]) == 0
+    assert cli_env.fetches[-1][0] == "get_recent_runs"
+
+
+def test_ingest_progress_prints_stages_to_stderr(
+    cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from candlegraph.harness.stages import StageRecord
+
+    def fake_run(db: Any, registry: Any, settings: Any, **kwargs: Any) -> IngestResult:
+        kwargs["on_stage"](StageRecord("token_hours", "ok", None, 0.5, {"rows": 3}))
+        return IngestResult(hours_written=3)
+
+    monkeypatch.setattr("candlegraph.ingestion.runner.run_ingest", fake_run)
+
+    assert main(["ingest", "--progress"]) == 0
+
+    out, err = capsys.readouterr()
+    assert "ingest stages:" in err and "token_hours" in err
+    assert "token_hours" not in out
+
+
+def test_ingest_that_cannot_start_exits_one(cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*_a: Any, **_k: Any) -> IngestResult:
+        raise RuntimeError("no endpoint")
+
+    monkeypatch.setattr("candlegraph.ingestion.runner.run_ingest", boom)
+
+    assert main(["ingest"]) == 1

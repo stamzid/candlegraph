@@ -235,7 +235,10 @@ class Statements:
     fill_cache_summary: sql.Composed
     # agents
     insert_agent_run: sql.Composed
+    open_agent_run: sql.Composed
+    close_agent_run: sql.Composed
     get_recent_agent_runs: sql.Composed
+    get_run_log: sql.Composed
 
 
 @lru_cache(maxsize=4)
@@ -372,8 +375,8 @@ def statements_for(schema: str) -> Statements:
 
     start_ingest_run = sql.SQL(
         """
-        INSERT INTO {ns}.ingest_run (run_id, trigger, status, started_at, lookback_days)
-        VALUES (%(run_id)s, %(trigger)s, 'running', %(started_at)s, %(lookback_days)s)
+        INSERT INTO {ns}.ingest_run (run_id, trigger, status, started_at, lookback_days, parent_run_id)
+        VALUES (%(run_id)s, %(trigger)s, 'running', %(started_at)s, %(lookback_days)s, %(parent_run_id)s)
         RETURNING id
         """
     ).format(ns=ns)
@@ -649,10 +652,58 @@ def statements_for(schema: str) -> Statements:
         """
     ).format(ns=ns)
 
+    # Opened when the run starts: outcome 'running', no status yet. A row that
+    # stays like this means the process died mid-run; run_log shows it.
+    open_agent_run = sql.SQL(
+        """
+        INSERT INTO {ns}.agent_run (run_id, agent, trigger, outcome, status, started_at, parent_run_id)
+        VALUES (%(run_id)s, %(agent)s, %(trigger)s, 'running', NULL, %(started_at)s, %(parent_run_id)s)
+        RETURNING id
+        """
+    ).format(ns=ns)
+
+    # An upsert, not an UPDATE: if opening the row failed (database blipped),
+    # closing it still records the run.
+    close_agent_run = sql.SQL(
+        """
+        INSERT INTO {ns}.agent_run (
+            run_id, agent, trigger, outcome, status, started_at, finished_at, duration_seconds,
+            findings_total, summary, report, findings, detail, parent_run_id
+        )
+        VALUES (
+            %(run_id)s, %(agent)s, %(trigger)s, %(outcome)s, %(status)s, %(started_at)s, %(finished_at)s,
+            %(duration_seconds)s, %(findings_total)s, %(summary)s, %(report)s, %(findings)s, %(detail)s,
+            %(parent_run_id)s
+        )
+        ON CONFLICT (run_id) DO UPDATE SET
+            outcome = EXCLUDED.outcome,
+            status = EXCLUDED.status,
+            finished_at = EXCLUDED.finished_at,
+            duration_seconds = EXCLUDED.duration_seconds,
+            findings_total = EXCLUDED.findings_total,
+            summary = EXCLUDED.summary,
+            report = EXCLUDED.report,
+            findings = EXCLUDED.findings,
+            detail = EXCLUDED.detail
+        """
+    ).format(ns=ns)
+
+    # Only finished rows: every reader of this statement predates two-phase
+    # agent rows and expects a status. Unfinished runs are in run_log.
     get_recent_agent_runs = sql.SQL(
         """
         SELECT * FROM {ns}.agent_run
-        WHERE (%(agent)s::text IS NULL OR agent = %(agent)s)
+        WHERE finished_at IS NOT NULL
+          AND (%(agent)s::text IS NULL OR agent = %(agent)s)
+        ORDER BY started_at DESC
+        LIMIT %(limit)s
+        """
+    ).format(ns=ns)
+
+    get_run_log = sql.SQL(
+        """
+        SELECT * FROM {ns}.run_log
+        WHERE (%(job)s::text IS NULL OR job = %(job)s)
         ORDER BY started_at DESC
         LIMIT %(limit)s
         """
@@ -694,5 +745,8 @@ def statements_for(schema: str) -> Statements:
         delete_fills_for_method=delete_fills_for_method,
         fill_cache_summary=fill_cache_summary,
         insert_agent_run=insert_agent_run,
+        open_agent_run=open_agent_run,
+        close_agent_run=close_agent_run,
         get_recent_agent_runs=get_recent_agent_runs,
+        get_run_log=get_run_log,
     )

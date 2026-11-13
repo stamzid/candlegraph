@@ -260,8 +260,12 @@ def run_observer(
     narrator: Narrator | None = None,
     sinks: list[Sink] | None = None,
     on_stage: StageHook | None = None,
+    run_id: str | None = None,
 ) -> AgentReport:
     """One observer run, posted to the sinks. Never raises for a failing graph.
+
+    ``run_id`` is the harness's id for the run, so the report and the
+    ``agent_run`` row the harness writes share it; a fresh one otherwise.
 
     ``on_stage`` is called with each node's :class:`StageRecord` as it
     finishes — what ``observe --progress`` prints and the UI streams.
@@ -274,7 +278,7 @@ def run_observer(
         db=db,
         narrator=narrator,
         sinks=sinks if sinks is not None else build_sinks(settings, db=db),
-        run_id=new_run_id(),
+        run_id=run_id or new_run_id(),
         started_at=started,
         on_stage=on_stage,
     )

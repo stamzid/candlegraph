@@ -454,7 +454,8 @@ def test_observe_writes_one_agent_run_row_and_nothing_else(
     assert payload["agent"] == "observer"
     assert payload["status"] in ("ok", "info", "warning", "critical", "error")
     assert payload["markdown"].startswith("# observer")
-    assert [label for label, _ in wired.executed] == ["insert_agent_run"]
+    assert [label for label, _ in wired.executed] == ["open_agent_run", "close_agent_run"]
+    assert all(params is not None and params["trigger"] == "mcp" for _, params in wired.executed)
     assert wired.upserts == []
 
 

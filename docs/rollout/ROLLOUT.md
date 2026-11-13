@@ -1,369 +1,311 @@
-# Rollout: harness pre-work — one runner under the three loops
+# Rollout: harness pre-work — one runner for all scheduled work
 
-**Status:** current — opened 2026-11-11. The design it executes is
-[`../harness/runner/DESIGN.md`](../harness/runner/DESIGN.md), Status
-`proposed`; this file sequences it and records how each step actually
-went. Decisions live in the design document; a step that forces a new
-decision changes that document in the same change, Status line included.
-**Why this and not stage 2 itself:** stage 2 (the harness) is large, and a
-third of it already exists twice — a scheduler builder, a never-raise
-tick, a process loop and a ledger each written once for ingestion and
-once for the agents, with different vocabularies. Unifying them first is
-the only candidate on the previous `ROLLOUT.md` that gets *harder* once
-the harness lands on top; the other three (the four oversized dashboard
-pages, the portfolio posterior, continuous aggregates) are unchanged by
-this work and stay queued.
-**Operating procedure per step:** the `add-migration` skill for step 2
-and 3's schema changes, `run-stack` to verify against a real compose
-stack, `release-check` before a step is called done.
+**Status:** current — opened 2026-11-11.
+**Design:** [`../harness/runner/DESIGN.md`](../harness/runner/DESIGN.md).
+This file lists the steps, their order and how each one went. Decisions
+belong in the design document; if a step changes a decision, it updates
+that document in the same change.
+
+## Why this work comes first
+
+Three processes run work on a timer: the ingest worker, the agents
+process, and the API (when `INGEST_ENABLED=true`). Before this rollout,
+the code for scheduling, running and recording that work was written
+twice, once for ingestion and once for the agents, with different names
+and different ledger columns.
+
+Stage 2 (the harness: pipelines, events, tracing) needs to run all of
+these jobs in one way. Merging the two copies now is cheaper than
+building stage 2 on top of both. The other candidates for the next
+piece of work (splitting four large dashboard pages, the portfolio
+posterior, continuous aggregates) do not get harder if they wait, so they
+stay queued.
+
+**Procedures:** the `add-migration` skill for schema changes (steps 2
+and 3), `run-stack` to check a real stack, `release-check` before a step
+is called done.
 
 ## Progress
 
 | # | Step | Size | Depends on | Status |
 |---|---|---|---|---|
-| 1 | One scheduler, one process loop, one `run_job` | S | — | **done** 2026-11-12 — see Outcome; ingest ledger row still written by `run_ingest` |
-| 2 | One shape of a run: two-phase agent rows, `trigger`, `outcome`, `parent_run_id`, the `run_log` view, stages in ingest | M | 1 | todo |
-| 3 | The third job proves the registry: `fetch_news` scheduled, the generic `run` table | S | 1, 2 | todo — **cut line**; stage 2 absorbs it if dropped |
+| 1 | One scheduler, one process loop, one `run_job` | S | — | done 2026-11-12 |
+| 2 | One shape of a run: ledger rows opened before and closed after every run, `trigger`, `outcome`, `parent_run_id`, the `run_log` view, stages for ingest | M | 1 | done 2026-11-13 — see Outcome |
+| 3 | A third job (`fetch_news`) and the generic `run` table | S | 1, 2 | todo — optional; stage 2 can absorb it |
 | 4 | Closeout: invariant 27, docs, skills, README; archive this file | S | 1–3 | todo |
 
-**Why this order.** Step 1 moves control flow and changes no schema;
-step 2 changes a schema and moves ownership of a ledger row and changes
-no control flow. Keeping them apart means a failing test in either
-session points at one kind of change. Step 3 exists to *prove* steps 1
-and 2 rather than to deliver news on a schedule: a job that is neither
-ingestion nor an agent, registered with no new scheduler code and no new
-ledger code, is the only evidence that the abstraction is one and not
-two-and-a-half. Step 4 is the paperwork, and it is a step because the
-definition of done in `AGENTS.md` is a checklist, not a feeling.
+**Why this order.** Step 1 changes control flow and no schema. Step 2
+changes the schema and who writes the ledger rows, but not control flow.
+Keeping them apart means a failing test points at one kind of change.
+Step 3 tests the design: if a job that is neither ingestion nor an agent
+can be added without new scheduler or ledger code, the design works.
+Step 4 is the paperwork required by the definition of done in
+`AGENTS.md`.
 
-**Combining steps in one session.** 3 and 4 may share a session. **Do
-not combine 1 and 2**, for the bisection reason above, and do not start
-2 in a session that has less than its full budget: it is the step with a
-migration, and a migration id is permanent the moment it has been applied
-to any volume (`docs/incidents/2026-10-28-stack-would-not-start/`).
+**Do not combine steps 1 and 2 in one session.** Steps 3 and 4 may share
+one. Do not start step 2 without time to finish it: it adds a migration,
+and a migration id is permanent once any database has applied it (see
+`docs/incidents/2026-10-28-stack-would-not-start/`).
 
-**Sizing warning for step 2.** It is the largest step and the one most
-likely to overrun, because "one shape of a run" is three deliverables
-that look like one: the schema, the view and the `runs --job` command;
-the ingest stages; and moving the `agent_run` row from the `ledger` sink
-into the harness open/close. If the session runs long, **land the first
-two and leave the third**: keep `LedgerSink` as the single-phase writer
-of `agent_run`, record in the Outcome that agent rows are not yet
-two-phase, and finish the move at the start of step 3's session. The
-design document names this fallback and why it is the worse resting
-place (a hung observer stays invisible).
-
-**What is deliberately not in this rollout.** OpenTelemetry, YAML
-pipeline specs, an event broker, continuous aggregates, a rename of any
-compose service or interval setting, `fill`/`embed` as scheduled jobs,
-and the four oversized dashboard pages. The first four are stage 2; the
-pages should be split *next*, before stage 2 adds a pipelines dashboard,
-so the new page copies the good pattern; the jobs wait for a demonstrated
-need, which the registry turns into a twenty-line addition when it
-comes.
-
-The exit criterion for the whole rollout is in the design document and
-every clause has to hold at once.
+**Not in this rollout:** OpenTelemetry, YAML pipeline specs, an event
+broker, continuous aggregates, renaming any compose service or interval
+setting, scheduling `fill` or `embed`, and the four large dashboard
+pages. The first four belong to stage 2. The dashboard pages should be
+split before stage 2 adds a pipelines page.
 
 ---
 
 ## Step 1 — One scheduler, one process loop, one `run_job`
 
-**Goal.** After this step there is one `BackgroundScheduler` builder, one
-process loop and one function through which every job runs, and nothing
-observable about the stack has changed: the same three processes, the
-same compose file, the same intervals, the same log lines, the same
-ledger rows.
+**Goal.** One scheduler builder, one process loop and one function that
+runs every job. Nothing visible changes: same processes, same compose
+file, same intervals, same log lines, same ledger rows.
 
-**Read first.** `docs/harness/runner/DESIGN.md` — "The decision", "The
-vocabulary" (`Job`, `JobContext`, `RunOutcome`) and "`run_job`: the
-lifecycle". `candlegraph/ingestion/worker.py` and
-`candlegraph/agents/scheduler.py` side by side: they are the two copies
-being folded. `candlegraph/api/app.py::lifespan` for the deliberate
-`shutdown(wait=False)`. Invariants 1 and 7.
+**Read first.** The design document's sections "The decision", "The
+vocabulary" and "`run_job`". The old `ingestion/worker.py` and
+`agents/scheduler.py`. `api/app.py::lifespan`. Invariants 1 and 7.
 
-**Touches.** New `candlegraph/harness/` with `jobs.py` (the `Job`
-dataclass, `JOBS` with `ingest`, `observer`, `janitor`, `select(role |
-names)`), `runs.py` (`Run`, `Outcome`, `RunOutcome`, `run_job`),
-`hooks.py` (`RunHook`, `LogHook`, a composite that isolates failures,
-and ledger hooks that *wrap the existing writers*: `ingestion.ledger
-.start_run`/`finish_run` for ingest; a no-op for agents until step 2
-because `LedgerSink` still writes their row), `scheduler.py`
-(`build_scheduler(settings, jobs, job_override=…)`), `process.py`
-(`run_process(settings, jobs, stop, shutdown_wait=True)`).
-`ingestion/worker.py` and `agents/scheduler.py` are deleted and their
-tests ported to `tests/unit/harness/` — port, not rewrite: every
-assertion they make today (job ids, interval, `next_run_time` set,
-`max_instances=1`, `coalesce=True`, injected job, spy-scheduler
-lifecycle, database closed, "nothing to schedule" is a warning) is still
-true and still required. `api/app.py` imports the harness builder with
-the `ingest` selection and `shutdown_wait=False`. `cli.py`: `worker` and
-`agents` call `run_process` with their role (plus an optional `--jobs`);
-`ingest`, `backfill`, `observe` and `janitor` call `run_job` with
-`manual`/`backfill` triggers; a new `jobs` subcommand lists the registry
-and gets a `make jobs` target (the Makefile-coverage test will demand
-it). `ui/viewmodels.py::run_observer_now` and the `observe` MCP tool
-call `run_job` with triggers `ui` and `mcp`; the value is carried in
-memory this step and stored from step 2. `.env.example` is unchanged.
+**Changes.**
+
+- New package `candlegraph/harness/`: `jobs.py` (the `Job` registry
+  `JOBS` with `ingest`, `observer`, `janitor`, and `select`), `runs.py`
+  (`Run`, `Outcome`, `RunOutcome`, `run_job`), `hooks.py` (`RunHook`,
+  `LogHook`, `CompositeHook`), `scheduler.py` (`build_scheduler`),
+  `process.py` (`run_process`).
+- Delete `ingestion/worker.py` and `agents/scheduler.py`; move their
+  tests to `tests/unit/harness/` and keep every assertion.
+- `api/app.py` uses the harness builder with only the `ingest` job.
+- CLI: `worker` and `agents` call `run_process` and accept `--jobs`;
+  `ingest`, `backfill`, `observe` and `janitor` call `run_job`; new
+  `jobs` command and `make jobs` target.
+- The UI's "Run observer now" button and the `observe` MCP tool call
+  `run_job` with triggers `ui` and `mcp`.
 
 **Watch for.**
 
-- **Invariant 1.** `harness/jobs.py` must import `run_observer`,
-  `run_janitor` and `run_ingest` lazily inside the job bodies, as both
-  ticks do today. A registry that imports the observer at module load
-  pulls LangGraph into `candlegraph serve`.
-- **The two shutdowns differ on purpose.** The worker waits so an
-  in-flight upsert batch finishes; the API does not, so uvicorn's
-  shutdown is never held by a backfill. Both are tested today; both stay
-  reachable through `run_process`'s argument, with a comment saying why.
-- **`JobContext.params` carries what the ticks passed positionally**:
-  `lookback_days` for a backfill, `open_pr`/`checks`/`shell` for the
-  janitor, `sinks` for either agent. Do not widen the `Job.run`
-  signature to accommodate one job; put it in `params`.
-- **`run_job` never raises, and the CLI still exits non-zero.**
-  `Outcome.FAILED` → exit 1 for `ingest`; the agents keep `--strict`'s
-  rule (exit 1 at WARNING or worse, or on error).
-- **`test_every_analytics_command_has_a_make_target`** excludes services
-  by name; `worker` and `agents` stay excluded, `jobs` is interactive
-  and needs its target.
-- **Do not touch compose or the Dockerfile.** If a change here seems to
-  need one, stop and re-read the two 2026-10-29 post-mortems first.
+- Import job bodies inside the job functions, not at module load, or
+  `candlegraph serve` would load LangGraph (invariant 1).
+- The worker waits for running jobs on shutdown so an upsert batch
+  finishes; the API does not, so uvicorn can stop quickly. Keep both.
+- Job-specific inputs go in `JobContext.params`, not in the `Job.run`
+  signature.
+- `run_job` never raises, but the CLI still exits non-zero on failure.
+- Do not touch compose or the Dockerfile.
 
 **Done when.** `grep -rn BackgroundScheduler candlegraph/` finds one
-file; `make up` comes up identically and `test_compose_stack.py` is
-untouched; `candlegraph jobs` prints three rows with schedule setting,
-role and write surface; the ported tests pass; `make check` is green
-with no new skips; a stack run shows the same ledger rows and log lines
-as before the step.
+file; `make up` behaves as before; `candlegraph jobs` prints three rows;
+the moved tests pass; `make check` is green with no new skips.
 
-**Outcome.** Done 2026-11-12. `candlegraph/harness/` holds `jobs.py`
-(`Job`, `Every`, `JobContext`, `JOBS` with `ingest`/`observer`/`janitor`,
-`select`), `runs.py` (`Run`, `Outcome`, `RunOutcome`, `run_job`, the
-trigger constants), `hooks.py` (`RunHook`, `LogHook`, `CompositeHook`),
-`scheduler.py` (`build_scheduler(settings, jobs, job_override=…)`, the only
-`BackgroundScheduler` in the package) and `process.py`
-(`run_process(…, shutdown_wait=True)`). `ingestion/worker.py` and
-`agents/scheduler.py` are deleted; their tests are ported to
-`tests/unit/harness/` with every assertion kept. `worker`/`agents` take
-`--jobs`; `ingest`, `backfill`, `observe`, `janitor`, the UI button and the
-`observe` MCP tool go through `run_job` with triggers `manual`, `backfill`,
-`ui`, `mcp` (in memory only). `candlegraph jobs` / `make jobs` list three
-rows. `make check` green (11 skips, all e2e); a stack run under a unique
-project showed the same start-up lines, a `scheduled` `ingest_run` row and
-an observer `agent_run` row.
+**Outcome.** Done 2026-11-12. The harness package exists as described;
+the two old modules are deleted and their tests moved. `make check`
+passed (the only skips were the e2e tests), and a stack run showed the
+same start-up lines and ledger rows as before.
 
-Deviations, for step 2 to pick up:
+Two things were left for step 2:
 
-- **No ledger hooks yet, for either job.** The ingest row is still written
-  by `ingestion.runner.run_ingest` (which now accepts the harness's
-  `run_id`, so the row and the `Run` agree), not by a hook wrapping
-  `start_run`/`finish_run`. Moving it would have meant either a second
-  writer or reshaping `run_ingest`, which `ui.viewmodels.run_backfill` and
-  `test_runner.py` call directly; that move belongs with step 2's
-  "ownership of a ledger row", alongside `LedgerSink`.
-- **`on_stage` reaches a job body only when a caller asked for
-  progress.** `test_observe_without_progress_passes_no_hook` pins that the
-  observer gets `None` without `--progress`; step 2 ("stages everywhere")
-  is where the hooks should always receive stages and that test changes.
-- `run_job` imports `agents.shell.redact` for the error string; that
-  module imports nothing heavy, and a test proves the harness import pulls
-  in no job body or LangGraph.
+1. The `ingest_run` row was still written by `ingestion.runner.run_ingest`,
+   not by a hook. `run_ingest` was given the harness's `run_id` so the
+   two agreed.
+2. The stage callback (`on_stage`) was only passed to a job when the
+   caller asked for `--progress`, because a CLI test required it.
 
 ---
 
 ## Step 2 — One shape of a run
 
-**Goal.** An ingest run and an agent run become the same kind of record
-with the same two status axes, readable together; an agent run becomes
-visible while it is running; every run says why it ran; every run has
-stage records.
+**Goal.** Ingest runs and agent runs are recorded the same way:
 
-**Read first.** `docs/harness/runner/DESIGN.md` — "`Run`, and the two
-axes of status", "Where the agent ledger row moves", "Stages everywhere".
-`docs/storage/table-placement/DESIGN.md` (the ledgers are plain and this
-adds columns and a view, no table). The `add-migration` skill, every
-rule. `candlegraph/agents/stages.py` and `observer/graph.py::publish_node`
-for how stage records reach the ledger today. Invariant 11.
+- the ledger row is written when the run starts and updated when it
+  ends, so a run that hangs or is killed is visible as `running`;
+- every row says why it ran (`trigger`) and whether it completed
+  (`outcome`), separately from what an agent found (`status`);
+- both tables can be read together through one view, `run_log`;
+- ingest runs record stages, like agent runs already do.
 
-**Touches.** One migration: `agent_run` gains `trigger TEXT NULL`,
-`outcome TEXT NOT NULL DEFAULT 'succeeded'` (back-filled: rows with
-`status = 'error'` get `failed`), `parent_run_id UUID NULL`, and
-`finished_at` becomes nullable; `ingest_run` gains `parent_run_id UUID
-NULL`; `CREATE VIEW run_log` exactly as the design document gives it.
-The downgrade drops the view and the columns and restores `finished_at
-NOT NULL` with `COALESCE(finished_at, started_at)`. `storage/statements.py`:
-`open_agent_run`, `close_agent_run`, `get_run_log`. `agents/ledger.py`
-becomes the open/close pair the harness hook calls; `agents/reporting.py`'s
-`LedgerSink` becomes a name that is accepted and logged once as
-redundant; `observer/graph.py` and `janitor/graph.py` take the `Run`
-through their deps and stop inserting in `publish`. `agents/stages.py`
-moves to `harness/stages.py` with the old path re-exporting;
-`ingestion/runner.py::ingest_once` is expressed as four `staged` steps
-(`token_metadata`, `token_hours`, `pool_discovery`, `pool_hours`) with
-`hours_by_symbol` as the detail of the second, and `ingest --progress`
-prints them. `cli.py`: `runs --job NAME` and `runs --all` read the view;
-bare `runs` keeps today's ingest output. `mcp/payloads.py`: the
-agent-run payload carries `trigger` and `outcome`. `utils/logging_utils.py`:
-the `run=` filter. `.env.example`: the `ledger` comment. `tests/integration/test_migrations.py`
-or `test_agents.py`: the populated round-trip and the interrupted-run
-test.
+**Read first.** The design document's sections "`Run` and the two kinds
+of status", "Who writes the ledger rows" and "Stages for every job".
+`docs/storage/table-placement/DESIGN.md` (this step adds columns and a
+view, not a table). The `add-migration` skill. Invariant 11.
+
+**Changes.**
+
+- **Migration.** `agent_run` gets `trigger TEXT NULL`, `outcome TEXT NOT
+  NULL DEFAULT 'succeeded'` (existing rows with `status = 'error'` get
+  `failed`) and `parent_run_id UUID NULL`; `finished_at` and `status`
+  become nullable, because a row now exists while the run is in
+  progress. `ingest_run` gets `parent_run_id UUID NULL`. New view
+  `run_log`. The downgrade drops the view and the columns, closes any
+  unfinished agent row as `error` (`finished_at = started_at`), and
+  restores `NOT NULL`.
+- **Ledger hooks.** `harness/hooks.py` gets `IngestLedgerHook` and
+  `AgentLedgerHook`. They open the row in `started` and close it in
+  `finished`. `run_ingest` and the `ledger` report sink no longer write
+  rows themselves.
+- **Ingest stages.** `ingest_once` records four stages:
+  `token_metadata`, `token_hours`, `pool_discovery`, `pool_hours`.
+  `candlegraph ingest --progress` prints them.
+- **Stages always reach the hooks.** `run_job` always passes a stage
+  callback to the job (step 1's second leftover).
+- **Readers.** `candlegraph runs --job NAME` and `runs --all` read
+  `run_log`; plain `runs` still prints ingest runs. The agent-run MCP
+  payload includes `trigger` and `outcome`. Existing readers of
+  `agent_run` only see finished rows, so they see what they saw before.
+- **Logging.** Every log line written during a run ends with
+  `run=<first 8 characters of run_id>`.
 
 **Watch for.**
 
-- **Pre-migration rows do not get a guessed trigger.** `trigger` is
-  `NULL` for every row written before this step. Invariant 11 is about
-  market data, but the reason behind it — a fabricated value is
-  indistinguishable from a real one later — applies to a ledger just as
-  well.
-- **The view pins a column list.** Step 3's migration will have to
-  `DROP VIEW` and recreate it with a third branch. Say so in a comment
-  on the view's DDL, so the next migration author is not surprised.
-- **`status` keeps its meaning on both tables.** Readers of
-  `agent_run.status` (the dashboard, `make agent-runs`, three MCP tools,
-  the e2e suite) must see exactly what they see today. `outcome` is the
-  new column; `status` is not reinterpreted.
-- **The interrupted-run test is the point of the step.** Drive the
-  observer graph with a `FakeDatabase` whose `collect_quality` raises
-  something `run_observer`'s own handler does not catch is *not* the
-  case — `run_observer` catches everything and publishes an error report,
-  so the row closes as `failed`. The `running` row survives only an
-  interruption *of the process*; prove it in the integration tier by
-  opening a run, not closing it, and asserting `run_log` shows it, and
-  prove in the unit tier that `open` precedes the first node and `close`
-  follows the last.
-- **`AgentReport.error` maps to `outcome = failed` and `verdict = NULL`.**
-  Not to `verdict = error`: that is the conflation the step exists to
-  remove.
-- **Round-trip the migration on populated tables**, both of them, with
-  at least one `error`-status agent row and one `running` ingest row, so
-  the back-fill and the `COALESCE` are exercised.
-- **Cut line** (see the sizing warning above): the migration, the view,
-  `runs --job`, the stages and the log filter land; the ownership move
-  may wait for step 3's session. If it does, say so in the Outcome and
-  leave `LedgerSink` writing single-phase rows with `outcome` derived
-  from `report.error`.
+- Rows written before this migration get `trigger = NULL`. Do not guess
+  a value.
+- The view lists its columns explicitly. Step 3 will have to drop and
+  recreate it; the migration says so in a comment.
+- `agent_run.status` and `ingest_run.status` keep their meaning for every
+  reader. New meaning goes in new columns.
+- A crashed agent graph is `outcome = failed` with no verdict, not a
+  verdict of `error`. (`status` stays `error` on that row, as before.)
+- Test the migration round trip on tables that have rows, including an
+  `error` agent row and a `running` ingest row.
 
-**Done when.** `make runs ARGS='--job observer'` lists observer runs
-with `trigger` and `outcome`; an observer run started from the UI button
-shows `trigger = ui`; `candlegraph ingest --progress` prints four stage
-lines in the same format as `observe --progress`, and the Agents
-dashboard's stage strip renders for an ingest run; a run opened and
-never closed is visible in `run_log` as `running`; the migration
-round-trips on populated tables; `make check` is green with no new
-skips.
+**Done when.** `make runs ARGS='--job observer'` lists observer runs with
+`trigger` and `outcome`; an observer run started from the UI shows
+`trigger = ui`; `candlegraph ingest --progress` prints four stage lines
+in the same format as `observe --progress`; a run opened and never closed
+shows in `run_log` as `running`; the migration round-trips on populated
+tables; `make check` is green with no new skips.
 
-**Outcome.** _Not started._
+**Outcome.** Done 2026-11-13, including both items left over from step 1.
+
+- Migration `be8aa030e200`: the columns and the view as planned.
+  `agent_run.status` also became nullable (it is `NULL` while a run is in
+  progress). The downgrade closes unfinished agent rows as `error` rather
+  than deleting them.
+- `IngestLedgerHook` and `AgentLedgerHook` write every ledger row.
+  `run_ingest` is now a thin wrapper around `run_job` that re-raises when
+  the run could not start, so its existing callers and tests behave as
+  before. `LedgerSink.post` does nothing.
+- **One change from the design's first draft:** an agent row is written
+  only when the run's sinks include `ledger` (from `--sinks`, or
+  `AGENT_REPORT_SINKS` when none are passed). The janitor in GitHub
+  Actions has no database and runs with `log,file`; this keeps it from
+  trying to connect. The design document records the reason.
+- `close_agent_run` is an upsert, so a failed open still ends with a row.
+- `StageRecord` moved to `harness/stages.py` (old path re-exports it), with
+  a new `timed_stage` helper. `ingest_once` records four stages, and
+  `ingest`/`backfill --progress` print them.
+- `runs --job NAME` and `runs --all` read `run_log`; `make runs` accepts
+  `ARGS`. The `agent_runs` MCP tool returns `trigger` and `outcome`.
+  `get_recent_agent_runs` returns finished rows only.
+- Log lines written during a run end with `run=<8 chars>`.
+- The observer job also accepts `registry` and `now` in its params (used
+  by the integration test, which now runs the observer through `run_job`).
+- Tests: new `tests/unit/harness/test_ledger_hooks.py`; stage tests in
+  `test_runner.py`; CLI tests for `runs --job/--all` and `--progress`;
+  integration tests for `run_log`, a never-closed run, and the migration
+  round trip on populated ledgers. Tests that expected the graphs or the
+  sink to insert `agent_run` were changed to expect the harness's open and
+  close instead.
+- `make check`: 1667 passed, 11 skipped (the e2e tests, which pass against
+  a running stack: 11/11). On a real stack: `runs --job observer` shows
+  `trigger` and `outcome`, a UI-started run shows `trigger = ui`, a row
+  from before the migration shows trigger `-`, and worker log lines carry
+  the same `run=` id as the ledger row.
+
+**Not done in this step:** the Agents dashboard does not yet show an
+ingest run's stage strip (the data is in `ingest_run.detail.stages`; the
+page only reads `agent_run`). That is UI work for step 4 or the dashboard
+split.
 
 ---
 
-## Step 3 — The third job, and the generic `run` table
+## Step 3 — A third job and the generic `run` table
 
-**Goal.** Register a job that is neither ingestion nor an agent — the
-daily news fetch — using nothing but the registry, and give jobs without
-a ledger of their own the generic `run` table the design reserves for
-them. Disabled by default; no stack spends a credit because of this
-step.
+**Goal.** Register the daily news fetch as a job using only the
+registry, and add a generic `run` table for jobs that have no ledger of
+their own. Disabled by default, so no stack spends search credits
+because of this step.
 
-**Read first.** `docs/knowledge/tavily/DESIGN.md` — the `(asset, UTC
-day)` cache and the budget guard are what make a scheduled fetch safe to
-restart; `docs/knowledge/sources/DESIGN.md` §"Adoption order" (the RSS
-source is next and will be the second such job);
-`docs/storage/table-placement/DESIGN.md` — the `run` table's placement
-is recorded there as plain, *before* this migration is written.
+**Read first.** `docs/knowledge/tavily/DESIGN.md` (the per-asset, per-day
+cache and the budget guard make a scheduled fetch safe to repeat);
+`docs/knowledge/sources/DESIGN.md` §"Adoption order";
+`docs/storage/table-placement/DESIGN.md` (record the `run` table as a
+plain table before writing the migration).
 
-**Touches.** `harness/jobs.py`: `fetch_news` with role `agents`, writes
-`{knowledge, ledger}`, schedule from `FETCH_NEWS_INTERVAL` (default `0`).
-`knowledge/news.py::run_news_fetch` returns a `RunOutcome` whose counts
-are `searched`, `cached`, `refused`, `errored`, `documents_stored`, and
-whose outcome is `partial` on a per-token error, `failed` on a rate-limit
-halt, `succeeded` otherwise — a refusal is the guard working and is
-never a failure. One migration: `run` (plain; `run_id`, `job`, `trigger`,
-`outcome`, `started_at`, `finished_at`, `duration_seconds`, `counts
-JSONB`, `errors JSONB`, `detail JSONB`, `parent_run_id`), the view
-dropped and recreated with its third branch, `test_the_ledger_and_state
-_tables_are_not_hypertables` extended. `cli.py knowledge fetch-news`
-runs through `run_job`. `settings.py` and `.env.example`: the new
-interval with a comment that names the budget. `README.md` commands
-table. Compose: nothing.
+**Changes.**
+
+- `harness/jobs.py`: a `fetch_news` job, role `agents`, writes
+  `{knowledge, ledger}`, interval `FETCH_NEWS_INTERVAL` (default `0`).
+- `knowledge/news.py::run_news_fetch` returns a `RunOutcome` with counts
+  `searched`, `cached`, `refused`, `errored`, `documents_stored`.
+  Outcome: `partial` if a token failed, `failed` if rate-limited,
+  otherwise `succeeded`. A budget refusal is the guard working, not a
+  failure.
+- Migration: the `run` table (plain), and `run_log` recreated with a
+  third branch; extend `test_the_ledger_and_state_tables_are_not_hypertables`.
+- `candlegraph knowledge fetch-news` runs through `run_job`.
+- `settings.py` and `.env.example`: the new interval, with a comment
+  about the budget. README commands table.
 
 **Watch for.**
 
-- **First firing is immediate, and the container restarts.** Every
-  restart of the `agents` service would run the fetch at once; the
-  `(asset, day)` cache makes the second run of a day free, so this is
-  bounded by design, but say so in the setting's comment rather than
-  relying on a reader knowing it.
-- **`Every(86400)` is enough.** The cache key is the UTC day, so the
-  time of day does not matter; do not add a `Daily(at=…)` schedule type
-  for a job that does not need it.
-- **`writes` must not claim `market_data`**, and the registry test must
-  fail if it ever does.
-- **`fill` is not registered here**, deliberately: its cache is
-  recomputed on demand and nothing has shown it needs a clock. Record
-  the omission in the Outcome so the next reader does not take it for
-  an oversight.
+- The first firing is immediate and the container may restart, so a
+  restart runs the fetch again. The daily cache makes the second run
+  free; say so in the setting's comment.
+- `Every(86400)` is enough; do not add a time-of-day schedule.
+- `writes` must not include `market_data`; the registry test enforces it.
+- `fill` is not scheduled here on purpose. Say so in the Outcome.
 
-**Done when.** `candlegraph jobs` lists four jobs; a stack with
-`FETCH_NEWS_INTERVAL=86400` on the `agents` service produces one
-`run_log` row per UTC day with counts; a budget refusal is a `succeeded`
-run with `refused` in its counts; `make fetch-news` still works by hand
-and records a `manual` run; the budget guard's tests are unchanged;
-`make check` is green with no new skips.
+**Done when.** `candlegraph jobs` lists four jobs; with
+`FETCH_NEWS_INTERVAL=86400` the stack writes one `run_log` row per UTC
+day; a budget refusal is a `succeeded` run with `refused` counted;
+`make fetch-news` still works and records a `manual` run; `make check`
+is green.
 
-**Outcome.** _Not started._
+**Outcome.** Not started.
 
 ---
 
 ## Step 4 — Closeout
 
-**Goal.** Make every document, invariant and skill tell the truth about
-what steps 1–3 built, then archive this plan.
+**Goal.** Make every document, invariant and skill match what steps 1–3
+built, then archive this file.
 
-**Touches.** `AGENTS.md`: invariant 27 ("Every run is a `Run`", worded as
-in the design document), the `harness/` entry in the layout, `make jobs`
-and `make runs ARGS=` in the commands table, the "In progress" paragraph,
-`run_log` in the data model as a view. `README.md`: "How it works" (one
-runner, three processes), the commands table, the Agents section's
-ledger sentence. `docs/README.md`: this design's Status to `implemented`
-and the rollout row. `docs/harness/runner/DESIGN.md`: Status
-`implemented` with **what was not built named** — in particular whether
-the agent rows are two-phase, and whether step 3 landed.
-`docs/roadmap/DESIGN.md` §2: the pre-work paragraph updated. Skills:
-`add-agent` step 4 (register in `harness/jobs.py`, not
-`agents/scheduler.py`), `run-agents` (`make runs ARGS='--job observer'`,
-the `ledger` sink note), `run-stack` (what `make jobs` shows). Then this
-file moves to `docs/rollout/archive/2026-11-11-harness-prework.md`
-and a new `ROLLOUT.md` says what is current: nothing, with the four
-oversized pages recommended as the next small item and stage 2 proper as
-the next stage, opened by writing `docs/harness/pipelines/DESIGN.md`
-before any code.
+**Changes.**
 
-**Done when.** The `release-check` skill runs clean against a real
-stack; every Status line under `docs/` is true; `git grep
-agents/scheduler.py` finds nothing outside the archive.
+- `AGENTS.md`: invariant 27 (wording in the design document), the
+  harness layout entry, `make jobs` and `make runs ARGS=` in the
+  commands table, the "In progress" paragraph, `run_log` in the data
+  model.
+- `README.md`: "How it works", the commands table, the Agents section.
+- `docs/README.md` and `docs/harness/runner/DESIGN.md`: Status
+  `implemented`, naming anything that was not built.
+- `docs/roadmap/DESIGN.md` §2: the pre-work paragraph.
+- Skills: `add-agent`, `run-agents`, `run-stack`.
+- Move this file to `docs/rollout/archive/2026-11-11-harness-prework.md`
+  and write a new `ROLLOUT.md` saying there is no current rollout. Next
+  recommended: split the four large dashboard pages, then stage 2,
+  starting with `docs/harness/pipelines/DESIGN.md`.
 
-**Outcome.** _Not started._
+**Done when.** `release-check` passes against a real stack; every Status
+line under `docs/` is true; `git grep agents/scheduler.py` finds nothing
+outside the archive.
+
+**Outcome.** Not started.
 
 ---
 
-## Standing rules for every step
+## Rules for every step
 
-- `make check` green before a step is called done; integration skips are
-  not green (check for them). Where a step changes a schema, the
-  round-trip test runs on *populated* tables.
-- **Compose, the Dockerfile and `entrypoint.sh` are not touched** in
-  this rollout. The two 2026-10-29 post-mortems are the reason; a step
-  that seems to need a compose change has misunderstood the design.
-- **No new dependency.** APScheduler, LangGraph and psycopg2 are what
-  there is; `opentelemetry-api` stays unused until stage 2.
-- **No setting is renamed.** The registry maps jobs to the names that
-  exist.
-- `agent_run.status` and `ingest_run.status` keep their current meanings
-  for every reader; new meaning goes in new columns.
-- The job bodies — `ingest_once`, the observer graph, the janitor graph —
-  are not the subject of this work. A step that finds itself editing
-  `assess.py` or `runner.py`'s cursor logic has drifted.
-- Several tests exist to pin a past bug and say so in their docstring. A
-  ported test keeps its docstring.
-- Update the progress table above at the end of each session, including
-  "partial" with a note, so the next session starts from the truth.
+- `make check` green before a step is done. Integration-test skips do
+  not count as green. Schema changes are round-tripped on tables with
+  rows.
+- Do not change compose, the Dockerfile or `entrypoint.sh`. See the two
+  2026-10-29 post-mortems.
+- No new dependencies.
+- No settings are renamed.
+- `agent_run.status` and `ingest_run.status` keep their current meaning.
+- The job bodies (`ingest_once`'s cursor logic, the observer and janitor
+  graphs, `assess.py`) are not what this work is about. If a step is
+  editing them, it has drifted.
+- A test that pins a past bug keeps its docstring when it is moved.
+- Update the progress table at the end of every session, including
+  "partial" with a note.

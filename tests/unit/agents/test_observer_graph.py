@@ -119,7 +119,9 @@ def test_a_healthy_stack_produces_an_ok_report_and_records_it(registry: TokenReg
         "embedding_backlog",
         "uncited_explanations",
     }
-    assert db.executed[0][0] == "insert_agent_run"
+    # The graph writes no ledger row itself since harness step 2; the harness
+    # does (tests/unit/harness/test_ledger_hooks.py).
+    assert not [label for label, _ in db.executed if "agent_run" in label]
     assert "## Coverage" in report.markdown and "## Drift" in report.markdown
     assert report.detail["symbols_judged"] == 2
 
@@ -158,9 +160,22 @@ def test_every_stage_is_recorded_in_order_and_reaches_the_report_and_the_ledger(
     assert stages[4]["detail"]["findings"] == len(report.findings)
     assert stages[5]["detail"]["sinks"] == ["ledger"]
     assert "## Stages" in report.markdown and "| collect_metrics | ok |" in report.markdown
-    # And the ledger row carries them, which is what the UI's stage strip reads.
-    (_, params) = db.executed[0]
-    assert params is not None and '"stages"' in params["detail"]
+    # And the ledger row the harness closes carries them, which is what the
+    # UI's stage strip reads.
+    from candlegraph.agents.ledger import close_agent_run
+
+    close_agent_run(
+        db,
+        run_id=report.run_id,
+        agent="observer",
+        trigger="manual",
+        outcome="succeeded",
+        started_at=report.started_at,
+        finished_at=report.finished_at,
+        report=report,
+    )
+    (label, params) = db.executed[-1]
+    assert label == "close_agent_run" and params is not None and '"stages"' in params["detail"]
 
 
 def test_a_down_database_marks_the_stages_it_skipped(registry: TokenRegistry) -> None:
@@ -242,7 +257,7 @@ def test_a_crashing_graph_still_posts_an_error_report(
 
     assert report.error == "RuntimeError: bad wiring"
     assert report.status_label == "error"
-    assert db.executed[0][1]["status"] == "error"  # type: ignore[index]
+    assert not [label for label, _ in db.executed if "agent_run" in label]
 
 
 def test_thresholds_come_from_settings() -> None:

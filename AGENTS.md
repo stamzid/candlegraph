@@ -28,13 +28,13 @@ a target, and never let CI run something that is not one either.
 | Coverage report | `make cov` |
 | Run the stack | `make up`, then `make logs` / `make logs-worker`, `make down` |
 | Start over from a bad volume | `make reset` (drops the volume and this project's image, then `make up`) |
-| One ingest pass | `make ingest` |
+| One ingest pass | `make ingest` (`candlegraph ingest [--progress]` prints the four stages) |
 | Backfill 90 days | `make backfill days=90` |
 | Data-quality report | `make report` (`candlegraph report [--json]`) |
 | Recompute the gap-estimate cache | `make fill` (`candlegraph fill [SYMBOLS] [--method linear\|causal\|bridge] [--all-methods] [--days N] [--max-fill N] [--clear]`) |
 | What the fill cache holds | `make fill-status` (`candlegraph fill --status`) |
 | Score the estimators against held-out real hours | `make fill-evaluate` (`candlegraph fill --evaluate [--gap-hours N]`) |
-| Recent ingest runs | `make runs` |
+| Recent ingest runs; every job, or one job, from `run_log` | `make runs`, `make runs ARGS='--all'`, `make runs ARGS='--job observer'` |
 | The registered jobs: schedule, process role, write surface | `make jobs` (`candlegraph jobs`) |
 | The API locally, beside a running stack (8000 is usually the stack's) | `make serve ARGS='--port auto'` (`candlegraph serve [--host H] [--port N\|auto]`; a busy port is refused with free suggestions) |
 | Sync assets and aliases from `tokens.yaml` | `make sync-assets` (in the stack) or `candlegraph knowledge sync-assets` |
@@ -140,19 +140,20 @@ candlegraph/
     sources/
       base.py          Source Protocol: search(query, window) -> RawDocuments. Never writes, never decides.
       tavily.py        The metered client: bounded news search, backoff on 5xx, 429/432 never retried.
-  harness/             The runner (rollout step 1): one way to schedule and run a job.
+  harness/             The runner (rollout steps 1–2): one way to schedule, run and record a job.
     jobs.py            Job, JobContext, the JOBS registry (ingest, observer, janitor), select(role | names).
     runs.py            Run, Outcome, RunOutcome, run_job — every run passes through it; never raises.
-    hooks.py           RunHook and its fan-out; a failing hook is logged, never raised.
+    hooks.py           RunHook, the log hook and the two ledger hooks that write every ingest_run/agent_run row.
+    stages.py          StageRecord, staged() for graph nodes, timed_stage() for plain code. agents/stages.py re-exports it.
     scheduler.py       The one BackgroundScheduler builder: immediate first firing, max_instances=1, coalesce.
     process.py         run_process: signals, start, shutdown(wait), close db. `worker` and `agents` are selections.
   agents/              LangGraph graphs. Readers and reporters; never writers of market data.
     base.py            Severity, Finding, AgentReport: the vocabulary every graph speaks.
     shell.py           Subprocess runner behind a Protocol, plus secret redaction.
     narrator.py        Findings -> summary paragraph. Template by default; Claude when configured.
-    stages.py          StageRecord per node: duration and what it read; the Stages report section, `--progress`, the UI strip.
+    stages.py          Moved to harness/stages.py; this path re-exports it.
     reporting.py       Markdown rendering and the sinks: log, ledger, file, webhook, github.
-    ledger.py          The agent_run table.
+    ledger.py          The agent_run table: open_agent_run / close_agent_run, called by the harness.
     observer/          Stale data, gaps on liquid tokens, metric drift. assess.py is pure.
     janitor/           Run the checks, apply mechanical fixes, re-check, draft a PR.
   utils/
@@ -185,7 +186,8 @@ schema.graphql       Generated. `make sdl`; a test fails if it is stale.
 | `ingest_run` | one row per ingest run | `run_id` | plain |
 | `signal` | one row per strategy, symbol and bar | `(strategy, symbol, period_start_unix)` | **hypertable** |
 | `token_hours_fill` | one row per **missing** token-hour, per estimator | `(token_id, period_start_unix, method)` | plain — a cache, and the one table that is deleted from |
-| `agent_run` | one row per agent graph run | `run_id` | plain |
+| `agent_run` | one row per agent graph run; written when it starts (`outcome = running`) and when it ends | `run_id` | plain |
+| `run_log` | a **view** over `ingest_run` and `agent_run` with the same columns: `job`, `trigger`, `outcome`, `verdict` | — | view |
 | `asset` | one row per knowledge entity (token addresses today) | `id` | plain |
 | `source` | one row per document source (`tavily`, `rss:<feed>`, `manual`) | `id` | plain |
 | `document` | one row per retrieved document | `url_hash` (unique; sha256 of the normalised URL) | plain |
@@ -371,7 +373,7 @@ unfalsifiable.
 worker, the agents process and the API's in-process ingest — a `Job`
 registry, one `run_job`, one scheduler builder, one shape of a run across
 `ingest_run` and `agent_run`. Design in `docs/harness/runner/DESIGN.md`
-(proposed); the step-by-step plan is `docs/rollout/ROLLOUT.md`. It is
+(steps 1 and 2 built); the step-by-step plan is `docs/rollout/ROLLOUT.md`. It is
 the first third of stage 2, done first because it is the only piece that
 gets harder once the harness lands on top of it.
 

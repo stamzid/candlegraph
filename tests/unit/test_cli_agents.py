@@ -72,17 +72,23 @@ def test_observe_progress_prints_each_stage_to_stderr_and_leaves_stdout_to_the_r
     assert "collect_ledger" not in out, "stdout stays machine-readable"
 
 
-def test_observe_without_progress_passes_no_hook(
-    cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch
+def test_observe_without_progress_prints_no_stages(
+    cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    captured: dict[str, Any] = {}
-    monkeypatch.setattr(
-        "candlegraph.agents.observer.run_observer", lambda s, **k: captured.update(k) or report("observer")
-    )
+    """Since harness step 2 the graph always gets a stage callback (the hooks
+    record every stage); without --progress nothing may reach the terminal."""
+    from candlegraph.agents.stages import StageRecord
 
-    main(["observe"])
+    def fake(settings: Any, **kwargs: Any) -> AgentReport:
+        kwargs["on_stage"](StageRecord("collect_ledger", "ok", NOW, 0.05, {"runs": 39}))
+        return report("observer")
 
-    assert captured["on_stage"] is None
+    monkeypatch.setattr("candlegraph.agents.observer.run_observer", fake)
+
+    main(["observe", "--json"])
+
+    out, err = capsys.readouterr()
+    assert "collect_ledger" not in out and "collect_ledger" not in err
 
 
 def test_observe_strict_exits_one_at_warning_and_two_on_error(

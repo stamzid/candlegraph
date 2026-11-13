@@ -195,8 +195,8 @@ jobs: ## List the registered jobs (harness): schedule setting, process role, wri
 serve: ## Run the API locally, outside compose: make serve ARGS='--port auto' (8000 is usually the stack's)
 	$(UV) run python -m candlegraph serve $(ARGS)
 
-runs: ## Show recent ingest runs from the ledger
-	$(COMPOSE) exec worker python -m candlegraph runs
+runs: ## Recent ingest runs; every job with ARGS='--all', one job with ARGS='--job observer'
+	$(COMPOSE) exec worker python -m candlegraph runs $(ARGS)
 
 observe: ## Run the run-observer agent once inside the stack, printing each stage as it finishes, then the report
 	$(COMPOSE) exec agents python -m candlegraph observe --progress $(ARGS)

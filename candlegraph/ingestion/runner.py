@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from candlegraph.harness.stages import StageHook, StageRecord, timed_stage
 from candlegraph.ingestion import ledger
 from candlegraph.ingestion.subgraph import SubgraphClient, SubgraphError
 from candlegraph.ingestion.transform import (
@@ -24,6 +25,10 @@ from candlegraph.settings import Settings
 from candlegraph.storage import DatabaseManager
 from candlegraph.tokens import TokenRegistry
 from candlegraph.utils.logging_utils import service_logger
+
+if TYPE_CHECKING:
+    from candlegraph.harness.jobs import JobContext
+    from candlegraph.harness.runs import RunOutcome
 
 # Errors a single target can fail with without taking the run down.
 TARGET_ERRORS = (SubgraphError, RowFormatError)
@@ -41,6 +46,7 @@ class IngestResult:
     pool_hours_by_pool: dict[str, int] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)
     run_id: str | None = None
+    stages: list[StageRecord] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -212,13 +218,20 @@ def ingest_once(
     settings: Settings,
     now: datetime | None = None,
     lookback_days: int | None = None,
+    on_stage: StageHook | None = None,
 ) -> IngestResult:
     """Run one full ingest pass over every configured token and tracked pool.
+
+    The pass has four stages — ``token_metadata``, ``token_hours``,
+    ``pool_discovery``, ``pool_hours`` — each recorded as a
+    :class:`StageRecord` in ``result.stages`` and passed to ``on_stage``.
+    With pools off, the two pool stages are recorded as ``skipped``.
 
     Args:
         lookback_days: Overrides ``settings.lookback_days`` for this run, which
             is how ``candlegraph backfill --days`` reaches further back without
             changing the deployment's configuration.
+        on_stage: Called after each stage (``ingest --progress``).
     """
     result = IngestResult()
     # An explicit window is a backfill request, which is the only case where
@@ -226,29 +239,44 @@ def ingest_once(
     reach_back = lookback_days is not None
     window = lookback_days if lookback_days is not None else settings.lookback_days
 
-    try:
-        result.tokens_written = ingest_token_metadata(db, client, registry, now)
-    except TARGET_ERRORS as exc:
-        service_logger.error("Token metadata refresh failed: %s", exc)
-        result.errors["__metadata__"] = str(exc)
-
-    cursors = resolve_cursors(db, registry, window, now, reach_back)
-    # The active ones only, and the same set `resolve_cursors` built from:
-    # iterating the whole registry here would look up a cursor that was
-    # never created for a token nobody is polling.
-    for token in registry.active:
+    with timed_stage("token_metadata", on_stage, result.stages) as detail:
         try:
-            written = ingest_token_hours(db, client, registry, token.address, cursors[token.address])
+            result.tokens_written = ingest_token_metadata(db, client, registry, now)
         except TARGET_ERRORS as exc:
-            service_logger.error("Ingest failed for %s: %s", token.symbol, exc)
-            result.errors[token.symbol] = str(exc)
-            continue
-        result.hours_by_symbol[token.symbol] = written
-        result.hours_written += written
-        service_logger.info("Ingested %d hourly rows for %s", written, token.symbol)
+            service_logger.error("Token metadata refresh failed: %s", exc)
+            result.errors["__metadata__"] = str(exc)
+            detail["errors"] = 1
+        detail["tokens"] = result.tokens_written
+
+    with timed_stage("token_hours", on_stage, result.stages) as detail:
+        cursors = resolve_cursors(db, registry, window, now, reach_back)
+        failed = 0
+        # The active ones only, and the same set `resolve_cursors` built from:
+        # iterating the whole registry here would look up a cursor that was
+        # never created for a token nobody is polling.
+        for token in registry.active:
+            try:
+                written = ingest_token_hours(db, client, registry, token.address, cursors[token.address])
+            except TARGET_ERRORS as exc:
+                service_logger.error("Ingest failed for %s: %s", token.symbol, exc)
+                result.errors[token.symbol] = str(exc)
+                failed += 1
+                continue
+            result.hours_by_symbol[token.symbol] = written
+            result.hours_written += written
+            service_logger.info("Ingested %d hourly rows for %s", written, token.symbol)
+        detail.update(rows=result.hours_written, **{"by_symbol": dict(result.hours_by_symbol)})
+        if failed:
+            detail["errors"] = failed
 
     if settings.ingest_pools:
-        _ingest_pools(db, client, registry, settings, result, window, now, reach_back)
+        _ingest_pools(db, client, registry, settings, result, window, now, reach_back, on_stage)
+    else:
+        for name in ("pool_discovery", "pool_hours"):
+            record = StageRecord(name, "skipped", None, None, {"reason": "INGEST_POOLS is off"})
+            result.stages.append(record)
+            if on_stage is not None:
+                on_stage(record)
 
     # Nothing is ever deleted. Stored history is the input to the analytics and
     # backtesting phases, so a poll must only ever add to it.
@@ -272,31 +300,77 @@ def _ingest_pools(
     window: int,
     now: datetime | None,
     reach_back: bool = False,
+    on_stage: StageHook | None = None,
 ) -> None:
     """Discover pools, then ingest each one's hourly rows into ``result``."""
-    if settings.pools_per_token:
-        try:
-            result.pools_written = discover_pools(db, client, registry, settings.pools_per_token, now)
-        except TARGET_ERRORS as exc:
-            service_logger.error("Pool discovery failed: %s", exc)
-            result.errors["__pools__"] = str(exc)
+    with timed_stage("pool_discovery", on_stage, result.stages) as detail:
+        if settings.pools_per_token:
+            try:
+                result.pools_written = discover_pools(db, client, registry, settings.pools_per_token, now)
+            except TARGET_ERRORS as exc:
+                service_logger.error("Pool discovery failed: %s", exc)
+                result.errors["__pools__"] = str(exc)
+                detail["errors"] = 1
+        detail["pools"] = result.pools_written
 
-    pool_ids = tracked_pool_ids(db, registry)
-    if not pool_ids:
-        return
+    with timed_stage("pool_hours", on_stage, result.stages) as detail:
+        pool_ids = tracked_pool_ids(db, registry)
+        detail["pools"] = len(pool_ids)
+        if not pool_ids:
+            detail["rows"] = 0
+            return
 
-    pool_cursors = resolve_pool_cursors(db, pool_ids, window, now, reach_back)
-    for pool_id in pool_ids:
-        try:
-            written = ingest_pool_hours(db, client, pool_id, pool_cursors[pool_id])
-        except TARGET_ERRORS as exc:
-            service_logger.error("Ingest failed for pool %s: %s", pool_id, exc)
-            result.errors[f"pool:{pool_id}"] = str(exc)
-            continue
-        result.pool_hours_by_pool[pool_id] = written
-        result.pool_hours_written += written
+        failed = 0
+        pool_cursors = resolve_pool_cursors(db, pool_ids, window, now, reach_back)
+        for pool_id in pool_ids:
+            try:
+                written = ingest_pool_hours(db, client, pool_id, pool_cursors[pool_id])
+            except TARGET_ERRORS as exc:
+                service_logger.error("Ingest failed for pool %s: %s", pool_id, exc)
+                result.errors[f"pool:{pool_id}"] = str(exc)
+                failed += 1
+                continue
+            result.pool_hours_by_pool[pool_id] = written
+            result.pool_hours_written += written
+        detail["rows"] = result.pool_hours_written
+        if failed:
+            detail["errors"] = failed
 
-    service_logger.info("Ingested %d hourly rows across %d pools", result.pool_hours_written, len(pool_ids))
+        service_logger.info(
+            "Ingested %d hourly rows across %d pools", result.pool_hours_written, len(pool_ids)
+        )
+
+
+def ingest_job_body(ctx: JobContext) -> RunOutcome:
+    """The ``ingest`` job: build a subgraph client and run one pass.
+
+    The ``ingest_run`` row is written by the harness's ``IngestLedgerHook``,
+    not here. ``ctx.params`` may carry ``lookback_days`` (a backfill),
+    ``registry`` and ``now`` (both for tests and direct callers).
+    """
+    from candlegraph.harness.runs import Outcome, RunOutcome
+    from candlegraph.tokens import get_token_registry
+
+    registry = ctx.params.get("registry") or get_token_registry()
+    with SubgraphClient(ctx.settings) as client:
+        result = ingest_once(
+            ctx.db,
+            client,
+            registry,
+            ctx.settings,
+            ctx.params.get("now"),
+            ctx.params.get("lookback_days"),
+            on_stage=ctx.on_stage,
+        )
+    result.run_id = ctx.run.run_id
+    status = ledger.status_for(result.errors, result.rows_written > 0)
+    return RunOutcome(
+        outcome=Outcome(status),
+        counts=result.counts(),
+        errors=dict(result.errors),
+        detail={"hours_by_symbol": result.hours_by_symbol, "pool_hours_by_pool": result.pool_hours_by_pool},
+        payload=result,
+    )
 
 
 def run_ingest(
@@ -306,37 +380,31 @@ def run_ingest(
     now: datetime | None = None,
     trigger: str = ledger.SCHEDULED,
     lookback_days: int | None = None,
-    run_id: str | None = None,
+    parent_run_id: str | None = None,
+    on_stage: StageHook | None = None,
 ) -> IngestResult:
-    """Build a subgraph client, ingest with it, and record the run in the ledger.
+    """One ingest run through the harness, for callers that want the result or the exception.
 
-    ``run_id`` comes from the harness (``harness.jobs``) so the ledger row
-    carries the same id as the ``Run``; omitted, the ledger mints one.
+    Records the run in ``ingest_run`` (via the harness's ledger hook). Unlike
+    :func:`candlegraph.harness.run_job`, this re-raises when the run could not
+    start at all (bad configuration, no endpoint), after the row is closed as
+    ``failed`` — the behaviour callers had before the harness existed.
     """
-    window = lookback_days if lookback_days is not None else settings.lookback_days
-    record = ledger.start_run(db, trigger=trigger, lookback_days=window, now=now, run_id=run_id)
+    from candlegraph.harness import JOBS, run_job
 
-    detail: dict[str, Any] = {}
-    try:
-        with SubgraphClient(settings) as client:
-            result = ingest_once(db, client, registry, settings, now, lookback_days)
-    except Exception as exc:
-        # The run died outright (bad config, no endpoint). Record that, then
-        # let the caller's handler deal with it.
-        ledger.finish_run(
-            db, record, ledger.FAILED, {}, {"__run__": str(exc)}, {"exception": type(exc).__name__}
-        )
-        raise
-
-    result.run_id = record.run_id
-    detail["hours_by_symbol"] = result.hours_by_symbol
-    detail["pool_hours_by_pool"] = result.pool_hours_by_pool
-    ledger.finish_run(
-        db,
-        record,
-        ledger.status_for(result.errors, result.rows_written > 0),
-        result.counts(),
-        result.errors,
-        detail,
+    params: dict[str, Any] = {"registry": registry, "now": now, "lookback_days": lookback_days}
+    clock = (lambda: now) if now is not None else None
+    run = run_job(
+        JOBS["ingest"],
+        settings,
+        trigger=trigger,
+        params=params,
+        parent_run_id=parent_run_id,
+        db=db,
+        clock=clock,
+        on_stage=on_stage,
     )
+    if run.exception is not None:
+        raise run.exception
+    result: IngestResult = run.payload
     return result

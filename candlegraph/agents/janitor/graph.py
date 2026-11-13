@@ -142,6 +142,7 @@ def run_janitor(
     now: datetime | None = None,
     narrator: Narrator | None = None,
     sinks: list[Sink] | None = None,
+    run_id: str | None = None,
 ) -> AgentReport:
     """One janitor run, posted to the sinks. Never raises for a failing graph.
 
@@ -168,7 +169,7 @@ def run_janitor(
         base_branch=settings.janitor_base_branch,
         narrator=narrator,
         sinks=sinks,
-        run_id=new_run_id(),
+        run_id=run_id or new_run_id(),
         started_at=started,
         now=now or started,
     )

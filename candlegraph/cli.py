@@ -63,10 +63,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     worker = sub.add_parser("worker", help="run the ingest worker loop")
     _add_jobs(worker, "worker")
-    sub.add_parser("ingest", help="run one ingest pass and exit")
-
+    ingest = sub.add_parser("ingest", help="run one ingest pass and exit")
     backfill = sub.add_parser("backfill", help="run one ingest pass over a longer window")
     backfill.add_argument("--days", type=int, default=90, help="how far back to reach (default: 90)")
+    for parser_ in (ingest, backfill):
+        parser_.add_argument(
+            "--progress",
+            action="store_true",
+            help="print each stage (token_metadata, token_hours, pool_discovery, pool_hours) to stderr "
+            "as it finishes, in the same format as `observe --progress`",
+        )
 
     report = sub.add_parser("report", help="print the data-quality report")
     report.add_argument("--days", type=int, default=None, help="only consider the last N days")
@@ -80,6 +86,13 @@ def _parser() -> argparse.ArgumentParser:
 
     runs = sub.add_parser("runs", help="show recent ingest runs from the ledger")
     runs.add_argument("--limit", type=int, default=10)
+    which = runs.add_mutually_exclusive_group()
+    which.add_argument(
+        "--job",
+        default=None,
+        help="runs of one job from run_log (ingest, observer, janitor), in progress included",
+    )
+    which.add_argument("--all", action="store_true", help="runs of every job from run_log, newest first")
 
     fill = sub.add_parser(
         "fill",
@@ -513,13 +526,30 @@ def _jobs(settings: Settings) -> int:
     return 0
 
 
-def _ingest(settings: Settings, days: int | None, trigger: str) -> int:
-    from candlegraph.harness import JOBS, run_job
+def _stage_printer(label: str) -> Any:
+    """An ``on_stage`` callback printing each stage to stderr, so stdout stays clean."""
+    from candlegraph.harness.stages import StageRecord, format_stage
 
-    run = run_job(JOBS["ingest"], settings, trigger=trigger, params={"lookback_days": days})
-    result = run.payload
-    if result is None:
-        # The run died outright; run_job logged it and run_ingest recorded it.
+    print(f"{label} stages:", file=sys.stderr, flush=True)
+
+    def on_stage(record: StageRecord) -> None:
+        print(format_stage(record), file=sys.stderr, flush=True)
+
+    return on_stage
+
+
+def _ingest(settings: Settings, days: int | None, trigger: str, progress: bool = False) -> int:
+    from candlegraph.ingestion.runner import run_ingest
+    from candlegraph.storage import get_db
+    from candlegraph.tokens import get_token_registry
+
+    on_stage = _stage_printer("ingest") if progress else None
+    try:
+        result = run_ingest(
+            get_db(), get_token_registry(), settings, trigger=trigger, lookback_days=days, on_stage=on_stage
+        )
+    except Exception:
+        # The run could not start; the harness logged it and closed the row as failed.
         return 1
     service_logger.info(
         "%s: %d token hours, %d pool hours, %d errors",
@@ -704,6 +734,28 @@ def _runs(limit: int) -> int:
         print(
             f"{row['started_at']:%Y-%m-%d %H:%M:%S}  {row['trigger']:<11}{row['status']:<11}"
             f"{row['token_hours_written']:>8}{row['pool_hours_written']:>8}{elapsed}"
+        )
+    return 0
+
+
+def _run_log(limit: int, job: str | None) -> int:
+    """Rows of the ``run_log`` view: every job in one vocabulary."""
+    from candlegraph.storage import get_db
+
+    db = get_db()
+    rows = db.fetch_all(db.sql.get_run_log, {"limit": limit, "job": job})
+    if not rows:
+        print(f"no {job + ' ' if job else ''}runs recorded yet")
+        return 0
+
+    print(f"{'started':<21}{'job':<10}{'trigger':<11}{'outcome':<11}{'verdict':<10}{'secs':>8}  run_id")
+    for row in rows:
+        duration = row["duration_seconds"]
+        elapsed = f"{float(duration):>8.1f}" if duration is not None else f"{'-':>8}"
+        # NULL trigger = a row written before the column existed; shown as "-", never guessed.
+        print(
+            f"{row['started_at']:%Y-%m-%d %H:%M:%S}  {row['job']:<10}{row['trigger'] or '-':<11}"
+            f"{row['outcome']:<11}{row['verdict'] or '-':<10}{elapsed}  {str(row['run_id'])[:8]}"
         )
     return 0
 
@@ -1274,15 +1326,8 @@ def _observe(settings: Settings, args: argparse.Namespace) -> int:
 
     db = get_db()
     sinks = build_sinks(settings, db=db, names=_sink_names(args.sinks))
-    on_stage = None
-    if args.progress:
-        from candlegraph.agents.stages import StageRecord, format_stage
-
-        def on_stage(record: StageRecord) -> None:
-            # stderr so `--json` stays machine-readable on stdout.
-            print(format_stage(record), file=sys.stderr, flush=True)
-
-        print("observer stages:", file=sys.stderr, flush=True)
+    # stderr so `--json` stays machine-readable on stdout.
+    on_stage = _stage_printer("observer") if args.progress else None
     run = run_job(
         JOBS["observer"], settings, trigger=MANUAL, db=db, params={"sinks": sinks}, on_stage=on_stage
     )
@@ -1501,12 +1546,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         case "jobs":
             return _jobs(settings)
         case "ingest":
-            return _ingest(settings, None, "manual")
+            return _ingest(settings, None, "manual", args.progress)
         case "backfill":
-            return _ingest(settings, args.days, "backfill")
+            return _ingest(settings, args.days, "backfill", args.progress)
         case "report":
             return _report(settings, args.days, args.strict, args.json)
         case "runs":
+            if args.job or args.all:
+                return _run_log(args.limit, args.job)
             return _runs(args.limit)
         case "fill":
             return _fill(settings, args)

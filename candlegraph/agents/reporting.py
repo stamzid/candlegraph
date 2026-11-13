@@ -17,7 +17,6 @@ from typing import Any, Protocol
 import httpx
 
 from candlegraph.agents.base import AgentReport, Finding, Severity, sort_findings
-from candlegraph.agents.ledger import record_agent_run
 from candlegraph.agents.shell import Shell, SubprocessShell
 from candlegraph.settings import Settings
 from candlegraph.storage import DatabaseManager
@@ -120,15 +119,25 @@ class LogSink:
 
 
 class LedgerSink:
-    """The ``agent_run`` table."""
+    """Marks a run as one to record in ``agent_run``; writes nothing itself.
+
+    Since harness rollout step 2 the row is written by
+    ``harness.hooks.AgentLedgerHook`` — opened before the graph runs and
+    closed after — so a run that dies midway still leaves a row. The harness
+    checks for this sink's name to decide whether to write the row; posting
+    to it is a no-op, logged once per process so nobody thinks it is lost.
+    """
 
     name = "ledger"
+    _noted = False
 
     def __init__(self, db: DatabaseManager) -> None:
         self.db = db
 
     def post(self, report: AgentReport) -> None:
-        record_agent_run(self.db, report)
+        if not LedgerSink._noted:
+            LedgerSink._noted = True
+            service_logger.debug("ledger sink: the harness writes agent_run; nothing to do here")
 
 
 class FileSink:

@@ -24,7 +24,8 @@ from candlegraph.settings import Settings
 
 if TYPE_CHECKING:
     from candlegraph.agents.base import AgentReport
-    from candlegraph.agents.stages import StageHook
+    from candlegraph.harness.hooks import RunHook
+    from candlegraph.harness.stages import StageHook
     from candlegraph.storage import DatabaseManager
 
 Role = Literal["worker", "agents"]
@@ -54,6 +55,11 @@ class JobContext:
     params: Mapping[str, Any]
 
 
+# Builds the hook that writes this job's ledger row, from what run_job knows
+# before the run starts. None means "no row for this run".
+LedgerFactory = Callable[[Settings, "DatabaseManager", Mapping[str, Any]], "RunHook | None"]
+
+
 @dataclass(frozen=True)
 class Job:
     name: str
@@ -62,6 +68,7 @@ class Job:
     role: Role
     writes: frozenset[str]
     description: str
+    ledger: LedgerFactory
 
     @property
     def interval_setting(self) -> str:
@@ -77,28 +84,35 @@ class Job:
 
 
 def _ingest(ctx: JobContext) -> RunOutcome:
-    from candlegraph.ingestion import ledger
-    from candlegraph.ingestion.runner import run_ingest
-    from candlegraph.tokens import get_token_registry
+    from candlegraph.ingestion.runner import ingest_job_body
 
-    # run_ingest still owns the ingest_run row in step 1; it is handed the
-    # harness's run_id so the two never disagree about which run this is.
-    result = run_ingest(
-        ctx.db,
-        get_token_registry(),
-        ctx.settings,
-        trigger=ctx.run.trigger,
-        lookback_days=ctx.params.get("lookback_days"),
-        run_id=ctx.run.run_id,
-    )
-    status = ledger.status_for(result.errors, result.rows_written > 0)
-    return RunOutcome(
-        outcome=Outcome(status),
-        counts=result.counts(),
-        errors=dict(result.errors),
-        detail={"hours_by_symbol": result.hours_by_symbol},
-        payload=result,
-    )
+    return ingest_job_body(ctx)
+
+
+def _ingest_ledger(settings: Settings, db: DatabaseManager, params: Mapping[str, Any]) -> RunHook:
+    from candlegraph.harness.hooks import IngestLedgerHook
+
+    window = params.get("lookback_days")
+    return IngestLedgerHook(db, window if window is not None else settings.lookback_days)
+
+
+def records_agent_run(settings: Settings, params: Mapping[str, Any]) -> bool:
+    """Whether this agent run gets an ``agent_run`` row.
+
+    The ``ledger`` sink name keeps its meaning — "record this run in
+    agent_run" — but the harness writes the row, not the sink. The janitor
+    in GitHub Actions has no database and runs without ``ledger``; this is
+    what keeps it from trying to connect.
+    """
+    sinks = params.get("sinks")
+    names = [getattr(s, "name", "") for s in sinks] if sinks is not None else list(settings.report_sinks)
+    return "ledger" in names
+
+
+def _agent_ledger(settings: Settings, db: DatabaseManager, params: Mapping[str, Any]) -> RunHook | None:
+    from candlegraph.harness.hooks import AgentLedgerHook
+
+    return AgentLedgerHook(db) if records_agent_run(settings, params) else None
 
 
 def _agent_outcome(report: AgentReport) -> RunOutcome:
@@ -117,7 +131,16 @@ def _agent_outcome(report: AgentReport) -> RunOutcome:
 def _observer(ctx: JobContext) -> RunOutcome:
     from candlegraph.agents.observer import run_observer
 
-    report = run_observer(ctx.settings, db=ctx.db, sinks=ctx.params.get("sinks"), on_stage=ctx.on_stage)
+    # `registry` and `now` are optional params for tests and direct callers.
+    report = run_observer(
+        ctx.settings,
+        db=ctx.db,
+        registry=ctx.params.get("registry"),
+        now=ctx.params.get("now"),
+        sinks=ctx.params.get("sinks"),
+        on_stage=ctx.on_stage,
+        run_id=ctx.run.run_id,
+    )
     return _agent_outcome(report)
 
 
@@ -132,6 +155,7 @@ def _janitor(ctx: JobContext) -> RunOutcome:
         checks=ctx.params.get("checks"),
         open_pr=ctx.params.get("open_pr"),
         sinks=ctx.params.get("sinks"),
+        run_id=ctx.run.run_id,
     )
     return _agent_outcome(report)
 
@@ -146,6 +170,7 @@ JOBS: dict[str, Job] = {
             role="worker",
             writes=frozenset({"market_data", "ledger"}),
             description="Poll the subgraph for new hourly token and pool rows",
+            ledger=_ingest_ledger,
         ),
         Job(
             name="observer",
@@ -154,6 +179,7 @@ JOBS: dict[str, Job] = {
             role="agents",
             writes=frozenset({"ledger", "reports"}),
             description="Check freshness, gaps on liquid tokens, and metric drift",
+            ledger=_agent_ledger,
         ),
         Job(
             name="janitor",
@@ -162,6 +188,7 @@ JOBS: dict[str, Job] = {
             role="agents",
             writes=frozenset({"ledger", "reports"}),
             description="Run the checks, apply mechanical fixes, draft a PR",
+            ledger=_agent_ledger,
         ),
     )
 }

@@ -82,15 +82,11 @@ def test_the_log_sink_logs_at_a_level_matching_the_status(caplog: pytest.LogCapt
     assert levels[0] == "INFO" and "ERROR" in levels
 
 
-def test_the_ledger_sink_writes_one_agent_run_row(fake_db: FakeDatabase) -> None:
+def test_the_ledger_sink_writes_nothing_because_the_harness_writes_the_row(fake_db: FakeDatabase) -> None:
+    """`ledger` in AGENT_REPORT_SINKS now only tells the harness to record the run."""
     LedgerSink(fake_db).post(report(Severity.WARNING))
 
-    label, params = fake_db.executed[0]
-    assert label == "insert_agent_run"
-    assert params is not None
-    assert params["agent"] == "observer" and params["status"] == "warning" and params["findings_total"] == 1
-    assert json.loads(params["findings"])[0]["severity"] == "warning"
-    assert json.loads(params["detail"])["error"] is None
+    assert fake_db.executed == []
 
 
 def test_the_file_sink_writes_markdown_named_by_agent_and_time(tmp_path: Path) -> None:

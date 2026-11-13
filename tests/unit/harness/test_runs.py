@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,10 +11,10 @@ from typing import Any
 import pytest
 
 from candlegraph.agents.base import AgentReport, Finding, Severity
-from candlegraph.agents.stages import StageRecord
 from candlegraph.harness import JOBS, Outcome, RunOutcome, run_job
 from candlegraph.harness.jobs import JobContext
 from candlegraph.harness.runs import Run
+from candlegraph.harness.stages import StageRecord
 from candlegraph.ingestion.runner import IngestResult
 from candlegraph.storage import set_db
 from tests.conftest import FakeDatabase, make_settings
@@ -105,28 +106,53 @@ def test_a_failing_hook_is_logged_and_the_others_still_fire(
 # --- the three bodies ----------------------------------------------------------
 
 
-def test_the_ingest_job_passes_trigger_window_and_run_id_to_run_ingest(
+class _Client:
+    def __init__(self, _settings: Any) -> None:
+        pass
+
+    def __enter__(self) -> _Client:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        pass
+
+
+def test_the_ingest_job_opens_and_closes_its_ledger_row_around_the_pass(
     tokens_file: Path, db: FakeDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The ingest_run row is the harness's, not the body's: open first, close last."""
     monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
     captured: dict[str, Any] = {}
 
-    def fake(_db: Any, _registry: Any, _settings: Any, **kwargs: Any) -> IngestResult:
-        captured.update(kwargs)
+    def fake_once(
+        database: Any, _client: Any, _registry: Any, _settings: Any, _now: Any, lookback: Any, **kw: Any
+    ) -> IngestResult:
+        captured.update(lookback=lookback, executed_before=[label for label, _ in database.executed])
+        kw["on_stage"](StageRecord("token_hours", "ok", None, 0.1, {"rows": 3}))
         return IngestResult(hours_written=3, errors={"WBTC": "boom"})
 
-    monkeypatch.setattr("candlegraph.ingestion.runner.run_ingest", fake)
+    monkeypatch.setattr("candlegraph.ingestion.runner.SubgraphClient", _Client)
+    monkeypatch.setattr("candlegraph.ingestion.runner.ingest_once", fake_once)
     run = run_job(
         JOBS["ingest"],
         make_settings(tokens_file=str(tokens_file)),
         trigger="backfill",
         params={"lookback_days": 9},
+        parent_run_id="11111111-1111-1111-1111-111111111111",
     )
 
-    assert captured["trigger"] == "backfill" and captured["lookback_days"] == 9
-    assert captured["run_id"] == run.run_id  # the ledger row and the Run agree
+    assert captured["lookback"] == 9
+    assert captured["executed_before"] == ["start_ingest_run"]
+    (start_label, start), (finish_label, finish) = db.executed
+    assert (start_label, finish_label) == ("start_ingest_run", "finish_ingest_run")
+    assert start is not None and finish is not None
+    assert start["run_id"] == finish["run_id"] == run.run_id
+    assert start["trigger"] == "backfill" and start["lookback_days"] == 9
+    assert start["parent_run_id"] == "11111111-1111-1111-1111-111111111111"
+    assert finish["status"] == "partial"
+    assert [s["name"] for s in json.loads(finish["detail"])["stages"]] == ["token_hours"]
     assert run.outcome is Outcome.PARTIAL
-    assert isinstance(run.payload, IngestResult)
+    assert isinstance(run.payload, IngestResult) and run.payload.run_id == run.run_id
 
 
 def test_the_ingest_job_survives_a_broken_tokens_file(

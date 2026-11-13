@@ -117,7 +117,7 @@ or anything ending in `.pem`/`.key`. That is a feature.
 | sink | needs | note |
 |---|---|---|
 | `log` | nothing | level follows the status |
-| `ledger` | the database | `make agent-runs` reads this |
+| `ledger` | the database | the harness writes the `agent_run` row (opened at the start, closed at the end) when this is listed; `make agent-runs` and `make runs ARGS='--job observer'` read it |
 | `file` | `AGENT_REPORT_DIR` | one Markdown file per run; the janitor workflow uploads it |
 | `webhook` | `AGENT_WEBHOOK_URL` | Slack-compatible `{"text": ...}` |
 | `github` | `gh` logged in, optionally `AGENT_GITHUB_REPO` | opens an issue at WARNING or worse only |

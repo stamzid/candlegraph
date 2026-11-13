@@ -1,9 +1,8 @@
 # How the agents are used: who runs them, through what, and what they write
 
-**Status:** living — 2026-11-12, written after harness rollout step 1 ("one
-scheduler, one process loop, one `run_job`"). It describes the code as it is
-now. Update it when rollout step 2 moves the `agent_run` row into the harness,
-and again when step 3 adds a third scheduled job.
+**Status:** living — updated 2026-11-13 after harness rollout step 2. It
+describes the code as it is now. Update it when step 3 adds a third
+scheduled job.
 **Area:** `candlegraph/agents/`, `candlegraph/harness/`, `candlegraph/cli.py`,
 `candlegraph/ui/viewmodels.py`, `candlegraph/mcp/tools.py`,
 `.github/workflows/janitor.yml`, the `agents` compose service.
@@ -45,8 +44,8 @@ flowchart LR
   GHA["GitHub Actions janitor.yml"] --> CLI
   RJ["harness.runs.run_job<br/>never raises"] --> OBS["agents.observer.run_observer"]
   RJ --> JAN["agents.janitor.run_janitor"]
-  OBS & JAN --> SINKS["report sinks<br/>log · ledger · file · webhook · github"]
-  SINKS --> AR[("agent_run")]
+  OBS & JAN --> SINKS["report sinks<br/>log · file · webhook · github"]
+  RJ -->|"if 'ledger' is a sink:<br/>open at start, close at end"| AR[("agent_run")]
 ```
 
 | Entry point | Command / surface | Trigger | Sinks used | Exit code / result |
@@ -57,10 +56,21 @@ flowchart LR
 | UI | Agents dashboard button | `ui` | `ledger` always, so the run lands in the history the page reads | the report, rendered with its stage strip |
 | MCP | `observe` tool (declared as a writer in `TOOLS`) | `mcp` | `AGENT_REPORT_SINKS` | the report payload, redacted |
 
-The trigger is carried on the in-memory `Run` today; it is **not yet
-stored**. Rollout step 2 adds `agent_run.trigger` and `outcome` and moves the
-row's writing from the `ledger` sink into the harness, opened before the
-graph and closed after, so a hung observer shows up as a `running` row.
+## How a run is recorded (since step 2)
+
+- The harness writes the `agent_run` row, not the graph. It inserts the row
+  when the run starts (`outcome = running`, `status` empty) and updates it
+  when the run ends. If the process dies mid-run, the row stays `running`
+  and `make runs ARGS='--job observer'` shows it.
+- The row is written only if `ledger` is among the run's sinks. The UI
+  button always includes it. The janitor in GitHub Actions does not, because
+  it has no database.
+- `trigger` says why the run happened (`scheduled`, `manual`, `ui`, `mcp`).
+  Rows from before the migration have no trigger, shown as `-`.
+- `outcome` says whether the run completed. `status` still says what the
+  agent found, so `make agent-runs` and the dashboard show the same as before.
+  A crashed graph has `outcome = failed` and `status = error`.
+- Log lines from a run end with `run=<first 8 characters of run_id>`.
 
 ## What changed for the agents in step 1, and what did not
 
@@ -69,12 +79,13 @@ graph and closed after, so a hung observer shows up as a `running` row.
 | `candlegraph/agents/scheduler.py` is gone; `observer` and `janitor` are entries in `harness.jobs.JOBS` | both graphs, their nodes, `assess`, the narrator, the sinks |
 | `candlegraph agents` is `run_process` over `select(role="agents")`, with an optional `--jobs` list | the compose service, its command, its interval settings, its start-up log line |
 | one `run_job` wrapper replaces `observer_tick` / `janitor_tick`; a crashed graph becomes `Outcome.FAILED` with no verdict, rather than a verdict of "error" | `agent_run.status` still means the verdict; `make agent-runs` prints what it printed |
-| `candlegraph jobs` (`make jobs`) lists each job's schedule, role and write surface | the `ledger` sink still writes the `agent_run` row (until step 2) |
+| `candlegraph jobs` (`make jobs`) lists each job's schedule, role and write surface | (step 2 later moved the `agent_run` row from the `ledger` sink into the harness; see above) |
 
 ## Reading a run
 
 - `make agent-runs` (`--agent observer`, `--show` for the full report), or
-  the Agents dashboard. `make logs-agents` follows the scheduled runs.
+  the Agents dashboard. `make runs ARGS='--job observer'` adds `trigger` and
+  `outcome`, and includes runs still in progress. `make logs-agents` follows the scheduled runs.
 - A CRITICAL `missing_token` / `stale ingest` on a freshly created volume is
   expected: the observer's first firing is immediate and races the worker's
   first ingest. The next tick, after `make runs` shows a `succeeded` row, is

@@ -5,10 +5,10 @@ lifecycle out to hooks. It **never raises**: an exception escaping a
 scheduler tick stops APScheduler rescheduling the job, which is why both of
 the old ticks swallowed everything; this is now the one place that happens.
 
-Step 1 of the harness rollout carries the run in memory only. The ledger
-rows are still written where they were — ``ingestion.runner.run_ingest``
-for ``ingest_run`` and the ``ledger`` report sink for ``agent_run`` — and
-step 2 moves them into ledger hooks.
+Each job's ledger hook (``Job.ledger``) writes its row: opened in
+``started``, closed in ``finished``. While the run is in progress its
+``run_id`` is in ``logging_utils.current_run_id``, so log lines carry
+``run=<id>``.
 """
 
 from __future__ import annotations
@@ -24,9 +24,9 @@ from candlegraph.settings import Settings
 from candlegraph.utils.logging_utils import service_logger
 
 if TYPE_CHECKING:
-    from candlegraph.agents.stages import StageHook, StageRecord
     from candlegraph.harness.hooks import RunHook
     from candlegraph.harness.jobs import Job
+    from candlegraph.harness.stages import StageHook, StageRecord
     from candlegraph.storage import DatabaseManager
 
 # Why a run happened. Free text in the ledgers; these are the values written.
@@ -76,6 +76,9 @@ class Run:
     parent_run_id: str | None = None
     finished_at: datetime | None = None
     result: RunOutcome | None = None
+    # The exception a body raised, if any. Not stored; it lets a direct caller
+    # such as ingestion.runner.run_ingest re-raise it.
+    exception: Exception | None = None
 
     @property
     def outcome(self) -> Outcome:
@@ -116,17 +119,30 @@ def run_job(
         db: The database manager; the process-wide one when omitted. Lazy, so
             passing it connects to nothing.
         on_stage: The ``--progress`` stream; also fanned out to the hooks.
-        hooks: Lifecycle subscribers; :func:`hooks.default_hooks` when omitted.
+        hooks: Extra lifecycle hooks; :func:`hooks.default_hooks` when omitted.
+            The job's ledger hook is always added; it is not optional.
         clock: The time source, injected for tests.
     """
     from candlegraph.agents.shell import redact
     from candlegraph.harness.hooks import CompositeHook, default_hooks
     from candlegraph.harness.jobs import JobContext
     from candlegraph.storage import get_db
+    from candlegraph.utils.logging_utils import current_run_id
 
     clock = clock or (lambda: datetime.now(tz=UTC))
-    fanout = CompositeHook(default_hooks() if hooks is None else hooks)
+    run_params = dict(params or {})
+    database = db if db is not None else get_db()
+    chosen = list(default_hooks() if hooks is None else hooks)
+    try:
+        ledger_hook = job.ledger(settings, database, run_params)
+    except Exception as exc:
+        service_logger.warning("Could not build the ledger hook for %s: %s", job.name, exc)
+        ledger_hook = None
+    if ledger_hook is not None:
+        chosen.insert(0, ledger_hook)
+    fanout = CompositeHook(chosen)
     run = Run(job=job.name, trigger=trigger, started_at=clock(), parent_run_id=parent_run_id)
+    token = current_run_id.set(run.run_id)
     fanout.started(run)
 
     def stage(record: StageRecord) -> None:
@@ -137,22 +153,24 @@ def run_job(
     try:
         context = JobContext(
             settings=settings,
-            db=db if db is not None else get_db(),
+            db=database,
             run=run,
             now=run.started_at,
-            # Only when a caller asked for the stream: step 1 changes nothing a
-            # job body sees. Step 2 ("stages everywhere") always passes it.
-            on_stage=stage if on_stage is not None else None,
-            params=dict(params or {}),
+            on_stage=stage,
+            params=run_params,
         )
         result = job.run(context)
     except Exception as exc:
         # The same line, at the same level, the old ticks logged.
         service_logger.exception("%s run failed; will retry at the next interval", job.label)
+        run.exception = exc
         result = RunOutcome(
             outcome=Outcome.FAILED, errors={"__run__": redact(f"{type(exc).__name__}: {exc}")}
         )
     run.finished_at = clock()
     run.result = result
-    fanout.finished(run, result)
+    try:
+        fanout.finished(run, result)
+    finally:
+        current_run_id.reset(token)
     return run

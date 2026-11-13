@@ -261,7 +261,7 @@ def test_pressing_the_button_runs_the_observer_and_writes_the_ledger() -> None:
     button.click().run()
 
     assert not app.exception
-    assert "insert_agent_run" in [label for label, _ in db.executed]
+    assert "close_agent_run" in [label for label, _ in db.executed]
 
 
 def test_the_latest_findings_are_on_screen() -> None:
