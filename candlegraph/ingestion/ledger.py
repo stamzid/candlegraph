@@ -60,13 +60,20 @@ def start_run(
     trigger: str = SCHEDULED,
     lookback_days: int | None = None,
     now: datetime | None = None,
+    run_id: str | None = None,
 ) -> RunRecord:
-    """Open a ledger row for a run that is about to begin."""
+    """Open a ledger row for a run that is about to begin.
+
+    ``run_id`` is the harness's id for the run when it has one, so the ledger
+    row and the in-memory ``Run`` agree on which run this is.
+    """
     record = RunRecord(
         trigger=trigger,
         started_at=now or datetime.now(tz=UTC),
         lookback_days=lookback_days,
     )
+    if run_id is not None:
+        record.run_id = run_id
     try:
         db.execute(
             db.sql.start_ingest_run,

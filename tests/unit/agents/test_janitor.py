@@ -18,7 +18,8 @@ from candlegraph.agents.janitor import FIXERS, build_janitor_graph, run_janitor
 from candlegraph.agents.janitor.checks import JanitorDeps, pr_branch_name
 from candlegraph.agents.narrator import TemplateNarrator
 from candlegraph.agents.reporting import LedgerSink
-from candlegraph.agents.scheduler import janitor_tick
+from candlegraph.harness import JOBS, Outcome
+from candlegraph.harness.scheduler import tick_for
 from tests.conftest import FakeDatabase, make_settings
 from tests.unit.agents.conftest import FakeShell, fail, ok, timeout
 
@@ -317,10 +318,10 @@ def test_the_scheduler_tick_never_raises(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(
-        "candlegraph.agents.janitor.run_janitor", lambda _s: (_ for _ in ()).throw(RuntimeError("x"))
+        "candlegraph.agents.janitor.run_janitor", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("x"))
     )
 
     with caplog.at_level("ERROR", logger="candlegraph"):
-        assert janitor_tick(make_settings()) is None
+        assert tick_for(JOBS["janitor"])(make_settings()).outcome is Outcome.FAILED
 
     assert "Janitor run failed" in caplog.text

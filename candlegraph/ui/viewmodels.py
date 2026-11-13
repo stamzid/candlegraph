@@ -22,7 +22,6 @@ import numpy as np
 import pandas as pd
 
 from candlegraph.agents.base import AgentReport
-from candlegraph.agents.observer import run_observer
 from candlegraph.agents.reporting import build_sinks
 from candlegraph.agents.stages import StageHook, StageRecord
 from candlegraph.analytics.arima import ArimaConfig, ArimaForecast, fit_forecast
@@ -1982,8 +1981,15 @@ def run_observer_now(
     a crashed run comes back with ``error`` set, exactly like a scheduled one.
     ``on_stage`` lets the page show each stage as it finishes.
     """
+    from candlegraph.harness import JOBS, run_job
+    from candlegraph.harness.runs import UI
+
     sinks = build_sinks(settings, db=db, names=("ledger",))
-    return run_observer(settings, db=db, sinks=sinks, on_stage=on_stage)
+    run = run_job(JOBS["observer"], settings, trigger=UI, db=db, params={"sinks": sinks}, on_stage=on_stage)
+    report: AgentReport = run.payload
+    if report is None:  # the body raised past run_observer's own handler
+        raise ViewError(f"The observer run failed: {run.result.errors if run.result else ''}")
+    return report
 
 
 # --- data dashboard ------------------------------------------------------------

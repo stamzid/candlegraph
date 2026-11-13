@@ -21,7 +21,7 @@ stack, `release-check` before a step is called done.
 
 | # | Step | Size | Depends on | Status |
 |---|---|---|---|---|
-| 1 | One scheduler, one process loop, one `run_job` | S | — | todo |
+| 1 | One scheduler, one process loop, one `run_job` | S | — | **done** 2026-11-12 — see Outcome; ingest ledger row still written by `run_ingest` |
 | 2 | One shape of a run: two-phase agent rows, `trigger`, `outcome`, `parent_run_id`, the `run_log` view, stages in ingest | M | 1 | todo |
 | 3 | The third job proves the registry: `fetch_news` scheduled, the generic `run` table | S | 1, 2 | todo — **cut line**; stage 2 absorbs it if dropped |
 | 4 | Closeout: invariant 27, docs, skills, README; archive this file | S | 1–3 | todo |
@@ -136,7 +136,38 @@ role and write surface; the ported tests pass; `make check` is green
 with no new skips; a stack run shows the same ledger rows and log lines
 as before the step.
 
-**Outcome.** _Not started._
+**Outcome.** Done 2026-11-12. `candlegraph/harness/` holds `jobs.py`
+(`Job`, `Every`, `JobContext`, `JOBS` with `ingest`/`observer`/`janitor`,
+`select`), `runs.py` (`Run`, `Outcome`, `RunOutcome`, `run_job`, the
+trigger constants), `hooks.py` (`RunHook`, `LogHook`, `CompositeHook`),
+`scheduler.py` (`build_scheduler(settings, jobs, job_override=…)`, the only
+`BackgroundScheduler` in the package) and `process.py`
+(`run_process(…, shutdown_wait=True)`). `ingestion/worker.py` and
+`agents/scheduler.py` are deleted; their tests are ported to
+`tests/unit/harness/` with every assertion kept. `worker`/`agents` take
+`--jobs`; `ingest`, `backfill`, `observe`, `janitor`, the UI button and the
+`observe` MCP tool go through `run_job` with triggers `manual`, `backfill`,
+`ui`, `mcp` (in memory only). `candlegraph jobs` / `make jobs` list three
+rows. `make check` green (11 skips, all e2e); a stack run under a unique
+project showed the same start-up lines, a `scheduled` `ingest_run` row and
+an observer `agent_run` row.
+
+Deviations, for step 2 to pick up:
+
+- **No ledger hooks yet, for either job.** The ingest row is still written
+  by `ingestion.runner.run_ingest` (which now accepts the harness's
+  `run_id`, so the row and the `Run` agree), not by a hook wrapping
+  `start_run`/`finish_run`. Moving it would have meant either a second
+  writer or reshaping `run_ingest`, which `ui.viewmodels.run_backfill` and
+  `test_runner.py` call directly; that move belongs with step 2's
+  "ownership of a ledger row", alongside `LedgerSink`.
+- **`on_stage` reaches a job body only when a caller asked for
+  progress.** `test_observe_without_progress_passes_no_hook` pins that the
+  observer gets `None` without `--progress`; step 2 ("stages everywhere")
+  is where the hooks should always receive stages and that test changes.
+- `run_job` imports `agents.shell.redact` for the error string; that
+  module imports nothing heavy, and a test proves the harness import pulls
+  in no job body or LangGraph.
 
 ---
 

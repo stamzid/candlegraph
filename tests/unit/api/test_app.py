@@ -15,8 +15,9 @@ import psycopg2
 import pytest
 from fastapi.testclient import TestClient
 
-from candlegraph.api.app import create_app, ingest_job
-from candlegraph.ingestion.worker import INGEST_JOB_ID, build_scheduler
+from candlegraph.api.app import create_app
+from candlegraph.harness import JOBS, Outcome, select
+from candlegraph.harness.scheduler import build_scheduler, tick_for
 from candlegraph.settings import Settings
 from candlegraph.storage import set_db
 from tests.conftest import FakeDatabase, make_settings
@@ -101,7 +102,7 @@ def test_status_costs_one_database_round_trip(app_settings: Settings, db: FakeDa
 def test_status_reports_ingestion_as_enabled(
     tokens_file: Path, db: FakeDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("candlegraph.api.app.build_scheduler", lambda _s, job=None: _NullScheduler())
+    monkeypatch.setattr("candlegraph.api.app.build_scheduler", lambda _s, _jobs: _NullScheduler())
     settings = make_settings(tokens_file=str(tokens_file), ingest_enabled=True)
 
     with TestClient(create_app(settings)) as client:
@@ -131,8 +132,8 @@ def test_an_unknown_path_is_a_404(app_settings: Settings, db: FakeDatabase) -> N
 
 def test_the_ingest_job_fires_immediately_then_on_the_interval() -> None:
     """The first backfill is the job's first run, not a blocking startup step."""
-    scheduler = build_scheduler(make_settings(data_poll_interval=42))
-    job = scheduler.get_job(INGEST_JOB_ID)
+    scheduler = build_scheduler(make_settings(data_poll_interval=42), select(names=("ingest",)))
+    job = scheduler.get_job("ingest")
 
     assert job is not None
     assert job.trigger.interval.total_seconds() == 42
@@ -145,7 +146,7 @@ def test_no_scheduler_runs_when_ingestion_is_disabled(
     app_settings: Settings, db: FakeDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     started: list[Any] = []
-    monkeypatch.setattr("candlegraph.api.app.build_scheduler", lambda s, job=None: started.append(s))
+    monkeypatch.setattr("candlegraph.api.app.build_scheduler", lambda s, _jobs: started.append(s))
 
     for client in client_for(app_settings):
         assert client.get("/status").status_code == 200
@@ -165,7 +166,7 @@ def test_the_scheduler_starts_and_shuts_down_with_the_app(
         def shutdown(self, wait: bool = True) -> None:
             events.append(f"shutdown(wait={wait})")
 
-    monkeypatch.setattr("candlegraph.api.app.build_scheduler", lambda _s, job=None: SpyScheduler())
+    monkeypatch.setattr("candlegraph.api.app.build_scheduler", lambda _s, _jobs: SpyScheduler())
     settings = make_settings(tokens_file=str(tokens_file), ingest_enabled=True)
 
     with TestClient(create_app(settings)) as client:
@@ -183,7 +184,7 @@ def test_the_api_serves_even_when_every_ingest_run_fails(
     def always_fails(*_args: Any, **_kwargs: Any) -> None:
         raise ConnectionError("subgraph is gone")
 
-    monkeypatch.setattr("candlegraph.ingestion.worker.run_ingest", always_fails)
+    monkeypatch.setattr("candlegraph.ingestion.runner.run_ingest", always_fails)
     settings = make_settings(tokens_file=str(tokens_file), ingest_enabled=True, data_poll_interval=3600)
 
     with TestClient(create_app(settings)) as client:
@@ -199,10 +200,10 @@ def test_the_ingest_job_delegates_to_run_ingest(
 ) -> None:
     monkeypatch.setenv("TOKENS_FILE", str(tokens_file))
     calls: list[tuple[Any, ...]] = []
-    monkeypatch.setattr("candlegraph.ingestion.worker.run_ingest", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr("candlegraph.ingestion.runner.run_ingest", lambda *a, **k: calls.append((a, k)))
     settings = make_settings(tokens_file=str(tokens_file))
 
-    ingest_job(settings)
+    tick_for(JOBS["ingest"])(settings)
 
     assert len(calls) == 1
     (database, registry, passed_settings), _kwargs = calls[0]
@@ -220,10 +221,12 @@ def test_the_ingest_job_never_raises(
     def boom(*_args: Any, **_kwargs: Any) -> None:
         raise RuntimeError("subgraph down")
 
-    monkeypatch.setattr("candlegraph.ingestion.worker.run_ingest", boom)
+    monkeypatch.setattr("candlegraph.ingestion.runner.run_ingest", boom)
 
     with caplog.at_level("ERROR", logger="candlegraph"):
-        ingest_job(make_settings(tokens_file=str(tokens_file)))
+        run = tick_for(JOBS["ingest"])(make_settings(tokens_file=str(tokens_file)))
+
+    assert run.outcome is Outcome.FAILED
 
     assert "Ingest run failed" in caplog.text
 
@@ -236,6 +239,6 @@ def test_the_ingest_job_survives_a_broken_tokens_file(
     monkeypatch.setenv("TOKENS_FILE", str(broken))
 
     with caplog.at_level("ERROR", logger="candlegraph"):
-        ingest_job(make_settings(tokens_file=str(broken)))
+        tick_for(JOBS["ingest"])(make_settings(tokens_file=str(broken)))
 
     assert "Ingest run failed" in caplog.text

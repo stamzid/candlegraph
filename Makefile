@@ -14,7 +14,7 @@ E2E_URL ?= http://localhost:$${APP_HOST_PORT:-8000}
         ingest backfill report runs ui logs-ui observe janitor agent-runs logs-agents sync-assets \
         up-knowledge logs-ollama embed reembed fetch-news search link-mentions explain mcp \
         fill fill-status fill-evaluate stats compare signals backtest strategies portfolio \
-        forecast forecast-posterior risk simulate simulate-execution
+        forecast forecast-posterior risk simulate simulate-execution jobs serve
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -188,6 +188,12 @@ embed: ## Embed chunks that have no vector yet, inside the stack
 
 reembed: ## Re-encode every chunk with the configured EMBEDDING_MODEL (resumable)
 	$(COMPOSE) exec worker python -m candlegraph knowledge reembed $(ARGS)
+
+jobs: ## List the registered jobs (harness): schedule setting, process role, write surface
+	$(UV) run python -m candlegraph jobs
+
+serve: ## Run the API locally, outside compose: make serve ARGS='--port auto' (8000 is usually the stack's)
+	$(UV) run python -m candlegraph serve $(ARGS)
 
 runs: ## Show recent ingest runs from the ledger
 	$(COMPOSE) exec worker python -m candlegraph runs

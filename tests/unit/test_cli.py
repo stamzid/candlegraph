@@ -55,20 +55,88 @@ def test_an_unknown_command_is_an_error() -> None:
 def test_serve_starts_uvicorn(cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
     monkeypatch.setattr("uvicorn.run", lambda app, **kw: captured.update(app=app, **kw))
+    monkeypatch.setattr("candlegraph.utils.ports.port_is_free", lambda _h, _p: True)
 
     assert main(["serve"]) == 0
     assert captured["app"] == "candlegraph.api.app:app"
+    assert captured["port"] == 8000
+
+
+def test_serve_refuses_a_busy_port_and_suggests_free_ones(
+    cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The compose API holds APP_HOST_PORT=8000; a local serve used to die in uvicorn's bind."""
+    monkeypatch.setattr("uvicorn.run", lambda *a, **k: pytest.fail("must not start uvicorn on a busy port"))
+    monkeypatch.setattr("candlegraph.utils.ports.port_is_free", lambda _h, port: port != 8000)
+
+    with caplog.at_level("ERROR", logger="candlegraph"):
+        assert main(["serve"]) == 1
+
+    assert "8000 is already in use" in caplog.text
+    assert "--port 8001" in caplog.text
+
+
+def test_serve_port_auto_takes_the_first_free_suggestion(
+    cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: captured.update(kw))
+    monkeypatch.setattr("candlegraph.utils.ports.port_is_free", lambda _h, port: port not in (8000, 8001))
+
+    assert main(["serve", "--port", "auto", "--host", "127.0.0.1"]) == 0
+    assert captured["port"] == 8080
+    assert captured["host"] == "127.0.0.1"
+
+
+def test_serve_takes_an_explicit_port(cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: captured.update(kw))
+    monkeypatch.setattr("candlegraph.utils.ports.port_is_free", lambda _h, _p: True)
+
+    assert main(["serve", "--port", "9123"]) == 0
+    assert captured["port"] == 9123
+    assert main(["serve", "--port", "eighty"]) == 2
 
 
 # --- worker ----------------------------------------------------------------
 
 
-def test_worker_runs_the_worker_loop(cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_worker_runs_the_process_loop_with_the_worker_jobs(
+    cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
     called: list[Any] = []
-    monkeypatch.setattr("candlegraph.ingestion.worker.run_worker", lambda s: called.append(s))
+    monkeypatch.setattr(
+        "candlegraph.harness.process.run_process", lambda s, jobs, **k: called.append((jobs, k))
+    )
 
     assert main(["worker"]) == 0
-    assert len(called) == 1
+    ((jobs, kwargs),) = called
+    assert [job.name for job in jobs] == ["ingest"]
+    assert kwargs.get("shutdown_wait", True) is True
+
+
+def test_worker_takes_an_explicit_job_list_and_rejects_unknown_names(
+    cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    called: list[Any] = []
+    monkeypatch.setattr("candlegraph.harness.process.run_process", lambda s, jobs, **k: called.append(jobs))
+
+    assert main(["worker", "--jobs", "ingest,observer"]) == 0
+    assert [job.name for job in called[0]] == ["ingest", "observer"]
+    assert main(["worker", "--jobs", "nope"]) == 2
+
+
+def test_jobs_lists_every_registered_job(cli_env: FakeDatabase, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["jobs"]) == 0
+    out = capsys.readouterr().out
+
+    for name, setting in (
+        ("ingest", "DATA_POLL_INTERVAL"),
+        ("observer", "OBSERVER_INTERVAL"),
+        ("janitor", "JANITOR_INTERVAL"),
+    ):
+        assert name in out and setting in out
+    assert "market_data" in out
 
 
 # --- ingest and backfill ---------------------------------------------------

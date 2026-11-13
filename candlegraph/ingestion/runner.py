@@ -306,10 +306,15 @@ def run_ingest(
     now: datetime | None = None,
     trigger: str = ledger.SCHEDULED,
     lookback_days: int | None = None,
+    run_id: str | None = None,
 ) -> IngestResult:
-    """Build a subgraph client, ingest with it, and record the run in the ledger."""
+    """Build a subgraph client, ingest with it, and record the run in the ledger.
+
+    ``run_id`` comes from the harness (``harness.jobs``) so the ledger row
+    carries the same id as the ``Run``; omitted, the ledger mints one.
+    """
     window = lookback_days if lookback_days is not None else settings.lookback_days
-    record = ledger.start_run(db, trigger=trigger, lookback_days=window, now=now)
+    record = ledger.start_run(db, trigger=trigger, lookback_days=window, now=now, run_id=run_id)
 
     detail: dict[str, Any] = {}
     try:

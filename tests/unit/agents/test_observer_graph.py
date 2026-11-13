@@ -13,7 +13,8 @@ from candlegraph.agents.observer import build_observer_graph, run_observer
 from candlegraph.agents.observer.collect import ObserverDeps
 from candlegraph.agents.observer.state import ObserverThresholds
 from candlegraph.agents.reporting import LedgerSink
-from candlegraph.agents.scheduler import observer_tick
+from candlegraph.harness import JOBS, Outcome
+from candlegraph.harness.scheduler import tick_for
 from candlegraph.storage import set_db
 from candlegraph.tokens import TokenRegistry
 from tests.conftest import FakeDatabase, make_settings
@@ -262,6 +263,6 @@ def test_the_scheduler_tick_never_raises(
     )
 
     with caplog.at_level("ERROR", logger="candlegraph"):
-        assert observer_tick(make_settings()) is None
+        assert tick_for(JOBS["observer"])(make_settings()).outcome is Outcome.FAILED
 
     assert "Observer run failed" in caplog.text

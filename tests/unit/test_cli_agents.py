@@ -158,10 +158,10 @@ def test_janitor_strict_exit_code(cli_env: FakeDatabase, monkeypatch: pytest.Mon
 
 def test_agents_runs_the_schedule_loop(cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[Any] = []
-    monkeypatch.setattr("candlegraph.agents.scheduler.run_agents", lambda s: called.append(s))
+    monkeypatch.setattr("candlegraph.harness.process.run_process", lambda s, jobs, **k: called.append(jobs))
 
     assert main(["agents"]) == 0
-    assert len(called) == 1
+    assert [job.name for job in called[0]] == ["observer", "janitor"]
 
 
 # --- agent-runs ------------------------------------------------------------

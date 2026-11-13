@@ -458,13 +458,18 @@ def observe() -> dict[str, Any]:
     WARNING for a human rather than an alarm, and "not enough bars" is INFO
     and never a guess.
     """
-    from candlegraph.agents.observer import run_observer
     from candlegraph.agents.reporting import build_sinks
+    from candlegraph.harness import JOBS, run_job
+    from candlegraph.harness.runs import MCP
 
     db = _db()
     settings = _settings()
-    report = run_observer(settings, db=db, sinks=build_sinks(settings, db=db))
-    return payloads.report_payload(report, markdown=True)
+    run = run_job(
+        JOBS["observer"], settings, trigger=MCP, db=db, params={"sinks": build_sinks(settings, db=db)}
+    )
+    if run.payload is None:
+        raise RuntimeError(f"the observer run failed: {dict(run.result.errors) if run.result else {}}")
+    return payloads.report_payload(run.payload, markdown=True)
 
 
 # --- the knowledge layer ---------------------------------------------------------

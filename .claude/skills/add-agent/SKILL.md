@@ -56,8 +56,11 @@ classmethod, and a `<NAME>_*` field in `settings.py` with a comment and a
 ## 4. Register it
 
 - `candlegraph/agents/__init__.py`: add to `AGENTS`.
-- `candlegraph/agents/scheduler.py`: add a `<name>_tick` and a job gated on
-  `<NAME>_INTERVAL` (0 disables).
+- `candlegraph/harness/jobs.py`: add a `Job` to `JOBS` — a body that calls
+  your runner and maps the `AgentReport` with `_agent_outcome`, schedule
+  `Every("<name>_interval")` (0 disables), role `agents`, a truthful
+  `writes` (never `market_data`). The scheduler and `candlegraph agents`
+  pick it up from the registry; there is no tick to write.
 - `candlegraph/cli.py`: a one-shot command with `--strict`, `--json`,
   `--sinks`, dispatched in `main()`.
 - `Makefile`: a target. Never document a command that is not a target.

@@ -33,12 +33,36 @@ SIMULATION_GENERATORS = ("block", "iid", "gbm", "regime")
 DEFAULT_GENERATOR = "block"
 
 
+# `serve --port auto` tries these in order. 8000 is the compose API's host
+# port (APP_HOST_PORT), which is the usual collision; the rest are the
+# conventional development alternatives, none of which the stack binds
+# (8501 is the UI, 5432 Postgres, 11434 Ollama).
+SUGGESTED_PORTS = (8000, 8001, 8080, 8081, 8888, 9000)
+
+
+def _add_jobs(parser: argparse.ArgumentParser, role: str) -> None:
+    parser.add_argument(
+        "--jobs",
+        default=None,
+        help=f"comma-separated job names to host (default: every {role} job; see `candlegraph jobs`)",
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="candlegraph", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("serve", help="run the GraphQL API server")
-    sub.add_parser("worker", help="run the ingest worker loop")
+    serve = sub.add_parser("serve", help="run the GraphQL API server")
+    serve.add_argument("--host", default=None, help="interface to bind (default: HOST, 0.0.0.0)")
+    serve.add_argument(
+        "--port",
+        default=None,
+        help="port to bind (default: PORT, 8000). 'auto' takes the first free one of "
+        f"{', '.join(str(p) for p in SUGGESTED_PORTS)}. A busy port is refused with free suggestions "
+        "rather than left to uvicorn's bare 'address already in use'",
+    )
+    worker = sub.add_parser("worker", help="run the ingest worker loop")
+    _add_jobs(worker, "worker")
     sub.add_parser("ingest", help="run one ingest pass and exit")
 
     backfill = sub.add_parser("backfill", help="run one ingest pass over a longer window")
@@ -292,7 +316,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     _add_sinks(janitor)
 
-    sub.add_parser("agents", help="run the agents on their schedule until stopped")
+    agents = sub.add_parser("agents", help="run the agents on their schedule until stopped")
+    _add_jobs(agents, "agents")
+
+    sub.add_parser("jobs", help="list the registered jobs: schedule, process role and write surface")
 
     agent_runs = sub.add_parser("agent-runs", help="show recent agent runs from the agent ledger")
     agent_runs.add_argument("--limit", type=int, default=10)
@@ -400,32 +427,100 @@ def _add_strategy_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _serve(settings: Settings) -> int:
+def _serve(settings: Settings, host: str | None = None, port: str | None = None) -> int:
     import uvicorn
 
-    service_logger.info("Starting candlegraph API on %s:%s", settings.host, settings.port)
+    from candlegraph.utils.ports import first_free, port_is_free
+
+    bind_host = host or settings.host
+    if port is None:
+        bind_port = settings.port
+    elif port == "auto":
+        found = first_free(bind_host, SUGGESTED_PORTS)
+        if found is None:
+            service_logger.error(
+                "None of the suggested ports is free (%s); pass --port N",
+                ", ".join(map(str, SUGGESTED_PORTS)),
+            )
+            return 1
+        bind_port = found
+    else:
+        try:
+            bind_port = int(port)
+        except ValueError:
+            service_logger.error("--port takes a number or 'auto', not %r", port)
+            return 2
+    if not port_is_free(bind_host, bind_port):
+        # The usual cause is the compose stack's API on APP_HOST_PORT=8000.
+        free = [p for p in SUGGESTED_PORTS if p != bind_port and port_is_free(bind_host, p)]
+        service_logger.error(
+            "Port %s is already in use on %s (often the compose API on APP_HOST_PORT). "
+            "Free now: %s. Run `candlegraph serve --port %s` or `--port auto`.",
+            bind_port,
+            bind_host,
+            ", ".join(map(str, free)) or "none of the suggestions",
+            free[0] if free else "N",
+        )
+        return 1
+    service_logger.info("Starting candlegraph API on %s:%s", bind_host, bind_port)
     uvicorn.run(
         "candlegraph.api.app:app",
-        host=settings.host,
-        port=settings.port,
+        host=bind_host,
+        port=bind_port,
         log_level=settings.log_level.lower(),
     )
     return 0
 
 
-def _worker(settings: Settings) -> int:
-    from candlegraph.ingestion.worker import run_worker
+def _selected_jobs(role: str, names: str | None) -> Any:
+    from candlegraph.harness.jobs import select
 
-    run_worker(settings)
+    if names is None:
+        return select(role=role)  # type: ignore[arg-type]
+    return select(names=_sink_names(names) or ())
+
+
+def _worker(settings: Settings, names: str | None = None) -> int:
+    from candlegraph.harness.process import run_process, worker_banner
+
+    try:
+        jobs = _selected_jobs("worker", names)
+    except ValueError as exc:
+        service_logger.error("%s", exc)
+        return 2
+    run_process(settings, jobs, name="Ingest worker", banner=worker_banner(settings))
+    return 0
+
+
+def _jobs(settings: Settings) -> int:
+    from candlegraph.harness.jobs import JOBS
+
+    rows = [
+        (
+            job.name,
+            job.role,
+            f"{job.interval_setting.upper()}={job.schedule.seconds(settings)}"
+            + ("" if job.schedule.seconds(settings) > 0 else " (disabled)"),
+            ",".join(sorted(job.writes)),
+            job.description,
+        )
+        for job in JOBS.values()
+    ]
+    header = ("job", "role", "schedule", "writes", "description")
+    widths = [max(len(str(r[i])) for r in [header, *rows]) for i in range(len(header))]
+    for row in [header, *rows]:
+        print("  ".join(str(cell).ljust(width) for cell, width in zip(row, widths, strict=True)).rstrip())
     return 0
 
 
 def _ingest(settings: Settings, days: int | None, trigger: str) -> int:
-    from candlegraph.ingestion.runner import run_ingest
-    from candlegraph.storage import get_db
-    from candlegraph.tokens import get_token_registry
+    from candlegraph.harness import JOBS, run_job
 
-    result = run_ingest(get_db(), get_token_registry(), settings, trigger=trigger, lookback_days=days)
+    run = run_job(JOBS["ingest"], settings, trigger=trigger, params={"lookback_days": days})
+    result = run.payload
+    if result is None:
+        # The run died outright; run_job logged it and run_ingest recorded it.
+        return 1
     service_logger.info(
         "%s: %d token hours, %d pool hours, %d errors",
         trigger,
@@ -1172,8 +1267,9 @@ def _sink_names(text: str | None) -> list[str] | None:
 
 
 def _observe(settings: Settings, args: argparse.Namespace) -> int:
-    from candlegraph.agents.observer import run_observer
     from candlegraph.agents.reporting import build_sinks
+    from candlegraph.harness import JOBS, run_job
+    from candlegraph.harness.runs import MANUAL
     from candlegraph.storage import get_db
 
     db = get_db()
@@ -1187,15 +1283,21 @@ def _observe(settings: Settings, args: argparse.Namespace) -> int:
             print(format_stage(record), file=sys.stderr, flush=True)
 
         print("observer stages:", file=sys.stderr, flush=True)
-    report = run_observer(settings, db=db, sinks=sinks, on_stage=on_stage)
+    run = run_job(
+        JOBS["observer"], settings, trigger=MANUAL, db=db, params={"sinks": sinks}, on_stage=on_stage
+    )
+    if run.payload is None:
+        return 2
+    report = run.payload
     _print_report(report, args.json)
     return _agent_exit(report, args.strict)
 
 
 def _janitor(settings: Settings, args: argparse.Namespace) -> int:
-    from candlegraph.agents.janitor import run_janitor
     from candlegraph.agents.reporting import build_sinks
     from candlegraph.agents.shell import SubprocessShell
+    from candlegraph.harness import JOBS, run_job
+    from candlegraph.harness.runs import MANUAL
     from candlegraph.storage import get_db
 
     names = _sink_names(args.sinks)
@@ -1204,15 +1306,28 @@ def _janitor(settings: Settings, args: argparse.Namespace) -> int:
     db = get_db() if "ledger" in chosen else None
     sinks = build_sinks(settings, db=db, shell=shell, names=chosen)
     checks = tuple(_sink_names(args.checks) or ()) or None
-    report = run_janitor(settings, shell=shell, checks=checks, open_pr=args.open_pr, sinks=sinks)
+    run = run_job(
+        JOBS["janitor"],
+        settings,
+        trigger=MANUAL,
+        params={"shell": shell, "checks": checks, "open_pr": args.open_pr, "sinks": sinks},
+    )
+    if run.payload is None:
+        return 2
+    report = run.payload
     _print_report(report, args.json)
     return _agent_exit(report, args.strict)
 
 
-def _agents(settings: Settings) -> int:
-    from candlegraph.agents.scheduler import run_agents
+def _agents(settings: Settings, names: str | None = None) -> int:
+    from candlegraph.harness.process import agents_banner, run_process
 
-    run_agents(settings)
+    try:
+        jobs = _selected_jobs("agents", names)
+    except ValueError as exc:
+        service_logger.error("%s", exc)
+        return 2
+    run_process(settings, jobs, name="Agents", banner=agents_banner(settings, jobs))
     return 0
 
 
@@ -1380,9 +1495,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     match args.command:
         case "serve":
-            return _serve(settings)
+            return _serve(settings, args.host, args.port)
         case "worker":
-            return _worker(settings)
+            return _worker(settings, args.jobs)
+        case "jobs":
+            return _jobs(settings)
         case "ingest":
             return _ingest(settings, None, "manual")
         case "backfill":
@@ -1418,7 +1535,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         case "janitor":
             return _janitor(settings, args)
         case "agents":
-            return _agents(settings)
+            return _agents(settings, args.jobs)
         case "agent-runs":
             return _agent_runs(args)
         case "mcp":

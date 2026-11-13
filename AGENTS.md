@@ -35,6 +35,8 @@ a target, and never let CI run something that is not one either.
 | What the fill cache holds | `make fill-status` (`candlegraph fill --status`) |
 | Score the estimators against held-out real hours | `make fill-evaluate` (`candlegraph fill --evaluate [--gap-hours N]`) |
 | Recent ingest runs | `make runs` |
+| The registered jobs: schedule, process role, write surface | `make jobs` (`candlegraph jobs`) |
+| The API locally, beside a running stack (8000 is usually the stack's) | `make serve ARGS='--port auto'` (`candlegraph serve [--host H] [--port N\|auto]`; a busy port is refused with free suggestions) |
 | Sync assets and aliases from `tokens.yaml` | `make sync-assets` (in the stack) or `candlegraph knowledge sync-assets` |
 | The embedding model server's log (Ollama is part of `make up`; the first start pulls `bge-m3`) | `make logs-ollama` |
 | Embed chunks / re-encode after a model change | `make embed` / `make reembed` (or `candlegraph knowledge embed\|reembed`) |
@@ -85,7 +87,6 @@ candlegraph/
     quality.py         Gap detection and the data-quality report.
     fills.py           The derived-fill cache: estimates for hours that were never
                        ingested. Display only; writes token_hours_fill and nothing else.
-    worker.py          The standalone ingest process.
   analytics/           Pure numerics. No I/O except prices.py, which only reads.
     rolling.py         Rolling mean, volatility, z-score, Bollinger, drawdown.
     pairwise.py        Two-token comparison: correlation, beta, relative return. Aligned bars only.
@@ -139,6 +140,12 @@ candlegraph/
     sources/
       base.py          Source Protocol: search(query, window) -> RawDocuments. Never writes, never decides.
       tavily.py        The metered client: bounded news search, backoff on 5xx, 429/432 never retried.
+  harness/             The runner (rollout step 1): one way to schedule and run a job.
+    jobs.py            Job, JobContext, the JOBS registry (ingest, observer, janitor), select(role | names).
+    runs.py            Run, Outcome, RunOutcome, run_job — every run passes through it; never raises.
+    hooks.py           RunHook and its fan-out; a failing hook is logged, never raised.
+    scheduler.py       The one BackgroundScheduler builder: immediate first firing, max_instances=1, coalesce.
+    process.py         run_process: signals, start, shutdown(wait), close db. `worker` and `agents` are selections.
   agents/              LangGraph graphs. Readers and reporters; never writers of market data.
     base.py            Severity, Finding, AgentReport: the vocabulary every graph speaks.
     shell.py           Subprocess runner behind a Protocol, plus secret redaction.
@@ -146,11 +153,11 @@ candlegraph/
     stages.py          StageRecord per node: duration and what it read; the Stages report section, `--progress`, the UI strip.
     reporting.py       Markdown rendering and the sinks: log, ledger, file, webhook, github.
     ledger.py          The agent_run table.
-    scheduler.py       APScheduler wiring and the `candlegraph agents` process.
     observer/          Stale data, gaps on liquid tokens, metric drift. assess.py is pure.
     janitor/           Run the checks, apply mechanical fixes, re-check, draft a PR.
   utils/
     logging_utils.py   Logger setup.
+    ports.py           Is a TCP port free to bind; `serve --port` uses it.
 alembic/versions/    Migrations. The schema name comes from settings.
 config/tokens.yaml   The tokens this deployment tracks, with their knowledge-layer aliases.
 docs/<area>/<topic>/DESIGN.md   Design documents. Why, not how; `docs/README.md` indexes them.
