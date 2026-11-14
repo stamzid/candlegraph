@@ -167,7 +167,7 @@ def test_agents_runs_the_schedule_loop(cli_env: FakeDatabase, monkeypatch: pytes
     monkeypatch.setattr("candlegraph.harness.process.run_process", lambda s, jobs, **k: called.append(jobs))
 
     assert main(["agents"]) == 0
-    assert [job.name for job in called[0]] == ["observer", "janitor"]
+    assert [job.name for job in called[0]] == ["observer", "janitor", "fetch_news"]
 
 
 # --- agent-runs ------------------------------------------------------------

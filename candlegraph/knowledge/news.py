@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from candlegraph.knowledge.assets import sync_assets
 from candlegraph.knowledge.budget import Budget, decide
@@ -39,6 +39,10 @@ from candlegraph.settings import Settings
 from candlegraph.storage import DatabaseManager
 from candlegraph.tokens import Token, TokenRegistry, get_token_registry
 from candlegraph.utils.logging_utils import service_logger
+
+if TYPE_CHECKING:
+    from candlegraph.harness.jobs import JobContext
+    from candlegraph.harness.runs import RunOutcome
 
 Status = Literal["ok", "cached", "budget_refused", "rate_limited", "error"]
 
@@ -336,17 +340,77 @@ def run_news_fetch(
 ) -> NewsFetchSummary:
     """The operator entry point: build the client, resolve symbols, fetch.
 
+    With no ``symbols`` this covers the **active** tokens — the set the
+    deployment polls for prices, and the set whose signals are explained
+    from fresh news. An inactive token still has its stored history and can
+    still be asked for by name; what it does not get is a daily credit
+    spent on it forever. The scheduled ``fetch_news`` job, this function and
+    the UI button all share this rule.
+
     Raises:
         NewsError: no API key, or a symbol that is not tracked.
     """
+    return fetch_news(db, settings, build_tavily_source(settings), resolve_tokens(symbols, registry), now=now)
+
+
+def resolve_tokens(symbols: list[str] | None, registry: TokenRegistry | None = None) -> list[Token]:
+    """Named tokens, or the active ones. Raises ``NewsError`` on an unknown symbol."""
     registry = registry or get_token_registry()
-    if symbols:
-        tokens = []
-        for symbol in symbols:
-            token = registry.by_symbol(symbol)
-            if token is None:
-                raise NewsError(f"unknown token {symbol!r}; tracked: {', '.join(registry.symbols)}")
-            tokens.append(token)
+    if not symbols:
+        return list(registry.active)
+    tokens = []
+    for symbol in symbols:
+        token = registry.by_symbol(symbol)
+        if token is None:
+            raise NewsError(f"unknown token {symbol!r}; tracked: {', '.join(registry.symbols)}")
+        tokens.append(token)
+    return tokens
+
+
+def news_job_body(ctx: JobContext) -> RunOutcome:
+    """The ``fetch_news`` job: one budgeted search per token per UTC day.
+
+    Scheduled runs cover the **active** tokens only — the set the deployment
+    polls for prices, and the set a signal can be explained for from fresh
+    data. Spending a daily credit on a token nobody is trading is the kind
+    of cost that only shows up at the end of the month. ``ctx.params`` may
+    carry ``symbols`` (what ``knowledge fetch-news --symbol`` passes), and
+    ``registry`` / ``now`` for tests.
+
+    The ``run`` row is written by the harness's ledger hook, not here.
+
+    Outcome: ``failed`` if a rate limit halted the run, ``partial`` if a
+    token errored, otherwise ``succeeded``. A budget refusal is the guard
+    doing its job, so it counts but does not fail the run.
+    """
+    from candlegraph.harness.runs import Outcome, RunOutcome
+
+    summary = run_news_fetch(
+        ctx.db,
+        ctx.settings,
+        symbols=ctx.params.get("symbols"),
+        registry=ctx.params.get("registry"),
+        now=ctx.params.get("now"),
+    )
+    statuses = [o.status for o in summary.outcomes]
+    counts = {
+        "searched": statuses.count("ok"),
+        "cached": statuses.count("cached"),
+        "refused": statuses.count("budget_refused"),
+        "errored": statuses.count("error") + statuses.count("rate_limited"),
+        "documents_stored": summary.documents_stored,
+        "credits_spent": summary.credits_spent,
+    }
+    if "rate_limited" in statuses:
+        outcome = Outcome.FAILED
+    elif "error" in statuses:
+        outcome = Outcome.PARTIAL
     else:
-        tokens = list(registry)
-    return fetch_news(db, settings, build_tavily_source(settings), tokens, now=now)
+        outcome = Outcome.SUCCEEDED
+    return RunOutcome(
+        outcome=outcome,
+        counts=counts,
+        errors={o.symbol: o.message for o in summary.failed},
+        detail={"day": summary.day, "tokens": [o.symbol for o in summary.outcomes]},
+        payload=summary,
+    )

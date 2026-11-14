@@ -235,6 +235,9 @@ class Statements:
     fill_cache_summary: sql.Composed
     # agents
     insert_agent_run: sql.Composed
+    open_run: sql.Composed
+    close_run: sql.Composed
+    get_recent_generic_runs: sql.Composed
     open_agent_run: sql.Composed
     close_agent_run: sql.Composed
     get_recent_agent_runs: sql.Composed
@@ -652,6 +655,48 @@ def statements_for(schema: str) -> Statements:
         """
     ).format(ns=ns)
 
+    # --- the generic run ledger --------------------------------------------
+    # Jobs with no ledger of their own (the news fetch; stage 2's pipelines)
+    # record themselves here. Same two phases as ingest_run and agent_run.
+    open_run = sql.SQL(
+        """
+        INSERT INTO {ns}.run (run_id, job, trigger, outcome, started_at, parent_run_id)
+        VALUES (%(run_id)s, %(job)s, %(trigger)s, 'running', %(started_at)s, %(parent_run_id)s)
+        RETURNING id
+        """
+    ).format(ns=ns)
+
+    # An upsert for the same reason as close_agent_run: a failed open must not
+    # cost us the record of the run.
+    close_run = sql.SQL(
+        """
+        INSERT INTO {ns}.run (
+            run_id, job, trigger, outcome, started_at, finished_at, duration_seconds,
+            counts, errors, detail, parent_run_id
+        )
+        VALUES (
+            %(run_id)s, %(job)s, %(trigger)s, %(outcome)s, %(started_at)s, %(finished_at)s,
+            %(duration_seconds)s, %(counts)s, %(errors)s, %(detail)s, %(parent_run_id)s
+        )
+        ON CONFLICT (run_id) DO UPDATE SET
+            outcome = EXCLUDED.outcome,
+            finished_at = EXCLUDED.finished_at,
+            duration_seconds = EXCLUDED.duration_seconds,
+            counts = EXCLUDED.counts,
+            errors = EXCLUDED.errors,
+            detail = EXCLUDED.detail
+        """
+    ).format(ns=ns)
+
+    get_recent_generic_runs = sql.SQL(
+        """
+        SELECT * FROM {ns}.run
+        WHERE (%(job)s::text IS NULL OR job = %(job)s)
+        ORDER BY started_at DESC
+        LIMIT %(limit)s
+        """
+    ).format(ns=ns)
+
     # Opened when the run starts: outcome 'running', no status yet. A row that
     # stays like this means the process died mid-run; run_log shows it.
     open_agent_run = sql.SQL(
@@ -745,6 +790,9 @@ def statements_for(schema: str) -> Statements:
         delete_fills_for_method=delete_fills_for_method,
         fill_cache_summary=fill_cache_summary,
         insert_agent_run=insert_agent_run,
+        open_run=open_run,
+        close_run=close_run,
+        get_recent_generic_runs=get_recent_generic_runs,
         open_agent_run=open_agent_run,
         close_agent_run=close_agent_run,
         get_recent_agent_runs=get_recent_agent_runs,

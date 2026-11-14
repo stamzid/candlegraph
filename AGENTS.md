@@ -40,7 +40,7 @@ a target, and never let CI run something that is not one either.
 | Sync assets and aliases from `tokens.yaml` | `make sync-assets` (in the stack) or `candlegraph knowledge sync-assets` |
 | The embedding model server's log (Ollama is part of `make up`; the first start pulls `bge-m3`) | `make logs-ollama` |
 | Embed chunks / re-encode after a model change | `make embed` / `make reembed` (or `candlegraph knowledge embed\|reembed`) |
-| Fetch news (one budgeted search per token per UTC day) | `make fetch-news` (or `candlegraph knowledge fetch-news [--symbol S]`) |
+| Fetch news (one budgeted search per **active** token per UTC day; `--symbol` for any tracked token) | `make fetch-news` (or `candlegraph knowledge fetch-news [--symbol S]`); on a schedule via `FETCH_NEWS_INTERVAL`, disabled by default |
 | Hybrid retrieval as of a bar | `make search ARGS='"WBTC unlock" --symbol WBTC'` (or `candlegraph knowledge search`) |
 | Link stored chunks to the assets they name | `make link-mentions` (idempotent backfill; the news pipeline links as it stores) |
 | Explain a signal with cited news (no LLM key needed) | `make explain ARGS='WETH --strategy bollinger'` (or `candlegraph signals WETH --explain [--at ISO] [--reference S] [--no-search]`) |
@@ -140,10 +140,11 @@ candlegraph/
     sources/
       base.py          Source Protocol: search(query, window) -> RawDocuments. Never writes, never decides.
       tavily.py        The metered client: bounded news search, backoff on 5xx, 429/432 never retried.
-  harness/             The runner (rollout steps 1–2): one way to schedule, run and record a job.
-    jobs.py            Job, JobContext, the JOBS registry (ingest, observer, janitor), select(role | names).
+  harness/             The runner (rollout steps 1–3): one way to schedule, run and record a job.
+    jobs.py            Job, JobContext, the JOBS registry (ingest, observer, janitor, fetch_news), select(role | names).
     runs.py            Run, Outcome, RunOutcome, run_job — every run passes through it; never raises.
-    hooks.py           RunHook, the log hook and the two ledger hooks that write every ingest_run/agent_run row.
+    hooks.py           RunHook, the log hook and the three ledger hooks that write every ingest_run/agent_run/run row.
+    ledger.py          The generic `run` table: open_run / close_run, for jobs with no ledger of their own.
     stages.py          StageRecord, staged() for graph nodes, timed_stage() for plain code. agents/stages.py re-exports it.
     scheduler.py       The one BackgroundScheduler builder: immediate first firing, max_instances=1, coalesce.
     process.py         run_process: signals, start, shutdown(wait), close db. `worker` and `agents` are selections.
@@ -187,7 +188,8 @@ schema.graphql       Generated. `make sdl`; a test fails if it is stale.
 | `signal` | one row per strategy, symbol and bar | `(strategy, symbol, period_start_unix)` | **hypertable** |
 | `token_hours_fill` | one row per **missing** token-hour, per estimator | `(token_id, period_start_unix, method)` | plain — a cache, and the one table that is deleted from |
 | `agent_run` | one row per agent graph run; written when it starts (`outcome = running`) and when it ends | `run_id` | plain |
-| `run_log` | a **view** over `ingest_run` and `agent_run` with the same columns: `job`, `trigger`, `outcome`, `verdict` | — | view |
+| `run` | one row per run of a job with no ledger of its own (`fetch_news`; stage 2 pipelines); counts and errors as JSONB | `run_id` | plain |
+| `run_log` | a **view** over `ingest_run`, `agent_run` and `run` with the same columns: `job`, `trigger`, `outcome`, `verdict` | — | view |
 | `asset` | one row per knowledge entity (token addresses today) | `id` | plain |
 | `source` | one row per document source (`tavily`, `rss:<feed>`, `manual`) | `id` | plain |
 | `document` | one row per retrieved document | `url_hash` (unique; sha256 of the normalised URL) | plain |

@@ -1,10 +1,12 @@
 # The runner: one way to schedule, run and record a job
 
-**Status:** partly implemented — 2026-11-13. Rollout steps 1 and 2 are
-built (the registry, `run_job`, one scheduler, one process loop, ledger
-rows opened before and closed after every run, the `run_log` view, stages
-for ingest). Step 3 (the news-fetch job and the generic `run` table) is
-not built. The steps are in [`../../rollout/ROLLOUT.md`](../../rollout/ROLLOUT.md).
+**Status:** implemented — 2026-11-14. Rollout steps 1, 2 and 3 are built:
+the registry (four jobs), `run_job`, one scheduler, one process loop,
+ledger rows opened before and closed after every run, the `run_log` view
+over three ledgers, stages for ingest, and the scheduled news fetch as
+the job that proves a new job needs no new scheduler or ledger code.
+Step 4 (invariant 27 and the remaining docs) is the closeout. The steps
+are in [`../../rollout/ROLLOUT.md`](../../rollout/ROLLOUT.md).
 This is groundwork for stage 2 (the harness), not stage 2 itself: no
 pipeline specs, no event broker, no OpenTelemetry.
 **Code:** `candlegraph/harness/`, plus its callers in `cli.py`,
@@ -55,8 +57,8 @@ One package, `candlegraph/harness/`, with these parts:
 1. **A job registry (`jobs.py`).** A `Job` has a name, a function to run,
    the setting its interval is read from, the process that runs it by
    default (`worker` or `agents`), and what it writes. `ingest`,
-   `observer` and `janitor` are registered. The CLI, the scheduler, the
-   docs and the tests all read this registry.
+   `observer`, `janitor` and `fetch_news` are registered. The CLI, the
+   scheduler, the docs and the tests all read this registry.
 2. **One function that runs a job (`runs.py::run_job`).** It creates a
    `Run`, tells the hooks the run started, calls the job, tells the hooks
    it finished, and returns the `Run`. It never raises. Every caller uses
@@ -221,9 +223,15 @@ SELECT run_id, agent AS job, trigger, outcome,
 **Why not one `run` table replacing both?** Too many readers use the two
 tables by name and column, and `ingest_run`'s count columns are what
 `make runs` prints. Rewriting every reader would cost the whole budget and
-give the harness nothing a view does not. A generic `run` table is still
-planned, for jobs that have no ledger of their own; it arrives with the
-first such job (rollout step 3), and the view gets a third branch then.
+give the harness nothing a view does not.
+
+**The third ledger: `run`.** Jobs with no ledger of their own write to a
+generic `run` table instead (revision `43a899e29e3a`): the same two-phase
+row and the same `trigger` / `outcome` / `parent_run_id` columns, with the
+job's own numbers as JSONB (`counts`, `errors`, `detail`). `fetch_news` is
+the first; stage 2's pipeline runs are next. `run_log` unions all three.
+This is what makes a new job cheap — a registry entry and a body, no
+migration — which was the point of step 3.
 
 ### `run_job`: what happens in order
 
@@ -363,6 +371,7 @@ No new setting in steps 1 and 2. Selecting jobs is a CLI flag
 | unit, scheduler | job ids, interval, immediate first run, `max_instances=1`, `coalesce=True`; jobs with interval 0 are skipped; a job can be overridden |
 | unit, process | start, shutdown with and without waiting, database closed; an empty selection is a warning |
 | unit, `run_job` | hooks are called in order; a raising body gives a `FAILED` run; a raising hook is logged and the others still run; the ledger hooks write open then close with the trigger and parent id |
+| unit, `fetch_news` | a scheduled fetch covers the active tokens only; a budget refusal is a `succeeded` run with `refused` counted; a token error is `partial`; a rate limit is `failed`; the run lands in the generic `run` table |
 | unit, agents | the graphs no longer insert a row in `publish`; the harness does |
 | integration | the migration round-trips on tables with rows; `run_log` returns both jobs; a run opened and never closed shows as `running` |
 
@@ -392,4 +401,5 @@ behaves as before; `candlegraph ingest --progress` and `candlegraph
 observe --progress` print the same stage format; `make runs ARGS='--job
 observer'` lists observer runs with `trigger` and `outcome`; an observer
 run interrupted before it finishes is visible as `running`; and
-`candlegraph jobs` lists three jobs (four once the news fetch is added).
+`candlegraph jobs` lists four jobs: `ingest`, `observer`, `janitor` and
+`fetch_news`.

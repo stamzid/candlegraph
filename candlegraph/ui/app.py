@@ -2054,13 +2054,15 @@ def _news_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> 
         "Cached days cost nothing; the guard refuses before the provider would.",
     )
     left, right = st.columns([1, 2])
-    chosen = left.multiselect("Tokens (empty = all tracked)", ctx["symbols"], default=[], key="news_symbols")
+    chosen = left.multiselect(
+        "Tokens (empty = the active tokens)", ctx["symbols"], default=[], key="news_symbols"
+    )
     if left.button("Fetch news…", key="news_ask"):
         st.session_state["news_pending"] = chosen or None
     if "news_pending" in st.session_state:
         pending = st.session_state["news_pending"]
         with right:
-            count = len(pending) if pending else len(ctx["symbols"])
+            count = len(pending) if pending else len(view.default_symbols)
             st.warning(
                 f"**Search Tavily for {count} token(s)?** Costs up to {count} credit(s) "
                 f"({view.spent_month}/{view.monthly_cap} already spent this month); tokens already "

@@ -15,8 +15,8 @@ from candlegraph.settings import Settings
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_the_first_three_jobs_are_registered() -> None:
-    assert list(JOBS) == ["ingest", "observer", "janitor"]
+def test_the_registered_jobs_are_the_four_the_docs_name() -> None:
+    assert list(JOBS) == ["ingest", "observer", "janitor", "fetch_news"]
 
 
 @pytest.mark.parametrize("name", list(JOBS))
@@ -41,7 +41,7 @@ def test_every_job_declares_a_known_write_surface_and_role(name: str) -> None:
 
 def test_selection_by_role_and_by_name() -> None:
     assert [job.name for job in select(role="worker")] == ["ingest"]
-    assert [job.name for job in select(role="agents")] == ["observer", "janitor"]
+    assert [job.name for job in select(role="agents")] == ["observer", "janitor", "fetch_news"]
     assert [job.name for job in select(names=["janitor"])] == ["janitor"]
     with pytest.raises(ValueError, match="unknown job"):
         select(names=["nope"])

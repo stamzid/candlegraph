@@ -388,7 +388,7 @@ def test_knowledge_fetch_news_prints_outcomes_and_exits_zero_when_clean(
 
     captured: dict[str, Any] = {}
 
-    def fake(db: Any, settings: Any, symbols: Any = None) -> NewsFetchSummary:
+    def fake(db: Any, settings: Any, symbols: Any = None, **_kwargs: Any) -> NewsFetchSummary:
         captured["symbols"] = symbols
         return NewsFetchSummary(
             day="2026-11-01",
@@ -408,6 +408,25 @@ def test_knowledge_fetch_news_prints_outcomes_and_exits_zero_when_clean(
     assert "spent 1 credits, stored 3 documents" in out
 
 
+def test_knowledge_fetch_news_records_a_manual_run(
+    cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A hand-run fetch is a run like any other: same `run` row, trigger `manual`."""
+    from candlegraph.knowledge.news import NewsFetchSummary
+
+    monkeypatch.setattr(
+        "candlegraph.knowledge.news.run_news_fetch",
+        lambda db, settings, symbols=None, **_kw: NewsFetchSummary(day="2026-11-01", outcomes=[]),
+    )
+
+    assert main(["knowledge", "fetch-news"]) == 0
+
+    writes = [(label, params) for label, params in cli_env.executed if label in ("open_run", "close_run")]
+    assert [label for label, _ in writes] == ["open_run", "close_run"]
+    assert all(params is not None and params["trigger"] == "manual" for _, params in writes)
+    assert all(params is not None and params["job"] == "fetch_news" for _, params in writes)
+
+
 def test_knowledge_fetch_news_exits_non_zero_on_a_failed_run(
     cli_env: FakeDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -415,7 +434,7 @@ def test_knowledge_fetch_news_exits_non_zero_on_a_failed_run(
 
     monkeypatch.setattr(
         "candlegraph.knowledge.news.run_news_fetch",
-        lambda db, settings, symbols=None: NewsFetchSummary(
+        lambda db, settings, symbols=None, **_kw: NewsFetchSummary(
             day="2026-11-01", outcomes=[FetchOutcome("WBTC", "rate_limited", message="HTTP 429")]
         ),
     )

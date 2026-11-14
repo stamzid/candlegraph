@@ -118,7 +118,7 @@ from candlegraph.strategies.backtest import BacktestConfig, BacktestError, Backt
 from candlegraph.strategies.backtest import compare as compare_backtests
 from candlegraph.strategies.base import StrategyResult
 from candlegraph.strategies.montecarlo import SimulationSummary, evaluate_strategy
-from candlegraph.tokens import get_token_registry
+from candlegraph.tokens import TokenRegistry, get_token_registry
 from candlegraph.utils.logging_utils import service_logger
 
 
@@ -1870,6 +1870,8 @@ class NewsView:
     """documents, chunks, embedded, undated, last_retrieved_at for this source."""
     embedding_pending: int
     """Chunks still waiting for the configured model's vector."""
+    default_symbols: tuple[str, ...]
+    """What a fetch covers when no token is picked: the active tokens."""
 
     @property
     def monthly_usage(self) -> float:
@@ -1904,7 +1906,11 @@ def _one(rows: list[dict[str, Any]], default: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_news_view(
-    db: DatabaseManager, settings: Settings, now: datetime | None = None, limit: int = 30
+    db: DatabaseManager,
+    settings: Settings,
+    now: datetime | None = None,
+    limit: int = 30,
+    registry: TokenRegistry | None = None,
 ) -> NewsView:
     """Everything the News dashboard shows, from the ledger and the corpus."""
     statements = knowledge_statements_for(db.schema)
@@ -1953,6 +1959,7 @@ def build_news_view(
         documents=documents,
         corpus=dict(corpus),
         embedding_pending=int(backlog["missing"]) + int(backlog["stale"]),
+        default_symbols=(registry or get_token_registry()).active_symbols,
     )
 
 

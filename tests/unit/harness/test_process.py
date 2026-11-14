@@ -74,3 +74,19 @@ def test_nothing_enabled_is_a_warning_not_a_crash(
 
     assert "nothing to schedule" in caplog.text
     assert events == ["start", "shutdown(wait=True)"]
+
+
+def test_the_agents_banner_names_every_hosted_job_and_its_interval() -> None:
+    """Built from the registry: a job added to the process shows up without an edit here."""
+    from candlegraph.harness.process import agents_banner
+
+    line = agents_banner(
+        make_settings(observer_interval=900, janitor_interval=0, fetch_news_interval=86400),
+        select(role="agents"),
+    )
+
+    assert "observer every 900s" in line
+    assert "janitor every 0s" in line
+    assert "fetch_news every 86400s" in line
+    # The lead is the jobs that will actually fire.
+    assert line.startswith("Agents starting: observer, fetch_news (")

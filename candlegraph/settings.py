@@ -226,6 +226,14 @@ class Settings(BaseSettings):
     # Checkout the janitor operates on. Defaults to this repository.
     janitor_repo_root: Path | None = None
 
+    # --- scheduled knowledge jobs ------------------------------------------
+    # Seconds between news fetches in `candlegraph agents`; 0 disables, which
+    # is the default — a scheduled fetch spends Tavily credits. 86400 is one
+    # pass per day over the active tokens (one credit each). The cache key is
+    # the UTC day, so a container restart re-runs the job for free; the time
+    # of day it fires does not matter.
+    fetch_news_interval: int = Field(default=0, ge=0)
+
     # --- UI ----------------------------------------------------------------
     ui_host: str = "0.0.0.0"
     ui_port: int = 8501

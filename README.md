@@ -253,7 +253,7 @@ a failing one always is.
 | `agent-runs [--limit N] [--agent X] [--show]` | Recent reports from the agent ledger |
 | `knowledge sync-assets` | Load `asset` rows (addresses, symbols, aliases) from `config/tokens.yaml` |
 | `knowledge embed` / `knowledge reembed [--batch-size N] [--limit N]` | Embed chunks without a vector (or from another model) with the configured `EMBEDDING_MODEL`; resumable |
-| `knowledge fetch-news [--symbol S]` | One budgeted Tavily news search per token per UTC day; cached days cost nothing, refusals are ledgered |
+| `knowledge fetch-news [--symbol S]` | One budgeted Tavily news search per active token per UTC day; cached days cost nothing, refusals are ledgered. Set `FETCH_NEWS_INTERVAL` to run it on a schedule (off by default) |
 | `knowledge search QUERY [--symbol S] [--at ISO] [--mode display\|strategy] [--lexical-only]` | Hybrid retrieval over stored news as of a bar: dense + lexical legs fused by reciprocal rank, nothing published after the bar |
 | `knowledge link-mentions` | Link stored chunks to the assets their aliases name (idempotent backfill) |
 | `mcp [--transport stdio\|http]` | Serve the read-only tools over the Model Context Protocol (needs `uv sync --extra mcp`) |

@@ -3,12 +3,14 @@
 :class:`CompositeHook` calls each hook in turn and isolates failures: a hook
 that raises is logged and skipped, so it can never fail the run (invariant 12).
 
-Three hooks exist:
+Four hooks exist:
 
 - :class:`LogHook` — debug lines at run boundaries.
 - :class:`IngestLedgerHook` — the ``ingest_run`` row, opened in ``started``
   and closed in ``finished``.
 - :class:`AgentLedgerHook` — the same for ``agent_run``.
+- :class:`RunLedgerHook` — the same for the generic ``run`` table, used by
+  every job without a ledger of its own.
 
 The ledger rows are written here and nowhere else. Stage 2 will add an event
 bus hook and a tracing hook beside these.
@@ -140,6 +142,56 @@ class AgentLedgerHook:
             )
         except Exception as exc:
             service_logger.warning("Could not close agent_run row for run %s: %s", run.run_id, exc)
+
+
+class RunLedgerHook:
+    """Writes the generic ``run`` row for jobs with no ledger of their own.
+
+    The job's counts and errors go in as JSONB, so a new job needs no
+    migration — which is the point of the generic table.
+    """
+
+    def __init__(self, db: DatabaseManager) -> None:
+        self.db = db
+        self.stages: list[dict[str, Any]] = []
+
+    def started(self, run: Run) -> None:
+        from candlegraph.harness.ledger import open_run
+
+        try:
+            open_run(self.db, run.run_id, run.job, run.trigger, run.started_at, run.parent_run_id)
+        except Exception as exc:
+            # Not fatal: close_run is an upsert and still writes the row.
+            service_logger.warning("Could not open run row for run %s: %s", run.run_id, exc)
+
+    def stage(self, run: Run, record: StageRecord) -> None:
+        self.stages.append(record.to_dict())
+
+    def finished(self, run: Run, outcome: RunOutcome) -> None:
+        from candlegraph.harness.ledger import close_run
+
+        assert run.finished_at is not None
+        detail = dict(outcome.detail)
+        if self.stages:
+            detail["stages"] = self.stages
+        if run.exception is not None:
+            detail["exception"] = type(run.exception).__name__
+        try:
+            close_run(
+                self.db,
+                run_id=run.run_id,
+                job=run.job,
+                trigger=run.trigger,
+                outcome=outcome.outcome.value,
+                started_at=run.started_at,
+                finished_at=run.finished_at,
+                counts=outcome.counts,
+                errors=outcome.errors,
+                detail=detail,
+                parent_run_id=run.parent_run_id,
+            )
+        except Exception as exc:
+            service_logger.warning("Could not close run row for run %s: %s", run.run_id, exc)
 
 
 class CompositeHook:

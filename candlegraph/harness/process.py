@@ -82,9 +82,11 @@ def worker_banner(settings: Settings) -> str:
 
 
 def agents_banner(settings: Settings, jobs: Sequence[Job]) -> str:
-    """The agents' start-up line, unchanged from before the harness."""
+    """The agents' start-up line: every hosted job and the interval it runs on.
+
+    Built from the registry rather than named settings, so a job added to
+    the process shows up here without this function changing.
+    """
+    schedule = ", ".join(f"{job.name} every {job.schedule.seconds(settings)}s" for job in jobs) or "none"
     enabled = harness_scheduler.scheduled_jobs(settings, jobs)
-    return (
-        f"Agents starting: {_names(enabled)} (observer every {settings.observer_interval}s, "
-        f"janitor every {settings.janitor_interval}s, sinks {','.join(settings.report_sinks)})"
-    )
+    return f"Agents starting: {_names(enabled)} ({schedule}, sinks {','.join(settings.report_sinks)})"

@@ -312,3 +312,78 @@ def test_a_run_opened_and_never_closed_is_visible_as_running(agent_db: DatabaseM
     (row,) = agent_db.fetch_all(agent_db.sql.get_run_log, {"limit": 10, "job": "observer"})
     assert row["outcome"] == "running" and row["finished_at"] is None and row["trigger"] == "ui"
     assert recent_agent_runs(agent_db, agent="observer") == []
+
+
+# --- the generic run ledger (harness rollout step 3) ----------------------------
+
+
+def test_a_job_without_its_own_ledger_round_trips_through_the_run_table(
+    agent_db: DatabaseManager,
+) -> None:
+    """`run` carries the job's own numbers as JSONB, so a new job needs no migration."""
+    from candlegraph.harness.ledger import close_run, open_run, recent_runs
+
+    agent_db.execute(f'TRUNCATE "{agent_db.schema}".run')
+    run_id = "88888888-8888-8888-8888-888888888888"
+    open_run(agent_db, run_id, "fetch_news", "scheduled", NOW)
+
+    (opened,) = recent_runs(agent_db, job="fetch_news")
+    assert opened["outcome"] == "running" and opened["finished_at"] is None
+
+    close_run(
+        agent_db,
+        run_id=run_id,
+        job="fetch_news",
+        trigger="scheduled",
+        outcome="partial",
+        started_at=NOW,
+        finished_at=NOW + timedelta(seconds=3),
+        counts={"searched": 2, "cached": 1, "refused": 0, "errored": 1, "documents_stored": 7},
+        errors={"SHIB": "upstream 500"},
+        detail={"day": "2026-10-25"},
+    )
+
+    (row,) = recent_runs(agent_db, job="fetch_news")
+    assert row["outcome"] == "partial" and float(row["duration_seconds"]) == 3.0
+    assert row["counts"]["documents_stored"] == 7  # JSONB comes back decoded
+    assert row["errors"]["SHIB"] == "upstream 500"
+    assert recent_runs(agent_db, job="nothing_like_this") == []
+
+
+def test_run_log_reads_all_three_ledgers(agent_db: DatabaseManager) -> None:
+    """The view is how `candlegraph runs --all` sees every job in one vocabulary."""
+    from candlegraph.agents.ledger import close_agent_run, open_agent_run
+    from candlegraph.harness.ledger import close_run
+
+    agent_db.execute(f'TRUNCATE "{agent_db.schema}".run')
+    seed_run(agent_db, NOW - timedelta(minutes=10))
+    open_agent_run(agent_db, "99999999-9999-9999-9999-999999999999", "observer", "scheduled", NOW)
+    close_agent_run(
+        agent_db,
+        run_id="99999999-9999-9999-9999-999999999999",
+        agent="observer",
+        trigger="scheduled",
+        outcome="succeeded",
+        started_at=NOW,
+        finished_at=NOW,
+        report=AgentReport("observer", "99999999-9999-9999-9999-999999999999", NOW, NOW),
+    )
+    close_run(
+        agent_db,
+        run_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        job="fetch_news",
+        trigger="manual",
+        outcome="succeeded",
+        started_at=NOW,
+        finished_at=NOW,
+        counts={"searched": 1},
+    )
+
+    rows = agent_db.fetch_all(agent_db.sql.get_run_log, {"limit": 10, "job": None})
+    by_job = {r["job"]: r for r in rows}
+    assert {"ingest", "observer", "fetch_news"} <= set(by_job)
+    # A generic run has an outcome and no verdict: only agents judge anything.
+    assert by_job["fetch_news"]["outcome"] == "succeeded"
+    assert by_job["fetch_news"]["verdict"] is None and by_job["fetch_news"]["trigger"] == "manual"
+    only = agent_db.fetch_all(agent_db.sql.get_run_log, {"limit": 10, "job": "fetch_news"})
+    assert [r["job"] for r in only] == ["fetch_news"]

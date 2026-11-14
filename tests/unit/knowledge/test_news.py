@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from candlegraph.harness import JOBS, Outcome
 from candlegraph.knowledge.documents import RawDocument
 from candlegraph.knowledge.news import (
     NewsError,
@@ -339,3 +340,121 @@ def test_a_fetch_syncs_assets_and_links_mentions_for_the_documents_it_stores() -
     assert "upsert_asset" in labels, "mention rows are foreign keys into asset; the sync runs first"
     assert "upsert_mentions" in labels
     assert summary.outcomes[0].mentions_linked == 1
+
+
+# --- the scheduled job (harness rollout step 3) --------------------------------------
+
+
+def job_run(db: Any, settings_: Any, params: dict[str, Any] | None = None) -> Any:
+    """Run the fetch_news job the way the scheduler and the CLI do."""
+    from candlegraph.harness import JOBS, run_job
+
+    return run_job(JOBS["fetch_news"], settings_, params=params or {}, db=db)
+
+
+def active_registry() -> TokenRegistry:
+    """WBTC active, SHIB not: the split the scheduled job respects."""
+    return TokenRegistry(
+        tokens=(
+            Token(address=WBTC, symbol="WBTC", name="Wrapped BTC", aliases=("WBTC", "Bitcoin")),
+            Token(address=SHIB, symbol="SHIB", name="SHIBA INU", active=False),
+        )
+    )
+
+
+def test_a_scheduled_fetch_covers_the_active_tokens_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A daily credit on a token nobody polls is a cost that only shows up monthly."""
+    db = NewsDatabase()
+    source = FakeSource([SearchResult([document()], 1, 1)])
+    monkeypatch.setattr("candlegraph.knowledge.news.build_tavily_source", lambda _s: source)
+
+    run = job_run(db, settings(), {"registry": active_registry()})
+
+    assert [call["query"].split()[0] for call in source.calls] == ["WBTC"]
+    assert run.outcome is Outcome.SUCCEEDED
+    assert run.result is not None and run.result.counts["searched"] == 1
+
+
+def test_an_inactive_token_can_still_be_asked_for_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = NewsDatabase()
+    source = FakeSource([SearchResult([document()], 1, 1)])
+    monkeypatch.setattr("candlegraph.knowledge.news.build_tavily_source", lambda _s: source)
+
+    job_run(db, settings(), {"registry": active_registry(), "symbols": ["SHIB"]})
+
+    assert [call["query"].split()[0] for call in source.calls] == ["SHIB"]
+
+
+def test_a_budget_refusal_is_a_successful_run_with_the_refusal_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard working is not a failure; the observer reads the count."""
+    db = NewsDatabase()
+    source = FakeSource()
+    monkeypatch.setattr("candlegraph.knowledge.news.build_tavily_source", lambda _s: source)
+    # Today's cap is already spent, so the one active token is refused.
+    db.source_calls.append({"status": "ok", "credits": 10, "called_at": NOW, "params": "{}"})
+
+    run = job_run(db, settings(), {"registry": active_registry(), "now": NOW})
+
+    assert source.calls == []
+
+    assert run.outcome is Outcome.SUCCEEDED
+    assert run.result is not None
+    assert run.result.counts["refused"] == 1 and run.result.counts["searched"] == 0
+    assert run.result.errors == {}
+
+
+def test_one_token_erroring_is_a_partial_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = NewsDatabase()
+    source = FakeSource([SearchResult([document()], 1, 1), TavilyError("upstream 500")])
+    monkeypatch.setattr("candlegraph.knowledge.news.build_tavily_source", lambda _s: source)
+
+    run = job_run(db, settings(), {"symbols": ["WBTC", "SHIB"], "registry": active_registry()})
+
+    assert run.outcome is Outcome.PARTIAL
+    assert run.result is not None and run.result.counts["errored"] == 1
+    assert "SHIB" in run.result.errors
+
+
+def test_a_rate_limit_fails_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A halt is a failure: the remaining tokens never got their search."""
+    db = NewsDatabase()
+    source = FakeSource([TavilyRateLimitError("HTTP 429")])
+    monkeypatch.setattr("candlegraph.knowledge.news.build_tavily_source", lambda _s: source)
+
+    run = job_run(db, settings(), {"symbols": ["WBTC", "SHIB"], "registry": active_registry()})
+
+    assert run.outcome is Outcome.FAILED
+    assert run.result is not None and run.result.counts["errored"] == 2
+
+
+def test_a_missing_api_key_fails_the_run_without_raising(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run_job never raises, but the CLI still needs the readable message."""
+    db = NewsDatabase()
+
+    run = job_run(db, make_settings(), {"registry": active_registry()})
+
+    assert run.outcome is Outcome.FAILED
+    assert isinstance(run.exception, NewsError) and "TAVILY_API_KEY" in str(run.exception)
+
+
+def test_the_run_is_recorded_in_the_generic_ledger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fetch_news has no ledger of its own, so it writes the `run` table."""
+    db = NewsDatabase()
+    source = FakeSource([SearchResult([document()], 1, 1)])
+    monkeypatch.setattr("candlegraph.knowledge.news.build_tavily_source", lambda _s: source)
+
+    run = job_run(db, settings(), {"registry": active_registry()})
+
+    writes = [(label, params) for label, params in db.executed if label in ("open_run", "close_run")]
+    assert [label for label, _ in writes] == ["open_run", "close_run"]
+    opened, closed = (params for _, params in writes)
+    assert opened is not None and closed is not None
+    assert opened["job"] == closed["job"] == "fetch_news"
+    assert opened["run_id"] == closed["run_id"] == run.run_id
+    assert opened["trigger"] == closed["trigger"] == "scheduled"
+    assert closed["outcome"] == "succeeded"
+    assert json.loads(closed["counts"])["documents_stored"] == 1
+    # It never writes market data (invariant 21); its declared surface is knowledge + ledger.
+    assert JOBS["fetch_news"].writes == frozenset({"knowledge", "ledger"})

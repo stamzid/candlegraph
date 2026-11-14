@@ -115,6 +115,19 @@ def _agent_ledger(settings: Settings, db: DatabaseManager, params: Mapping[str, 
     return AgentLedgerHook(db) if records_agent_run(settings, params) else None
 
 
+def _fetch_news(ctx: JobContext) -> RunOutcome:
+    from candlegraph.knowledge.news import news_job_body
+
+    return news_job_body(ctx)
+
+
+def _run_ledger(settings: Settings, db: DatabaseManager, params: Mapping[str, Any]) -> RunHook:
+    """The generic `run` table: for every job without a ledger of its own."""
+    from candlegraph.harness.hooks import RunLedgerHook
+
+    return RunLedgerHook(db)
+
+
 def _agent_outcome(report: AgentReport) -> RunOutcome:
     # A crashed graph still publishes an error report (invariant 21); that is
     # a failed *run* with no verdict, not a verdict of "error".
@@ -189,6 +202,15 @@ JOBS: dict[str, Job] = {
             writes=frozenset({"ledger", "reports"}),
             description="Run the checks, apply mechanical fixes, draft a PR",
             ledger=_agent_ledger,
+        ),
+        Job(
+            name="fetch_news",
+            run=_fetch_news,
+            schedule=Every("fetch_news_interval"),
+            role="agents",
+            writes=frozenset({"knowledge", "ledger"}),
+            description="One budgeted news search per active token per UTC day",
+            ledger=_run_ledger,
         ),
     )
 }

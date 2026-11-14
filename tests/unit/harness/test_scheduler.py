@@ -29,7 +29,7 @@ def test_the_ingest_job_fires_immediately_then_on_the_interval() -> None:
 @pytest.mark.parametrize("name", list(JOBS))
 def test_a_slow_run_cannot_stack_up_behind_the_next_tick(name: str) -> None:
     """A 90-day backfill outlasts a 300s interval; overlap would double-write."""
-    settings = make_settings(observer_interval=42, janitor_interval=7)
+    settings = make_settings(observer_interval=42, janitor_interval=7, fetch_news_interval=86400)
     job = build_scheduler(settings, ALL).get_job(name)
 
     assert job is not None

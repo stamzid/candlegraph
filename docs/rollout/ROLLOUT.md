@@ -31,7 +31,7 @@ is called done.
 |---|---|---|---|---|
 | 1 | One scheduler, one process loop, one `run_job` | S | — | done 2026-11-12 |
 | 2 | One shape of a run: ledger rows opened before and closed after every run, `trigger`, `outcome`, `parent_run_id`, the `run_log` view, stages for ingest | M | 1 | done 2026-11-13 — see Outcome |
-| 3 | A third job (`fetch_news`) and the generic `run` table | S | 1, 2 | todo — optional; stage 2 can absorb it |
+| 3 | A third job (`fetch_news`) and the generic `run` table | S | 1, 2 | done 2026-11-14 — see Outcome |
 | 4 | Closeout: invariant 27, docs, skills, README; archive this file | S | 1–3 | todo |
 
 **Why this order.** Step 1 changes control flow and no schema. Step 2
@@ -260,7 +260,57 @@ day; a budget refusal is a `succeeded` run with `refused` counted;
 `make fetch-news` still works and records a `manual` run; `make check`
 is green.
 
-**Outcome.** Not started.
+**Outcome.** Done 2026-11-14.
+
+- Migration `43a899e29e3a`: the `run` table (plain, as recorded in the
+  placement document before it was written) and `run_log` dropped and
+  recreated with its third branch. The downgrade restores the two-branch
+  view and drops the table.
+- `harness/ledger.py` (`open_run`, `close_run`, `recent_runs`) and
+  `RunLedgerHook`. A job with no ledger of its own now needs a registry
+  entry and a body — no migration, no new hook. That was the point of
+  the step, and it held: `fetch_news` added no scheduler or ledger code.
+- `knowledge/news.py::news_job_body` maps the summary to a `RunOutcome`:
+  counts `searched`, `cached`, `refused`, `errored`, `documents_stored`,
+  `credits_spent`; `failed` on a rate-limit halt, `partial` on a token
+  error, `succeeded` otherwise (a refusal is the guard working).
+- **One behaviour change, deliberate:** a fetch with no `--symbol` now
+  covers the **active** tokens, not every tracked token. It was all 11
+  before, which on a daily schedule is a standing credit cost for tokens
+  nobody polls. The CLI, the UI button and the scheduled job share the
+  rule through `news.resolve_tokens`; naming an inactive token still
+  works. The UI's "empty = all tracked" label and its credit estimate
+  were corrected to match.
+- `FETCH_NEWS_INTERVAL` (default `0`) in `settings.py` and
+  `.env.example`, with the restart/caching note the step asked for.
+- `candlegraph knowledge fetch-news` runs through `run_job` with trigger
+  `manual`; `NewsError` still exits with its readable message.
+- Tests: six in `tests/unit/knowledge/test_news.py` for the job body, a
+  CLI test for the manual run row, and two integration tests (the `run`
+  table round trip, `run_log` over three ledgers). The placement test now
+  lists `run`.
+- Two cosmetic bugs found while checking a real stack and fixed here:
+  `runs --all` printed `fetch_newsscheduled` (the job column was exactly
+  as wide as the longest job name), and the agents start-up banner named
+  the observer and janitor intervals from hardcoded settings, so
+  `fetch_news` was missing from it. The banner is now built from the
+  registry and a test pins it.
+- **Flagged, not fixed:** nothing embeds on a schedule. One real fetch of
+  the five active tokens stored 18 documents and **149 chunks**; a
+  deployment running `FETCH_NEWS_INTERVAL` and never calling `explain`
+  (which drains up to 256) accumulates an embedding backlog, so the
+  newest news reaches the lexical leg of retrieval only. The observer
+  reports it (`embedding_backlog`, INFO) so it is visible rather than
+  silent, and `make embed` is the cure. Registering `embed` as a job is
+  about twenty lines now — but it puts the embedder on a clock inside the
+  `agents` container, which is a deployment decision rather than a bug
+  fix, so it is left for a decision in step 4.
+- **`fill` is still not a scheduled job**, deliberately: its cache is
+  recomputed on demand and nothing has shown it needs a clock. `embed`
+  is the stronger candidate when one is wanted — the news job leaves
+  chunks unembedded until `make embed` runs — and it is left out for the
+  same reason: no demonstrated need yet. Both are twenty-line additions
+  to the registry now.
 
 ---
 

@@ -4,7 +4,8 @@
 recorded 2026-10-30 (revision `f399ca0770a0`, all plain); `token_hours_fill`
 recorded and implemented 2026-11-07 (revision `f116af87c3a2`, plain), and
 extended 2026-11-08 with `sigma_log` (`f513c5d75c55`) without changing its
-placement
+placement; the generic `run` ledger recorded and implemented 2026-11-14
+(revision `43a899e29e3a`, plain)
 **Area:** `alembic/versions/`, `candlegraph/storage/statements.py`
 **Companion:** [`../timescaledb/DESIGN.md`](../timescaledb/DESIGN.md) — why we
 adopted the extension at all, and how the migration works.

@@ -365,10 +365,15 @@ def _parser() -> argparse.ArgumentParser:
         "sync-assets", help="upsert asset rows (addresses, symbols, aliases) from config/tokens.yaml"
     )
     fetch = knowledge_sub.add_parser(
-        "fetch-news", help="one budgeted Tavily news search per token per UTC day; every call is ledgered"
+        "fetch-news",
+        help="one budgeted Tavily news search per token per UTC day; every call is ledgered",
     )
     fetch.add_argument(
-        "--symbol", action="append", default=None, help="only these tokens (repeatable; default: all tracked)"
+        "--symbol",
+        action="append",
+        default=None,
+        help="only these tokens (repeatable; default: the active tokens, which is also what the "
+        "scheduled FETCH_NEWS_INTERVAL job covers)",
     )
     search = knowledge_sub.add_parser(
         "search", help="hybrid retrieval over stored news as of a bar: dense + lexical, fused, no look-ahead"
@@ -748,13 +753,15 @@ def _run_log(limit: int, job: str | None) -> int:
         print(f"no {job + ' ' if job else ''}runs recorded yet")
         return 0
 
-    print(f"{'started':<21}{'job':<10}{'trigger':<11}{'outcome':<11}{'verdict':<10}{'secs':>8}  run_id")
+    # Wide enough for the longest registered job name plus a space.
+    width = max(len("fetch_news"), *(len(str(row["job"])) for row in rows)) + 2
+    print(f"{'started':<21}{'job':<{width}}{'trigger':<11}{'outcome':<11}{'verdict':<10}{'secs':>8}  run_id")
     for row in rows:
         duration = row["duration_seconds"]
         elapsed = f"{float(duration):>8.1f}" if duration is not None else f"{'-':>8}"
         # NULL trigger = a row written before the column existed; shown as "-", never guessed.
         print(
-            f"{row['started_at']:%Y-%m-%d %H:%M:%S}  {row['job']:<10}{row['trigger'] or '-':<11}"
+            f"{row['started_at']:%Y-%m-%d %H:%M:%S}  {row['job']:<{width}}{row['trigger'] or '-':<11}"
             f"{row['outcome']:<11}{row['verdict'] or '-':<10}{elapsed}  {str(row['run_id'])[:8]}"
         )
     return 0
@@ -1428,12 +1435,18 @@ def _knowledge(settings: Settings, args: argparse.Namespace) -> int:
             print(f"synced {written} assets from the token registry")
             return 0
         case "fetch-news":
-            from candlegraph.knowledge.news import NewsError, run_news_fetch
+            from candlegraph.harness import JOBS, run_job
+            from candlegraph.harness.runs import MANUAL
+            from candlegraph.knowledge.news import NewsError
 
-            try:
-                fetched = run_news_fetch(get_db(), settings, symbols=args.symbol)
-            except NewsError as exc:
-                raise SystemExit(str(exc)) from exc
+            # Through the harness, so a hand-run fetch is recorded in `run`
+            # exactly like the scheduled one, with trigger `manual`.
+            news_run = run_job(JOBS["fetch_news"], settings, trigger=MANUAL, params={"symbols": args.symbol})
+            if isinstance(news_run.exception, NewsError):
+                raise SystemExit(str(news_run.exception))
+            if news_run.payload is None:
+                return 1
+            fetched = news_run.payload
             print(f"{'token':<8}{'status':<16}{'credits':>8}{'results':>8}{'docs':>6}{'chunks':>7}  note")
             for o in fetched.outcomes:
                 print(
