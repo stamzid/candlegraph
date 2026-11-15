@@ -303,7 +303,11 @@ def test_the_hosted_provider_needs_a_key() -> None:
     with pytest.raises(EmbeddingError, match="OPENAI_API_KEY"):
         build_embedder(make_settings(embedding_provider="openai"))
 
-    embedder = build_embedder(make_settings(embedding_provider="openai", openai_api_key="sk-x"))
+    embedder = build_embedder(
+        make_settings(
+            embedding_provider="openai", openai_api_key="sk-x", embedding_model="text-embedding-3-large"
+        )
+    )
     assert isinstance(embedder, OpenAIEmbedder)
 
 
@@ -414,3 +418,21 @@ def test_the_backlog_reads_missing_and_stale_counts() -> None:
 
     assert (backlog.missing, backlog.stale, backlog.total, backlog.pending) == (4, 2, 10, 6)
     assert db.fetches == [("count_embedding_backlog", {"model": "bge-m3"})]
+
+
+def test_switching_to_openai_without_changing_the_model_is_a_clear_error() -> None:
+    """The default EMBEDDING_MODEL is Ollama's; sent to OpenAI it fails opaquely mid-run."""
+    import pytest as _pytest
+
+    from candlegraph.knowledge.embed import EmbeddingError, build_embedder
+    from tests.conftest import make_settings
+
+    with _pytest.raises(EmbeddingError, match="text-embedding-3-large"):
+        build_embedder(make_settings(embedding_provider="openai", openai_api_key="sk-x"))
+
+    chosen = build_embedder(
+        make_settings(
+            embedding_provider="openai", openai_api_key="sk-x", embedding_model="text-embedding-3-large"
+        )
+    )
+    assert "text-embedding-3-large" in chosen.name

@@ -48,6 +48,13 @@ AMBIENT_ENV = (
     "LOOKBACK_DAYS",
     "TOKENS_FILE",
     "TRANSPORT_URL",
+    # A developer's shell with a model configured must not send a test's
+    # findings to a real model.
+    "AGENT_LLM_MODEL",
+    "KNOWLEDGE_LLM_MODEL",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "TAVILY_API_KEY",
 )
 
 

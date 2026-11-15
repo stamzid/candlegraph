@@ -16,6 +16,7 @@ from collections.abc import Callable, Sequence
 from typing import Protocol
 
 from candlegraph.agents.base import Finding, Severity, overall_severity, sort_findings
+from candlegraph.settings import Settings
 from candlegraph.utils.logging_utils import service_logger
 
 Completion = Callable[[str], str]
@@ -101,3 +102,19 @@ class AnthropicNarrator:
             model=self.model, max_tokens=400, messages=[{"role": "user", "content": prompt}]
         )
         return "".join(getattr(block, "text", "") for block in response.content)
+
+
+def build_agent_narrator(settings: Settings) -> Narrator:
+    """The narrator the agents use: a model when ``AGENT_LLM_MODEL`` is set, the template otherwise.
+
+    Regression, 2026-11-15: ``AGENT_LLM_MODEL`` was documented but nothing
+    built an :class:`AnthropicNarrator`, so the observer and the janitor
+    always used the template whatever the setting said. Either way the
+    findings, status and exit code are unchanged (invariant 22); only the
+    summary paragraph differs, and a failing model call falls back to the
+    template.
+    """
+    if not settings.agent_llm_model:
+        return TemplateNarrator()
+    key = settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else None
+    return AnthropicNarrator(settings.agent_llm_model, api_key=key)

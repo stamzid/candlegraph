@@ -96,6 +96,10 @@ def decide(
 - **A reserve** is held back so that an operator can run a search by hand
   on the last day of the month. The pipeline treats the reserve as
   already spent.
+  **Known gap (2026-11-15):** the guard is not told who is asking, so a
+  manual search is refused at the reserve too — nobody can spend it
+  today. The fix is designed in
+  [`../budget-manager/DESIGN.md`](../budget-manager/DESIGN.md) (build step 1).
 - **Refusals are recorded**, as `source_call` rows with
   `status = budget_refused` and zero credits. The observer counts them;
   a day with many refusals is a finding (`source_budget`), and the

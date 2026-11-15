@@ -134,7 +134,8 @@ class Settings(BaseSettings):
     embedding_truncate: bool = False
     embedding_batch_size: int = Field(default=32, ge=1)
     embedding_timeout_seconds: float = Field(default=120.0, gt=0)
-    # The `ollama` compose service (profile `knowledge`).
+    # The `ollama` compose service, part of the default stack since
+    # docs/incidents/2026-11-04-explain-ran-lexical-only/.
     ollama_url: str = "http://ollama:11434"
     openai_api_key: SecretStr | None = None
 
@@ -145,7 +146,9 @@ class Settings(BaseSettings):
     # refusals are source_call rows. See docs/knowledge/tavily/DESIGN.md.
     tavily_monthly_credits: int = Field(default=1000, ge=1)
     tavily_daily_credits: int = Field(default=40, ge=1)
-    # Held back for an operator's manual search; the pipeline never spends it.
+    # Meant for an operator's manual search. Known gap: the guard cannot tell
+    # manual from scheduled, so today nothing spends it
+    # (docs/knowledge/budget-manager/DESIGN.md has the fix).
     tavily_reserve_credits: int = Field(default=50, ge=0)
     # basic costs 1 credit, advanced 2; our query is narrow, basic is the default.
     tavily_search_depth: str = "basic"

@@ -583,8 +583,8 @@ def knowledge_budget() -> dict[str, Any]:
     Summed from the ``source_call`` ledger, which records refusals and
     rate-limited calls as well as successes. ``level`` is the observer's own
     grading: ok below 80% of the cap, warning from 80%, critical from 100%.
-    The reserve is held back for an operator's manual search and the
-    pipeline treats it as already spent.
+    The reserve is meant for an operator's manual search; today no search
+    may spend it, manual or not (a known gap with a designed fix).
     """
     from candlegraph.knowledge.budget import usage_fraction, usage_level
     from candlegraph.knowledge.news import budget_from, source_spend

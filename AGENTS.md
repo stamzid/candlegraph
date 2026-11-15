@@ -381,9 +381,13 @@ unfalsifiable.
 
 ### In progress
 
-Nothing. The harness pre-work closed 2026-11-15; its plan is archived at
-`docs/rollout/archive/2026-11-11-harness-prework.md`, and
-`docs/rollout/ROLLOUT.md` lists the candidates for the next one. The
+**Stage 2, the harness** — planned 2026-11-15, not started. The plan is
+`docs/rollout/ROLLOUT.md`: split the dashboard pages, write the pipelines
+design, then build pipelines, events and traces in five steps. The
+pre-work it builds on is archived at
+`docs/rollout/archive/2026-11-11-harness-prework.md`. Two designs wait
+beside it: the chat-model seam (`docs/harness/models/`) and the Tavily
+budget manager (`docs/knowledge/budget-manager/`). The
 analyst (`docs/harness/analyst/`) and its research loop
 (`docs/harness/research-loop/`) are proposed designs, not work in progress.
 

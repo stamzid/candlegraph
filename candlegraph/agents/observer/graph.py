@@ -17,7 +17,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from candlegraph.agents.base import AgentReport, Severity, new_run_id, now_utc
-from candlegraph.agents.narrator import Narrator, TemplateNarrator
+from candlegraph.agents.narrator import Narrator, build_agent_narrator
 from candlegraph.agents.observer.assess import assess
 from candlegraph.agents.observer.collect import (
     ObserverDeps,
@@ -272,7 +272,7 @@ def run_observer(
     """
     db = db or get_db()
     registry = registry or get_token_registry()
-    narrator = narrator or TemplateNarrator()
+    narrator = narrator or build_agent_narrator(settings)
     started = now_utc()
     deps = ObserverDeps(
         db=db,

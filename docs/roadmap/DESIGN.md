@@ -30,9 +30,9 @@ No stage is open. Stages 0 and 6 both closed on 2026-11-10:
 | **0. Descriptive statistics, deeper** | The `active` flag in `config/tokens.yaml` — the stack now polls exactly WBTC, WETH, BNB, GNO and SHIB while the file still lists every token whose history is stored. |
 | **6. Simulation and strategy evaluation** | MCMC posteriors, gated on R-hat and effective sample size, completing the three simulators. |
 
-[`../rollout/ROLLOUT.md`](../rollout/ROLLOUT.md) records that there is no
-current rollout and costs four candidates for the next one; by this
-document's ordering the next stage is **2, the harness**.
+[`../rollout/ROLLOUT.md`](../rollout/ROLLOUT.md) is the plan for the next
+stage, **2, the harness** (planned 2026-11-15, not started): the
+dashboard split first, then the pipelines design, then the build.
 
 Stage 6 was built out of numeric order, which is normal here — stage 1
 was delivered while stage 0 was paused. The numbers are identities, not a

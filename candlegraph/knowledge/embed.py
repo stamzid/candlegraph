@@ -255,6 +255,10 @@ class OpenAIEmbedder:
         return [fit_dimensions(item["embedding"], self._dimensions, truncate=False) for item in data]
 
 
+# The settings default. Named so the OpenAI branch can refuse it.
+OLLAMA_DEFAULT_MODEL = "bge-m3"
+
+
 def build_embedder(settings: Settings, transport: httpx.BaseTransport | None = None) -> Embedder:
     """The configured provider, or an error naming what is wrong."""
     match settings.embedding_provider.strip().lower():
@@ -270,6 +274,14 @@ def build_embedder(settings: Settings, transport: httpx.BaseTransport | None = N
         case "openai":
             if settings.openai_api_key is None:
                 raise EmbeddingError("EMBEDDING_PROVIDER=openai needs OPENAI_API_KEY in .env")
+            if settings.embedding_model == OLLAMA_DEFAULT_MODEL:
+                # The default model name belongs to the local provider. Sending it
+                # to OpenAI fails with an opaque 404 after the first batch.
+                raise EmbeddingError(
+                    f"EMBEDDING_MODEL={OLLAMA_DEFAULT_MODEL} is an Ollama model; with "
+                    "EMBEDDING_PROVIDER=openai set EMBEDDING_MODEL=text-embedding-3-large "
+                    "(then `make reembed`)"
+                )
             return OpenAIEmbedder(
                 api_key=settings.openai_api_key.get_secret_value(),
                 model=settings.embedding_model,

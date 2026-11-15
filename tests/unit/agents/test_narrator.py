@@ -73,3 +73,31 @@ def test_no_findings_never_calls_the_model() -> None:
         AnthropicNarrator("claude-x", complete=complete).narrate("observer", [])
         == "observer: nothing to report."
     )
+
+
+def test_agent_llm_model_actually_selects_the_model_narrator() -> None:
+    """Regression, 2026-11-15: the setting was documented and ignored by both agents."""
+    from candlegraph.agents.narrator import AnthropicNarrator, TemplateNarrator, build_agent_narrator
+    from tests.conftest import make_settings
+
+    assert isinstance(build_agent_narrator(make_settings()), TemplateNarrator)
+    chosen = build_agent_narrator(make_settings(agent_llm_model="claude-sonnet-5-5", anthropic_api_key="k"))
+    assert isinstance(chosen, AnthropicNarrator) and chosen.model == "claude-sonnet-5-5"
+
+
+def test_the_observer_uses_the_configured_narrator(monkeypatch: pytest.MonkeyPatch) -> None:
+    from candlegraph.agents.observer import run_observer
+    from tests.conftest import FakeDatabase, make_settings
+
+    built: list[str] = []
+
+    def fake_builder(settings: object) -> object:
+        built.append("called")
+        from candlegraph.agents.narrator import TemplateNarrator
+
+        return TemplateNarrator()
+
+    monkeypatch.setattr("candlegraph.agents.observer.graph.build_agent_narrator", fake_builder)
+    run_observer(make_settings(), db=FakeDatabase(), sinks=[])
+
+    assert built == ["called"]

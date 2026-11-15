@@ -42,9 +42,10 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   this is the document: find the step, read its "Read first" pointers, do
   it, and update the progress table in the same change. One at a time;
   finished ones are archived under `docs/rollout/archive/`. Four are
-  archived (stages 1, 0 and 6, and the harness pre-work) and **there is
-  no current rollout** — the file says so, and lists the candidates for
-  the next one.
+  archived (stages 1, 0 and 6, and the harness pre-work). **The current
+  rollout is stage 2, the harness** (planned 2026-11-15, not started):
+  step 1 splits the dashboard pages, step 2 writes the pipelines design
+  before any pipeline code.
 - `docs/incidents/` — post-mortems. Read the two from October 2026 before
   changing the database image, a migration id, or a compose health check.
 
