@@ -34,7 +34,7 @@ between steps, if needed sooner):
 | # | Step | Size | Depends on | Status |
 |---|---|---|---|---|
 | 1 | Split the four large dashboard pages; draw the ingest stage strip | S | — | done 2026-11-15 |
-| 2 | Write the pipelines design (no code) | S | — | todo |
+| 2 | Write the pipelines design (no code) | S | — | written 2026-11-15 — **awaiting your review** |
 | 3 | Pipeline spec, loader and `candlegraph run` for one step | M | 2 | todo |
 | 4 | The hourly pipeline end to end: validate, analyse, signal, embed as jobs | M | 3 | todo |
 | 5 | Events: run finished → next thing starts | M | 3 | todo |
@@ -149,7 +149,33 @@ their confirmation.
 **Done when.** The design is written, linked from `docs/README.md`, and
 reviewed by you before step 3 starts.
 
-**Outcome.** Not started.
+**Outcome.** Written 2026-11-15: [`../harness/pipelines/DESIGN.md`](../harness/pipelines/DESIGN.md),
+status `proposed`. What it decided, against the list above:
+
+- **Spec:** YAML → pydantic, the whole file rejected with a line number
+  on any error; `candlegraph run --check` in CI.
+- **Validation:** unknown keys and jobs, params checked against each
+  job's declared param model, no `market_data` writer, no non-idempotent
+  job, no trigger loops.
+- **Ownership:** a parent row in `run`, each step attempt a child row.
+- **Failure:** `failed` stops by default, `partial` continues; retries
+  only for transient errors, with jittered backoff; each attempt its own row.
+- **Where:** pipelines **react to** ingest and never run it. Local: the
+  executor lives in the `agents` process (no compose change). Production:
+  2–3 stateless executor replicas claiming from a Postgres queue.
+- **LangGraph or loop:** a plain loop; the roadmap's line is updated.
+
+Added beyond the list, because you asked for fault tolerance and a
+production view: a durable queue with `SKIP LOCKED`, leases and resume
+after a crash, a session advisory lock per pipeline, a transactional
+outbox for events, circuit breakers, hard timeouts in production, a
+local-vs-production section, SLOs and metrics, and the model picker (paid
+providers selectable only when their key is in the environment).
+Streaming platforms (Redpanda, NATS JetStream) are evaluated with the
+signals that would justify adding one; none is proposed now.
+
+Five open questions are listed at the end of the design for you to
+answer before step 3.
 
 ---
 

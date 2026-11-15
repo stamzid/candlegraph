@@ -143,6 +143,14 @@ Qwen3 embedding model, truncated to 1024 with `EMBEDDING_TRUNCATE`) can
 be tried. The rules in the embeddings design stand: one active model,
 1024 numbers per vector, `make reembed` to switch.
 
+## Choosing a model from the UI
+
+The pipelines design adds a model picker per role on a Pipelines page
+([`../pipelines/DESIGN.md`](../pipelines/DESIGN.md) §9). Paid providers
+(Anthropic, OpenAI) are selectable only when their API key is set in the
+environment; the UI never accepts or stores a key. Choices are rows in a
+small `model_choice` table and apply from the next step, with no restart.
+
 ## How to choose between models
 
 Do not pick by reputation. Build a small fixed test set and score each

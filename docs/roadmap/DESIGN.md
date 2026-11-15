@@ -364,9 +364,12 @@ per concern.
 
 **Design decisions to make early.**
 
-- The pipeline runner is a LangGraph graph like everything else in
-  `agents/`, or it is a second orchestration idiom in one repo. Prefer the
-  first; the framework document already covers state, retries and reporting.
+- ~~The pipeline runner is a LangGraph graph like everything else in
+  `agents/`.~~ **Decided 2026-11-15: a plain loop** behind an `Executor`
+  interface. For a linear pipeline LangGraph adds a second checkpoint
+  store and nothing else; durable progress lives in our own ledger and
+  queue instead. LangGraph stays the tool for agents, the analyst and the
+  research loop. Reasoning in [`../harness/pipelines/DESIGN.md`](../harness/pipelines/DESIGN.md) §6.6.
 - A spec that cannot be validated before it runs is a footgun. Parse specs
   into typed objects with pydantic, the way `settings.py` and `tokens.py`
   already do.
