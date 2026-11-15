@@ -1,12 +1,16 @@
 # The runner: one way to schedule, run and record a job
 
-**Status:** implemented — 2026-11-14. Rollout steps 1, 2 and 3 are built:
+**Status:** implemented — 2026-11-15. All four rollout steps are done:
 the registry (four jobs), `run_job`, one scheduler, one process loop,
 ledger rows opened before and closed after every run, the `run_log` view
-over three ledgers, stages for ingest, and the scheduled news fetch as
-the job that proves a new job needs no new scheduler or ledger code.
-Step 4 (invariant 27 and the remaining docs) is the closeout. The steps
-are in [`../../rollout/ROLLOUT.md`](../../rollout/ROLLOUT.md).
+over three ledgers, stages for ingest, the scheduled news fetch, and
+invariant 27 in `AGENTS.md`. The plan is archived at
+[`../../rollout/archive/2026-11-11-harness-prework.md`](../../rollout/archive/2026-11-11-harness-prework.md).
+**Not built:** the Agents dashboard does not draw an ingest run's stage
+strip (the data is in `ingest_run.detail.stages`); nothing embeds on a
+schedule (`make embed` is manual; the observer reports the backlog);
+an agent row is written only when the run's sinks include `ledger`, not
+always (the reason is under "Who writes the ledger rows").
 This is groundwork for stage 2 (the harness), not stage 2 itself: no
 pipeline specs, no event broker, no OpenTelemetry.
 **Code:** `candlegraph/harness/`, plus its callers in `cli.py`,

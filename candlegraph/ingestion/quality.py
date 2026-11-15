@@ -144,7 +144,10 @@ def build_report(
     Args:
         db: Where to read from.
         expected_symbols: Symbols that ought to be present; any that have no
-            rows at all are listed in ``missing_tokens``.
+            rows at all are listed in ``missing_tokens``. Callers pass the
+            **active** tokens: an inactive one is never polled, so it cannot
+            be expected to have rows (its stored history, if any, is still
+            reported under ``tokens``).
         start_unix: Only consider hours at or after this time.
         min_expected_coverage: Coverage below which a token is flagged.
         violation_limit: Cap on impossible rows listed.

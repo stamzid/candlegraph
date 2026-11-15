@@ -38,6 +38,20 @@ curl -s localhost:8000/status | python3 -m json.tool
 
 Expect `"status": "ok"`, `"database": "up"`, and the configured token symbols.
 
+See what the processes are running and on which interval:
+
+```sh
+make jobs
+```
+
+Four rows: `ingest` (role `worker`, `DATA_POLL_INTERVAL`), `observer` and
+`janitor` (role `agents`; the janitor is `0`, disabled, because the
+container has no git checkout), and `fetch_news` (role `agents`,
+`FETCH_NEWS_INTERVAL`, `0` by default because it spends search credits).
+A job shown as disabled is not an error. After a minute,
+`make runs ARGS='--all'` should show an `ingest` and an `observer` row,
+both with trigger `scheduled`.
+
 Confirm the storage layer came up as intended — three hypertables, and the
 ledger and state tables left plain:
 

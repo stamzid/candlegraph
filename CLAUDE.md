@@ -41,9 +41,10 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   one. When the user refers to "the rollout", "the plan", or "step N",
   this is the document: find the step, read its "Read first" pointers, do
   it, and update the progress table in the same change. One at a time;
-  finished ones are archived under `docs/rollout/archive/`. Three are
-  archived (stages 1, 0 and 6) and **there is no current rollout** — the
-  file says so, and costs four candidates for the next one.
+  finished ones are archived under `docs/rollout/archive/`. Four are
+  archived (stages 1, 0 and 6, and the harness pre-work) and **there is
+  no current rollout** — the file says so, and lists the candidates for
+  the next one.
 - `docs/incidents/` — post-mortems. Read the two from October 2026 before
   changing the database image, a migration id, or a compose health check.
 

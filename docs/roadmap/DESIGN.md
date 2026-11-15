@@ -1,6 +1,6 @@
 # Roadmap
 
-**Status:** living document — last revised 2026-11-10 (stages 0 and 6 delivered)
+**Status:** living document — last revised 2026-11-15 (harness pre-work delivered)
 **Scope:** what candlegraph is, what has been built, and what comes next.
 
 `AGENTS.md` carries a condensed copy of the stage list; this is the
@@ -371,15 +371,21 @@ per concern.
   into typed objects with pydantic, the way `settings.py` and `tokens.py`
   already do.
 
-**Pre-work, opened 2026-11-11.** Before any of the above, the three
+**Pre-work, delivered 2026-11-15.** Before any of the above, the three
 clock-driven loops (the ingest worker, the agents process, the API's
 optional in-process ingest) are folded onto one runner — a `Job`
 registry, one `run_job`, one scheduler builder, and one shape of a run
 with the outcome and verdict axes separated and a `parent_run_id` ready
 for pipelines. [`../harness/runner/DESIGN.md`](../harness/runner/DESIGN.md)
-is the design; [`../rollout/ROLLOUT.md`](../rollout/ROLLOUT.md) is the
-plan. Everything in "What it adds" is then a layer on that runner rather
-than a rewrite of two of them.
+is the design; the plan is archived at
+[`../rollout/archive/2026-11-11-harness-prework.md`](../rollout/archive/2026-11-11-harness-prework.md).
+It also added the generic `run` ledger and scheduled the news fetch.
+Everything in "What it adds" is now a layer on that runner rather than a
+rewrite of two of them. Where the harness is heading after stage 2 — the
+analyst and its multi-day research loop — is in
+[`../harness/analyst/`](../harness/analyst/DESIGN.md) and
+[`../harness/research-loop/`](../harness/research-loop/DESIGN.md), both
+proposed.
 
 **Exit criterion.** A single `candlegraph run pipelines/hourly.yaml`
 executes ingest, validation, analysis and signal generation as one

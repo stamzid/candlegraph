@@ -211,6 +211,14 @@ That order means the first two steps need nothing from stages 3 and 4,
 and the result is already useful: an interactive front end to the
 analytics that exist, with every number computed and every claim cited.
 
+## Longer tasks: the research loop
+
+This design covers one question and one answer. A brief that takes days
+("review these tokens, report Thursday") needs a loop with memory,
+limits and stop rules. That is designed separately in
+[`../research-loop/DESIGN.md`](../research-loop/DESIGN.md); it reuses
+everything above and adds a notebook, a guard and a pause.
+
 ## Risks
 
 - **Scope.** "Personal quant analyst" is four roadmap stages wide. The

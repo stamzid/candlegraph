@@ -37,13 +37,21 @@ The stack is five processes: PostgreSQL, the **API**, a separate **ingest worker
    hourly data every `DATA_POLL_INTERVAL` seconds. Each run resumes from the newest hour
    already stored, so restarts re-fetch nothing and writes are idempotent.
    **Stored data is never deleted** — it is the input to the planned analytics phases.
-3. Every run is written to the `ingest_run` ledger, so freshness and failures are queryable.
+3. Every run of every job goes through one runner (`candlegraph/harness/`) and gets a ledger
+   row when it starts and when it ends: `ingest_run` for ingest, `agent_run` for the agents,
+   and a generic `run` table for anything else. Each row says why it ran (`trigger`) and
+   whether it finished (`outcome`); `make runs ARGS='--all'` shows them together.
 4. The API groups the stored hourly rows into candles of any width at query time,
    with `time_bucket` over hypertables chunked by month.
 5. The analytics layer reads that history and produces statistics, allocations and signals.
 6. The agents service runs the run observer every `OBSERVER_INTERVAL` seconds. It reads the
    ledger, the quality report, and a trailing window of rows, and posts a report to the
-   `agent_run` table and the log (or a webhook, a file, or a GitHub issue).
+   `agent_run` table and the log (or a webhook, a file, or a GitHub issue). The same process
+   can run the daily news fetch (`FETCH_NEWS_INTERVAL`, off by default).
+
+The worker, the agents process and the API's optional in-process ingest are three selections
+of jobs over the same code: one job registry, one scheduler, one way to run a job.
+`make jobs` lists the jobs, their schedule setting and what each one writes.
 
 Ingestion runs in its own process so a long backfill cannot compete with query traffic, and
 so an unreachable subgraph degrades the data rather than the service — the API comes up and
@@ -633,7 +641,8 @@ a test, and never touches a working tree that has uncommitted changes. Its sched
 [`.github/workflows/janitor.yml`](.github/workflows/janitor.yml), daily.
 
 **Reports** go to the sinks in `AGENT_REPORT_SINKS`: the log, the `agent_run` table (read with
-`make agent-runs`), a Markdown file, a Slack-compatible webhook, or a GitHub issue (opened only at
+`make agent-runs`, or `make runs ARGS='--job observer'` to see why each run started and runs
+still in progress — the row is written when the run starts, not only when it ends), a Markdown file, a Slack-compatible webhook, or a GitHub issue (opened only at
 warning or worse). A sink failing never fails the run. Set `AGENT_LLM_MODEL` and
 `ANTHROPIC_API_KEY` (and `uv sync --extra llm`) to have a Claude model write the summary
 paragraph; the findings, the status, and the exit code are computed and are the same either way.
@@ -697,7 +706,7 @@ so check the skip count before reading a green run as proof.
 
 ## Status and what comes next
 
-Six pieces of work are delivered and covered by the test suite:
+Seven pieces of work are delivered and covered by the test suite:
 
 - **Stabilisation** — a clean clone that builds, lints, type-checks and comes up.
 - **Data model and ingestion** — hourly token and pool data, idempotent upserts,
@@ -710,6 +719,8 @@ Six pieces of work are delivered and covered by the test suite:
 - **Knowledge graph and signaller** — the corpus on pgvector, local embeddings,
   Tavily under a credit budget, hybrid retrieval that never looks past the bar,
   `signals --explain` with its citation validator, and the read-only MCP server.
+- **Harness pre-work** — one runner for every scheduled job, ledger rows written
+  before and after every run, and one view (`run_log`) over all of them.
 
 Next, in order:
 

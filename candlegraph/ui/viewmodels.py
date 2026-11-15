@@ -856,7 +856,7 @@ def build_quality_view(
     start_unix, _end_unix = window_bounds(days, now=moment)
     report = build_report(
         db,
-        expected_symbols=get_token_registry().symbols,
+        expected_symbols=get_token_registry().active_symbols,  # inactive tokens are never polled
         start_unix=start_unix,
         min_expected_coverage=settings.min_expected_coverage,
         now=moment,

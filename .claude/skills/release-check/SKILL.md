@@ -37,6 +37,15 @@ docker compose exec -T worker python -m candlegraph report --strict
 `make e2e` reporting `skipped` means `CANDLEGRAPH_E2E_URL` was unset — the
 target sets it, so a skip means the stack is not up.
 
+`report --strict` fails on two different things; read which one:
+
+- **`MISSING (no rows at all)`** is a real failure for an **active** token
+  (inactive tokens are never polled and are not listed here).
+- **`BELOW 80% COVERAGE`** for GNO or SHIB is expected: they are in the
+  active set *because* their history is gappy (invariant 19). Check
+  `make report` for their average hourly volume before calling it a bug,
+  and do not lower `MIN_EXPECTED_COVERAGE` to make the gate pass.
+
 ## 3. The checklist
 
 From `AGENTS.md`, confirm each one explicitly rather than assuming:

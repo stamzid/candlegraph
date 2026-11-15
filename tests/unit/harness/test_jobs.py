@@ -58,3 +58,27 @@ def test_importing_the_harness_imports_no_job_body() -> None:
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True, cwd=ROOT)
     assert out.stdout.strip() == ""
+
+
+# --- invariant 27: every run is a Run --------------------------------------------
+
+
+def test_only_the_harness_scheduler_names_backgroundscheduler() -> None:
+    """One scheduler builder, so every job gets the same overlap and misfire policy."""
+    package = ROOT / "candlegraph"
+    users = sorted(
+        str(path.relative_to(ROOT))
+        for path in package.rglob("*.py")
+        if "BackgroundScheduler" in path.read_text(encoding="utf-8")
+    )
+    assert users == ["candlegraph/harness/scheduler.py"]
+
+
+@pytest.mark.parametrize("name", list(JOBS))
+def test_every_job_writes_a_ledger_row_under_the_default_configuration(name: str) -> None:
+    """A registered job with no ledger hook would run unrecorded."""
+    from tests.conftest import FakeDatabase, make_settings
+
+    hook = JOBS[name].ledger(make_settings(agent_report_sinks="log,ledger"), FakeDatabase(), {})
+    assert hook is not None
+    assert all(callable(getattr(hook, event)) for event in ("started", "stage", "finished"))

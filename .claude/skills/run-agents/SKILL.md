@@ -26,7 +26,18 @@ make observe ARGS="--strict"                   # exit 1 at WARNING or worse
 # has the full ledger and the credit budget.
 make agent-runs                                # every report, newest first
 make agent-runs ARGS="--agent observer --show" # the newest report in full
-make logs-agents                               # scheduled runs as they happen
+make runs ARGS='--job observer'                # each run's trigger (scheduled/manual/ui/mcp) and outcome;
+                                               # includes runs still in progress (outcome `running`)
+make runs ARGS='--all'                         # every job together: ingest, agents, fetch_news
+make logs-agents                               # scheduled runs as they happen; each line ends run=<id>
+```
+
+An observer row stuck at `running` long after it started means the
+process died mid-run — that is what the two-phase row is for. Check
+`make logs-agents` for the matching `run=` id.
+
+```sh
+make jobs                                      # what the agents process hosts and on which interval
 ```
 
 Outside the stack: `uv run python -m candlegraph observe --sinks log`.

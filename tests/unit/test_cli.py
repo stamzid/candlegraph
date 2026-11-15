@@ -1063,3 +1063,40 @@ def test_ingest_that_cannot_start_exits_one(cli_env: FakeDatabase, monkeypatch: 
     monkeypatch.setattr("candlegraph.ingestion.runner.run_ingest", boom)
 
     assert main(["ingest"]) == 1
+
+
+def test_an_inactive_token_with_no_rows_is_not_reported_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression, 2026-11-15: every inactive token was MISSING on a new volume.
+
+    An inactive token is never polled, so it can never gain rows; listing it
+    as missing made `report --strict` (and the release check) impossible to
+    pass on a fresh stack, and the observer graded it CRITICAL forever.
+    """
+    import json
+
+    path = tmp_path / "tokens.yaml"
+    path.write_text(
+        TOKENS_YAML_INACTIVE_SHIB,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("candlegraph.cli.get_settings", lambda: make_settings(tokens_file=str(path)))
+    monkeypatch.setenv("TOKENS_FILE", str(path))
+    set_db(FakeDatabase())
+
+    main(["report", "--json"])
+
+    assert json.loads(capsys.readouterr().out)["missing_tokens"] == ["WBTC"]
+
+
+TOKENS_YAML_INACTIVE_SHIB = """
+tokens:
+  - address: "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+    symbol: WBTC
+    name: Wrapped BTC
+  - address: "0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce"
+    symbol: SHIB
+    name: SHIBA INU
+    active: false
+"""

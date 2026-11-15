@@ -76,7 +76,7 @@ flowchart LR
 
 | Changed | Unchanged |
 |---|---|
-| `candlegraph/agents/scheduler.py` is gone; `observer` and `janitor` are entries in `harness.jobs.JOBS` | both graphs, their nodes, `assess`, the narrator, the sinks |
+| the old agents scheduler module is gone; `observer` and `janitor` are entries in `harness.jobs.JOBS` | both graphs, their nodes, `assess`, the narrator, the sinks |
 | `candlegraph agents` is `run_process` over `select(role="agents")`, with an optional `--jobs` list | the compose service, its command, its interval settings, its start-up log line |
 | one `run_job` wrapper replaces `observer_tick` / `janitor_tick`; a crashed graph becomes `Outcome.FAILED` with no verdict, rather than a verdict of "error" | `agent_run.status` still means the verdict; `make agent-runs` prints what it printed |
 | `candlegraph jobs` (`make jobs`) lists each job's schedule, role and write surface | (step 2 later moved the `agent_run` row from the `ledger` sink into the harness; see above) |

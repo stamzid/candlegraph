@@ -140,7 +140,7 @@ candlegraph/
     sources/
       base.py          Source Protocol: search(query, window) -> RawDocuments. Never writes, never decides.
       tavily.py        The metered client: bounded news search, backoff on 5xx, 429/432 never retried.
-  harness/             The runner (rollout steps 1–3): one way to schedule, run and record a job.
+  harness/             The runner: one way to schedule, run and record a job (invariant 27).
     jobs.py            Job, JobContext, the JOBS registry (ingest, observer, janitor, fetch_news), select(role | names).
     runs.py            Run, Outcome, RunOutcome, run_job — every run passes through it; never raises.
     hooks.py           RunHook, the log hook and the three ledger hooks that write every ingest_run/agent_run/run row.
@@ -299,7 +299,7 @@ Each of these has a test. Breaking one should break the build, not production.
     refuses to commit a path that looks like a secret.
 24. **Series tables are hypertables; state and ledger tables are not.**
     `token_hours_data`, `pool_hours_data` and `signal` are chunked on
-    `period_start_unix`. `token`, `pool`, `ingest_run` and `agent_run` are
+    `period_start_unix`. `token`, `pool`, `ingest_run`, `agent_run` and `run` are
     plain — the first two have no time coordinate, and `ingest_run` is
     updated by `run_id`, which on a time-partitioned table would search
     every chunk. A hypertable requires every unique index to contain the
@@ -321,6 +321,15 @@ Each of these has a test. Breaking one should break the build, not production.
     probe uses TCP so initdb's temporary server cannot pass it. The remedy
     for a bad volume is `make reset`, never "clean Docker". See
     `docs/incidents/2026-10-29-compose-startup-robustness/`.
+27. **Every run is a `Run`.** Anything scheduled is a registered `Job` in
+    `harness/jobs.py`; one scheduler builder (`harness/scheduler.py`, the
+    only module that names `BackgroundScheduler`) gives every job the same
+    overlap and misfire policy; every run — scheduled, manual, from the UI,
+    from an MCP tool, later inside a pipeline — goes through `run_job`,
+    has a ledger row opened before it starts and closed after it ends
+    (`ingest_run`, `agent_run`, or the generic `run`), and records why it
+    ran (`trigger`). Invariant 12 is the ingest case of this rule. See
+    `docs/harness/runner/DESIGN.md`.
 
 ## Definition of done
 
@@ -367,17 +376,16 @@ unfalsifiable.
 | Time-series storage | The three series tables as TimescaleDB hypertables; state and ledger tables deliberately plain. | `make test-integration` (`test_timescale.py`) |
 | Descriptive statistics, deeper (stage 0) | Pairwise comparison over aligned bars; the descriptive display audited and completed (Quality dashboard, gap map, gap shading); the `FillPolicy` seam where every policy declares whether it is causal and `load_symbol_series` refuses the ones that are not; three gap estimators cached in `token_hours_fill` and scored against held-out hours; the `active` flag trimming the poll to five tokens. | `candlegraph compare WETH WBTC` over aligned bars; `FillPolicy` with a no-look-ahead test; the stack ingests exactly the five active tokens |
 | Simulation and strategy evaluation (stage 6) | The backtester made legible; Monte Carlo over four path generators with an empirical p-value; the discrete-event engine reconciling exactly with the vectorised backtester; MCMC posteriors with R-hat and ESS gating every surface. | `candlegraph simulate WETH --paths 1000` prints a distribution and a p-value; a zero-latency event run matches the backtester exactly; `forecast --posterior` is wider on a short window, with R-hat |
+| Harness pre-work | One runner under the worker, the agents process and the API's ingest: the `Job` registry, `run_job`, one scheduler and process loop; ledger rows opened before and closed after every run with `trigger`, `outcome` and `parent_run_id`; the generic `run` ledger and the `run_log` view; stages for ingest; the scheduled news fetch. | `grep -rn BackgroundScheduler candlegraph/` finds one module; `candlegraph jobs` lists four jobs; `make runs ARGS='--job observer'` shows trigger and outcome |
 | Knowledge graph and signaller | The eight corpus tables on pgvector, assets and aliases, the document pipeline, embeddings (`bge-m3` via the `ollama` service), Tavily under a budget with the `source_call` ledger, hybrid retrieval with the no-look-ahead bound, `signals --explain` with its citation validator on three surfaces, the observer's four knowledge findings, and the read-only MCP server. | `candlegraph signals WETH --strategy bollinger --explain` prints a rationale citing a retrieved document with a URL and a timestamp, stored with the signal, with no LLM key configured |
 
 ### In progress
 
-**Harness pre-work** (opened 2026-11-11): one runner under the ingest
-worker, the agents process and the API's in-process ingest — a `Job`
-registry, one `run_job`, one scheduler builder, one shape of a run across
-`ingest_run` and `agent_run`. Design in `docs/harness/runner/DESIGN.md`
-(steps 1 and 2 built); the step-by-step plan is `docs/rollout/ROLLOUT.md`. It is
-the first third of stage 2, done first because it is the only piece that
-gets harder once the harness lands on top of it.
+Nothing. The harness pre-work closed 2026-11-15; its plan is archived at
+`docs/rollout/archive/2026-11-11-harness-prework.md`, and
+`docs/rollout/ROLLOUT.md` lists the candidates for the next one. The
+analyst (`docs/harness/analyst/`) and its research loop
+(`docs/harness/research-loop/`) are proposed designs, not work in progress.
 
 ### Next
 

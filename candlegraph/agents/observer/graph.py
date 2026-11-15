@@ -285,7 +285,9 @@ def run_observer(
     initial: ObserverState = {
         "now": now or started,
         "thresholds": ObserverThresholds.from_settings(settings),
-        "expected_symbols": tuple(registry.symbols),
+        # Only active tokens are expected to have rows: an inactive one is never
+        # polled, so on a new volume it would be "missing" (CRITICAL) forever.
+        "expected_symbols": tuple(registry.active_symbols),
         "findings": [],
         "errors": [],
         "stages": [],

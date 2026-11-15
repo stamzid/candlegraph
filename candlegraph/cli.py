@@ -579,7 +579,7 @@ def _report(settings: Settings, days: int | None, strict: bool, as_json: bool = 
     start_unix = lookback_start(days) if days else None
     report = build_report(
         get_db(),
-        expected_symbols=get_token_registry().symbols,
+        expected_symbols=get_token_registry().active_symbols,  # inactive tokens are never polled
         start_unix=start_unix,
         min_expected_coverage=settings.min_expected_coverage,
     )

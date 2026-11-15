@@ -189,7 +189,7 @@ def data_quality_report(days: int | None = None) -> dict[str, Any]:
     settings = _settings()
     report = build_report(
         _db(),
-        expected_symbols=_registry().symbols,
+        expected_symbols=_registry().active_symbols,  # inactive tokens are never polled
         start_unix=lookback_start(days) if days else None,
         min_expected_coverage=settings.min_expected_coverage,
     )

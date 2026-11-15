@@ -281,3 +281,21 @@ def test_the_scheduler_tick_never_raises(
         assert tick_for(JOBS["observer"])(make_settings()).outcome is Outcome.FAILED
 
     assert "Observer run failed" in caplog.text
+
+
+def test_an_inactive_token_with_no_rows_is_not_a_missing_token_finding() -> None:
+    """Regression, 2026-11-15: an inactive token is never polled, so "no rows"
+    is expected for it and must not be CRITICAL. An active one still is."""
+    from candlegraph.tokens import Token, TokenRegistry
+    from tests.conftest import SHIB, WBTC
+
+    registry = TokenRegistry(
+        tokens=(
+            Token(address=WBTC, symbol="WBTC", name="Wrapped BTC"),
+            Token(address=SHIB, symbol="SHIB", name="SHIBA INU", active=False),
+        )
+    )
+    report = run_observer(make_settings(), db=FakeDatabase(), registry=registry, now=NOW, sinks=[])
+
+    missing = {f.subject for f in report.findings if f.kind == "missing_token"}
+    assert missing == {"WBTC"}
