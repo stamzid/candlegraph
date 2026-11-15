@@ -959,7 +959,7 @@ def _explain(settings: Settings, args: argparse.Namespace, result: Any) -> int:
         explain,
         format_explanation,
         request_for,
-        services_for,
+        services,
     )
     from candlegraph.knowledge.retrieve import RetrievalError
     from candlegraph.storage import get_db
@@ -980,16 +980,16 @@ def _explain(settings: Settings, args: argparse.Namespace, result: Any) -> int:
                 print(f"no reference prices: {exc}; no market comparison")
     at = datetime.fromisoformat(args.at).astimezone(UTC) if args.at else None
 
-    source, embedder, notes = services_for(settings)
-    if args.no_search:
-        source = None
-    for note in notes:
-        print(note)
-    try:
-        request = request_for(result, token, at=at, reference=reference)
-        explanation = explain(get_db(), settings, request, source=source, embedder=embedder)
-    except (ExplainError, RetrievalError) as exc:
-        raise SystemExit(str(exc)) from exc
+    with services(settings) as (source, embedder, notes):
+        if args.no_search:
+            source = None
+        for note in notes:
+            print(note)
+        try:
+            request = request_for(result, token, at=at, reference=reference)
+            explanation = explain(get_db(), settings, request, source=source, embedder=embedder)
+        except (ExplainError, RetrievalError) as exc:
+            raise SystemExit(str(exc)) from exc
     print(format_explanation(explanation))
     return 0
 

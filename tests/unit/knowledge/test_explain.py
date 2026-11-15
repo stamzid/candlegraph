@@ -74,7 +74,10 @@ def chunk_row(n: int, **overrides: Any) -> dict[str, Any]:
 
 
 def chunk(n: int) -> RetrievedChunk:
-    row = chunk_row(n)
+    return chunk_from_row(chunk_row(n))
+
+
+def chunk_from_row(row: dict[str, Any]) -> RetrievedChunk:
     return RetrievedChunk(
         chunk_id=row["id"],
         document_id=row["document_id"],
@@ -85,8 +88,8 @@ def chunk(n: int) -> RetrievedChunk:
         published_at=row["published_at"],
         retrieved_at=row["retrieved_at"],
         score=row["score"],
-        dense_rank=n,
-        lexical_rank=None,
+        dense_rank=row["dense_rank"],
+        lexical_rank=row["lexical_rank"],
     )
 
 
@@ -254,6 +257,33 @@ def test_the_template_cites_every_retrieved_chunk_and_nothing_else() -> None:
     assert "2.31 standard deviations above" in text
     assert "+6.0%" in text and "+8.0%" in text
     assert "short" in text
+
+
+def test_three_passages_of_one_article_are_counted_as_one_document() -> None:
+    """Found on a live stack 2026-11-16: retrieval returns chunks, and three
+    chunks of one story were announced as "3 documents" — overstating how
+    much independent reporting backed the signal."""
+    one_story = [
+        Citation.from_chunk(n, chunk_from_row(chunk_row(n, document_id=99, url="https://news.example/a")))
+        for n in (1, 2, 3)
+    ]
+    context = {"symbol": "WBTC", "position": 0, "window": 20, "window_zscore": 0.4}
+
+    text = TemplateExplanationNarrator().narrate(context, one_story)
+
+    assert "1 document (3 passages) published before the bar was retrieved" in text
+    assert "3 documents" not in text
+    assert "[1][2][3]" in text, "every chunk is still cited; only the count changed"
+
+
+def test_separate_articles_are_still_counted_as_separate_documents() -> None:
+    citations = [Citation.from_chunk(n, chunk(n)) for n in (1, 2)]
+    context = {"symbol": "WBTC", "position": 0, "window": 20, "window_zscore": 0.4}
+
+    text = TemplateExplanationNarrator().narrate(context, citations)
+
+    assert "2 documents published before the bar were retrieved" in text
+    assert "passages" not in text
 
 
 def test_the_template_calls_a_move_idiosyncratic_when_the_reference_barely_moved() -> None:

@@ -200,3 +200,15 @@ def test_retrieval_defaults_name_the_built_backend() -> None:
     assert settings.retrieval_backend == "postgres"
     assert settings.retrieval_top_k == 8
     assert settings.retrieval_candidates == 40
+
+
+def test_an_embedding_width_the_column_cannot_hold_is_refused_at_startup() -> None:
+    """It used to surface as a Postgres error halfway through an embed run."""
+    import pytest as _pytest
+
+    from candlegraph.settings import COLUMN_DIMENSIONS, Settings
+
+    with _pytest.raises(ValueError, match="EMBEDDING_DIMENSIONS"):
+        Settings(_env_file=None, embedding_dimensions=768)
+
+    assert Settings(_env_file=None, embedding_dimensions=COLUMN_DIMENSIONS).embedding_dimensions == 1024

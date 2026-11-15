@@ -187,3 +187,7 @@ class TavilySource:
             return attempt()
         except httpx.TransportError as exc:
             raise TavilyError(f"Tavily unreachable after {self._max_tries} tries: {exc}") from exc
+
+    def close(self) -> None:
+        """Release the HTTP connection pool. Safe to call twice."""
+        self._client.close()

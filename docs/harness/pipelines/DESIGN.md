@@ -525,6 +525,13 @@ history is in `run`. Their placement is recorded in
 
 ## 9. Models in pipelines, and the model picker in the UI
 
+> **Superseded in part by §16, answer 3.** The choice is **per step**,
+> not only per role, and the resolution order and the state it needs are
+> in [`../models/DESIGN.md`](../models/DESIGN.md) ("Switching per step"
+> and "Context memory"). The availability rules below — paid providers
+> usable only with a key in the environment, nothing about keys in the
+> UI — are unchanged.
+
 ### 9.1 How a step gets a model
 
 A step that writes prose declares a `model_role` (`agent`, `knowledge`,
@@ -702,7 +709,7 @@ Maps onto `docs/rollout/ROLLOUT.md` steps 3–6:
 | Step | Delivers from this document |
 |---|---|
 | 3 | spec + loader + `run --check` (§5); queue + claim + lease + resume (§7.2–7.4); plain-loop executor; one example pipeline; `idempotent` on `Job` |
-| 4 | `validate`, `analyse`, `signal`, `embed`, `explain` jobs; `pipelines/hourly.yaml`; retries and timeouts (§6.5, §7.5); model resolution + `model_choice` + the Pipelines page with the model picker (§9) |
+| 4 | `validate`, `analyse`, `signal`, `embed` (and `explain`, with `--no-search`) jobs; `pipelines/hourly.yaml`; retries and timeouts (§6.5, §7.5); per-step model resolution + `model_choice` + the Pipelines page picker |
 | 5 | outbox + dispatcher + event triggers (§7.7); circuit breaker (§7.6) |
 | 6 | OpenTelemetry metrics and traces (§8.3); production deployment notes (§8.2) |
 
@@ -712,16 +719,45 @@ stack.
 
 ---
 
-## 16. Open questions for the reviewer
+## 16. Answers (settled 2026-11-16)
 
-1. **Hourly SLO.** Is 15 minutes after ingest the right target, or is
-   "before the next hour" enough?
-2. **`explain` in the hourly pipeline.** It can spend search credits.
-   Should the hourly pipeline only explain with stored news
-   (`--no-search`) and leave searching to the daily job?
-3. **Model picker scope.** Is per-role enough, or do you want a choice
-   per pipeline step?
-4. **Production target.** Kubernetes or ECS (or a single VM with compose
-   for the first deployment)? It changes §8.2's details, not the design.
-5. **Retention of `run`.** Keep pipeline history forever (like the other
-   ledgers), or roll up older than a year?
+These were open when the document was written; they are now decided and
+the rest of the document follows them.
+
+| # | Question | Answer |
+|---|---|---|
+| 1 | Hourly SLO | **15 minutes after a successful ingest.** §4 and §8.3 stand as written. |
+| 2 | `explain` and search credits | **Explain by default, from stored news only.** The hourly pipeline runs `explain` with `--no-search`; spending a credit stays something a person asks for (the UI button, the CLI) or the daily news job does. |
+| 3 | Model picker scope | **Per step, switchable like Cursor's model dropdown**, with a role default behind it. §9 is replaced by the resolution order in `../models/DESIGN.md` and the context memory described there. |
+| 4 | Production target | **A single VM running compose first.** §8.2's replica advice becomes "later"; the queue, leases and locks still earn their place on one VM, because they are what make a restart safe. |
+| 5 | `run` retention | **One month** of pipeline history, then deleted. The per-job ledgers (`ingest_run`, `agent_run`) keep their current retention; only the generic `run` rows are pruned, by a scheduled job. |
+
+### What answer 4 changes
+
+One VM means a smaller version of §8.2, not a different design:
+
+| §8.2 said | On one VM |
+|---|---|
+| 2–3 executor replicas | **one** executor process; the queue and lease still handle restarts and deploys |
+| managed Postgres + standby | the compose Postgres, with a **nightly `pg_dump` off the box** and PITR when it matters |
+| PgBouncer | not needed at one process; the session-lock rule still applies when it arrives |
+| secret manager | `.env` on the VM with `chmod 600`, and a plan to move to a manager |
+| rolling deploys | `make up` with the executor draining on SIGTERM |
+
+The things that survive the cut are exactly the ones that make a single
+box safe: a durable queue, leases, resume, idempotent steps.
+
+### What answer 5 changes
+
+A new `prune` job, scheduled daily, deletes `run` rows (and their
+`run_queue`/`run_event` rows) older than `RUN_RETENTION_DAYS` (default
+30). It is the second table deleted from on purpose, after the fill
+cache; invariant 4 is about *observations*, and a pipeline run is not
+one. `ingest_run` and `agent_run` are untouched — they are the history
+the observer's drift rules read.
+
+## 17. Open questions
+
+None outstanding; §16 records the answers. New questions raised by the
+system review of 2026-11-16 are in
+[`../../audit/2026-11-16-system-review/FINDINGS.md`](../../audit/2026-11-16-system-review/FINDINGS.md).

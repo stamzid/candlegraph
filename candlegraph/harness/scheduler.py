@@ -60,5 +60,11 @@ def build_scheduler(
             next_run_time=datetime.now(tz=UTC),
             max_instances=1,
             coalesce=True,
+            # APScheduler drops a firing it missed by more than this, and its
+            # default is one second: a process paused by a slow run, a
+            # suspended laptop or a restart would silently skip the tick
+            # rather than run it late. One interval, floor 60s, with
+            # coalesce=True so a long pause still produces exactly one run.
+            misfire_grace_time=max(60, job.schedule.seconds(settings)),
         )
     return scheduler

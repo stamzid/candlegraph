@@ -10,6 +10,7 @@ Two properties matter here and are enforced by the integration tests:
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any
@@ -17,6 +18,7 @@ from typing import Any
 import psycopg2
 from psycopg2 import pool
 from psycopg2.extras import DictCursor, execute_values
+from psycopg2.pool import ThreadedConnectionPool
 
 from candlegraph.settings import get_settings
 from candlegraph.storage.statements import SqlQuery, Statements, statements_for
@@ -38,6 +40,10 @@ class DatabaseManager:
         self.min_connections = min_connections
         self.max_connections = max_connections
         self._pool: pool.ThreadedConnectionPool | None = None
+        # Scheduler jobs run in threads, so two of them can reach `pool` at
+        # once on the first use; without this, both build one and one is
+        # orphaned with its connections open.
+        self._pool_lock = threading.Lock()
 
     @property
     def sql(self) -> Statements:
@@ -49,18 +55,27 @@ class DatabaseManager:
     @property
     def pool(self) -> pool.ThreadedConnectionPool:
         """The connection pool, created on first access."""
-        if self._pool is None:
-            service_logger.info(
-                "Opening connection pool (min=%s max=%s)", self.min_connections, self.max_connections
-            )
-            self._pool = pool.ThreadedConnectionPool(
-                minconn=self.min_connections,
-                maxconn=self.max_connections,
-                dsn=self.dsn,
-                # Everything downstream assumes UTC; do not inherit the server's.
-                options="-c timezone=UTC",
-            )
-        return self._pool
+        # Read once into a local: the fast path must not re-read the attribute
+        # another thread may be assigning.
+        existing = self._pool
+        if existing is not None:
+            return existing
+        with self._pool_lock:
+            if self._pool is None:
+                self._pool = self._build_pool()
+            return self._pool
+
+    def _build_pool(self) -> ThreadedConnectionPool:
+        service_logger.info(
+            "Opening connection pool (min=%s max=%s)", self.min_connections, self.max_connections
+        )
+        return pool.ThreadedConnectionPool(
+            minconn=self.min_connections,
+            maxconn=self.max_connections,
+            dsn=self.dsn,
+            # Everything downstream assumes UTC; do not inherit the server's.
+            options="-c timezone=UTC",
+        )
 
     def close(self) -> None:
         """Close every pooled connection. Idempotent."""

@@ -51,3 +51,6 @@ class Source(Protocol):
     def search(self, query: str, *, start: datetime, end: datetime, max_results: int) -> SearchResult:
         """Fetch documents for ``query`` published inside ``[start, end]``."""
         ...
+
+    def close(self) -> None:
+        """Release any network resources; a no-op for a source holding none."""

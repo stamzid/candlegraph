@@ -36,6 +36,9 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)((?:postgres(?:ql)?|https?)://[^:/\s]+:)[^@\s]+(@)"),
     # A bare Tavily key ("tvly-...") pasted without any KEY= prefix.
     re.compile(r"(tvly-)[A-Za-z0-9._\-]{4,}"),
+    # Bare model-provider keys: OpenAI ("sk-", "sk-proj-") and Anthropic
+    # ("sk-ant-"). The models design adds more places these can be echoed.
+    re.compile(r"(sk-)(?:ant-|proj-)?[A-Za-z0-9._\-]{8,}"),
 )
 
 

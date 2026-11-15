@@ -105,7 +105,7 @@ from candlegraph.knowledge.explain import (
     explain,
     load_explanation,
     request_for,
-    services_for,
+    services,
 )
 from candlegraph.knowledge.news import NewsError, NewsFetchSummary, budget_from, run_news_fetch, source_spend
 from candlegraph.knowledge.retrieve import RetrievalError
@@ -1633,14 +1633,14 @@ def run_explain_now(
             reference = _one_symbol(db, reference_symbol, None)
         except ViewError:
             reference = None  # no stored history for the reference: explain without the comparison
-    source, embedder, _notes = services_for(settings)
-    if not search:
-        source = None
-    try:
-        request = request_for(result, token, at=at, reference=reference)
-        return ExplanationView(explain(db, settings, request, source=source, embedder=embedder))
-    except (ExplainError, RetrievalError) as exc:
-        raise ViewError(str(exc)) from exc
+    with services(settings) as (source, embedder, _notes):
+        if not search:
+            source = None
+        try:
+            request = request_for(result, token, at=at, reference=reference)
+            return ExplanationView(explain(db, settings, request, source=source, embedder=embedder))
+        except (ExplainError, RetrievalError) as exc:
+            raise ViewError(str(exc)) from exc
 
 
 # --- forecast dashboard ------------------------------------------------------

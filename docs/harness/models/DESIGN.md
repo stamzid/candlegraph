@@ -117,6 +117,64 @@ ANALYST_LLM_MODEL=openai-compatible:qwen3:32b    # future analyst
 - **Roles can differ.** A cheap local model for nightly summaries and a
   stronger hosted one for the analyst is a normal setup.
 
+### Switching per step, the way Cursor does
+
+Decided 2026-11-16: the choice is **per step**, with the role as the
+default behind it — the same shape as a model dropdown that remembers a
+sensible default but can be changed for one request.
+
+Four places can name a model; the first one that is usable wins:
+
+| Order | Scope | Set where | Lives for |
+|---|---|---|---|
+| 1 | **this step, this run** | the Pipelines page, or `candlegraph run --model signal=openai:<model>` | one run |
+| 2 | **this step, always** | `model:` on the step in the pipeline YAML | until the file changes |
+| 3 | **this role** | the Models panel (saved) or `AGENT_LLM_MODEL` etc. | until changed |
+| 4 | **fallback** | the template | always |
+
+"Usable" means the provider's key is in the environment (paid) or its
+server answers (local). An unusable choice does not fail the step: the
+resolver falls to the next line and records why.
+
+### Context memory: what the harness must remember
+
+Switching models between steps only works if what the steps share is
+**not tied to any model**. This is the part that needs new state, and it
+is small.
+
+**The rule: memory holds facts, not provider objects.** A durable record
+may contain text, numbers, ids and citations. It must never contain a
+provider's own structures — message blocks, tool-call ids, prompt-cache
+handles — because they are meaningless to a different provider, and they
+are the reason model switches break systems that store raw transcripts.
+
+What gets remembered, and where:
+
+| What | Where it lives | Why the harness needs it |
+|---|---|---|
+| The step's resolved model (`anthropic:claude-sonnet-5-5`, or `template`) | `run.detail.model`, per step | "Did the summaries get worse after we switched?" must be answerable from the ledger |
+| Why that one was chosen | `run.detail.model_source` = `run`/`spec`/`role`/`fallback`, plus `model_fallback` when a choice was skipped | a silently different model is the worst outcome of this feature |
+| Tokens and cost | `run.counts.tokens_in`, `tokens_out`, `cost_micros` | per-step switching makes "which step costs money?" a weekly question (review finding 15) |
+| The saved choice itself | `model_choice` rows: `scope` (`role`/`pipeline`/`step`), `key`, `provider`, `model`, `changed_by`, `created_at` | newest row wins, history kept, same pattern as `budget_policy` |
+| What a step produced for later steps | the ledger and the database, as §6.3 of the pipelines design already requires | a step restarted after a crash must not need a dead process's memory |
+| Multi-turn work (analyst, research loop) | the notebook tables in `../research-loop/DESIGN.md`: findings, evidence ids, open questions — plain text and ids | lets the model change between turns without losing the thread |
+
+Three consequences worth stating plainly:
+
+1. **Prompt caching does not survive a switch.** Providers cache on
+   their side, keyed by model and prefix. Changing model mid-pipeline
+   throws that away and costs more. The UI should say so next to the
+   per-step dropdown, not hide it.
+2. **Nothing is shared between providers at the wire level.** Each call
+   is built from the stored facts, not replayed from another provider's
+   transcript. That is what makes switching safe, and it is why the
+   prompt builders must stay provider-neutral.
+3. **A step's result must not depend on which model ran it.** Findings,
+   severities, numbers and exit codes come from code (invariant 22).
+   Switching models may change wording and cost; it may never change a
+   verdict. A test runs the same step under the fake model and the
+   template and asserts the non-prose fields are identical.
+
 ### Rules that do not change
 
 - **The model only phrases; it never decides** (invariant 22). Findings,

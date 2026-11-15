@@ -34,7 +34,7 @@ between steps, if needed sooner):
 | # | Step | Size | Depends on | Status |
 |---|---|---|---|---|
 | 1 | Split the four large dashboard pages; draw the ingest stage strip | S | — | done 2026-11-15 |
-| 2 | Write the pipelines design (no code) | S | — | written 2026-11-15 — **awaiting your review** |
+| 2 | Write the pipelines design (no code) | S | — | done 2026-11-16 — reviewed, five questions answered |
 | 3 | Pipeline spec, loader and `candlegraph run` for one step | M | 2 | todo |
 | 4 | The hourly pipeline end to end: validate, analyse, signal, embed as jobs | M | 3 | todo |
 | 5 | Events: run finished → next thing starts | M | 3 | todo |
@@ -174,8 +174,19 @@ providers selectable only when their key is in the environment).
 Streaming platforms (Redpanda, NATS JetStream) are evaluated with the
 signals that would justify adding one; none is proposed now.
 
-Five open questions are listed at the end of the design for you to
-answer before step 3.
+Reviewed 2026-11-16 and all five questions answered in §16 of the
+design: a 15-minute SLO after ingest; `explain` runs by default but only
+on stored news, with search left to a person or the daily job; the model
+choice is **per step** (role as the default behind it), with the context
+memory it needs designed in `../harness/models/DESIGN.md`; a single VM is
+the production target; and `run` history is kept one month, via a new
+`prune` job.
+
+Step 2 also triggered a whole-repository review before any pipeline code:
+[`../audit/2026-11-16-system-review/FINDINGS.md`](../audit/2026-11-16-system-review/FINDINGS.md).
+Seven bugs were fixed in that pass; the open items that affect this rollout
+are no authentication and no backups (both need your decision), and the
+`prune` job answer 5 now requires.
 
 ---
 

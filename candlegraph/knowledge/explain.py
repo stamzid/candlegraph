@@ -32,7 +32,8 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -399,9 +400,15 @@ class TemplateExplanationNarrator:
 
         if citations:
             markers = "".join(f"[{c.n}]" for c in citations)
-            noun, verb = ("document", "was") if len(citations) == 1 else ("documents", "were")
+            # Citations are chunks, and several can come from one article.
+            # Counting them as documents overstated the corroboration: one
+            # story retrieved three times read as "3 documents".
+            documents = len({c.document_id for c in citations})
+            noun, verb = ("document", "was") if documents == 1 else ("documents", "were")
+            passages = "" if len(citations) == documents else f" ({len(citations)} passages)"
             sentences.append(
-                f"{len(citations)} {noun} published before the bar {verb} retrieved for context {markers}."
+                f"{documents} {noun}{passages} published before the bar {verb} "
+                f"retrieved for context {markers}."
             )
         else:
             sentences.append(
@@ -721,10 +728,10 @@ def explain_symbol(
 
     result = run_strategy(strategy, prices, strategy_config)
     request = request_for(result, token, at=at, reference=reference)
-    source, embedder, _notes = services_for(settings)
-    if not search:
-        source = None
-    return explain(db, settings, request, source=source, embedder=embedder, now=now)
+    with services(settings) as (source, embedder, _notes):
+        if not search:
+            source = None
+        return explain(db, settings, request, source=source, embedder=embedder, now=now)
 
 
 def bar_of(result: StrategyResult, at: datetime | None = None) -> datetime:
@@ -773,6 +780,28 @@ def request_for(
         reference=reference,
         params=dict(result.params),
     )
+
+
+@contextmanager
+def services(settings: Settings) -> Iterator[tuple[Source | None, Embedder | None, list[str]]]:
+    """:func:`services_for`, closed when the block ends.
+
+    Both the Tavily client and the HTTP embedders hold an ``httpx.Client``,
+    which holds a connection pool. Built per explanation and never closed,
+    they leak sockets in any long-lived process — the API serving the
+    explain mutation, the agents process, the UI. Callers use this.
+    """
+    source, embedder, notes = services_for(settings)
+    try:
+        yield source, embedder, notes
+    finally:
+        for service in (source, embedder):
+            if service is None:
+                continue
+            try:
+                service.close()
+            except Exception as exc:  # a failed close must not fail the explanation
+                service_logger.warning("Could not close %s: %s", type(service).__name__, exc)
 
 
 def services_for(settings: Settings) -> tuple[Source | None, Embedder | None, list[str]]:

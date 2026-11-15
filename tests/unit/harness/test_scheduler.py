@@ -72,3 +72,24 @@ def test_a_custom_job_can_be_injected() -> None:
     job = build_scheduler(make_settings(), ALL, job_override={"observer": custom}).get_job("observer")
 
     assert job is not None and job.func is custom
+
+
+def test_a_missed_firing_runs_late_instead_of_being_dropped() -> None:
+    """APScheduler's default grace is one second: a paused process would skip
+    the tick entirely rather than run it late. With coalesce, a long pause
+    still produces exactly one run."""
+    settings = make_settings(data_poll_interval=300, observer_interval=900)
+    scheduler = build_scheduler(settings, ALL)
+
+    ingest = scheduler.get_job("ingest")
+    observer = scheduler.get_job("observer")
+    assert ingest is not None and observer is not None
+    assert ingest.misfire_grace_time == 300
+    assert observer.misfire_grace_time == 900
+    assert ingest.coalesce is True
+
+
+def test_a_very_short_interval_still_gets_a_usable_grace_period() -> None:
+    job = build_scheduler(make_settings(data_poll_interval=5), ALL).get_job("ingest")
+
+    assert job is not None and job.misfire_grace_time == 60

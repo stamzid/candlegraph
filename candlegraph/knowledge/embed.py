@@ -35,6 +35,7 @@ import httpx
 import numpy as np
 
 from candlegraph.knowledge.statements import knowledge_statements_for
+from candlegraph.settings import COLUMN_DIMENSIONS as _COLUMN_DIMENSIONS
 from candlegraph.settings import Settings
 from candlegraph.storage import DatabaseManager
 from candlegraph.utils.logging_utils import service_logger
@@ -45,7 +46,9 @@ Kind = Literal["document", "query"]
 PROVIDERS: tuple[str, ...] = ("ollama", "openai", "fake")
 
 # The column is halfvec(1024); the migration fixes it and the design says why.
-COLUMN_DIMENSIONS = 1024
+# Defined in settings so it can be validated at start-up; re-exported here
+# because this is where readers look for it.
+COLUMN_DIMENSIONS = _COLUMN_DIMENSIONS
 
 
 class EmbeddingError(RuntimeError):
@@ -62,6 +65,9 @@ class Embedder(Protocol):
     def dimensions(self) -> int: ...
 
     def embed(self, texts: Sequence[str], *, kind: Kind) -> list[list[float]]: ...
+
+    def close(self) -> None:
+        """Release any network resources; a no-op for an embedder holding none."""
 
 
 # --- prefixes ------------------------------------------------------------------------
@@ -163,6 +169,9 @@ class HashEmbedder:
             out.append([float(v) for v in vector])
         return out
 
+    def close(self) -> None:
+        """Nothing to release."""
+
 
 class OllamaEmbedder:
     """``POST /api/embed`` against an Ollama server — the local default."""
@@ -210,6 +219,10 @@ class OllamaEmbedder:
             raise EmbeddingError(f"Ollama returned {got} vectors for {len(texts)} texts")
         return [fit_dimensions(v, self._dimensions, truncate=self._truncate) for v in vectors]
 
+    def close(self) -> None:
+        """Release the HTTP connection pool. Safe to call twice."""
+        self._client.close()
+
 
 class OpenAIEmbedder:
     """The hosted option: ``text-embedding-3-large`` with ``dimensions`` set by the API."""
@@ -253,6 +266,10 @@ class OpenAIEmbedder:
         if len(data) != len(texts):
             raise EmbeddingError(f"OpenAI returned {len(data)} vectors for {len(texts)} texts")
         return [fit_dimensions(item["embedding"], self._dimensions, truncate=False) for item in data]
+
+    def close(self) -> None:
+        """Release the HTTP connection pool. Safe to call twice."""
+        self._client.close()
 
 
 # Model names that only one provider serves. A pair that cannot work is

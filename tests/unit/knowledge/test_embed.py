@@ -448,3 +448,15 @@ def test_a_provider_and_model_that_cannot_work_together_are_refused_up_front() -
         )
     )
     assert "text-embedding-3-large" in chosen.name
+
+
+def test_an_embedder_releases_its_connection_pool() -> None:
+    """Built per explanation and never closed, these leaked sockets in the API."""
+    from candlegraph.knowledge.embed import HashEmbedder, OllamaEmbedder
+    from tests.conftest import make_settings
+
+    embedder = OllamaEmbedder(model="bge-m3", base_url="http://ollama:11434")
+    embedder.close()
+    assert embedder._client.is_closed
+
+    HashEmbedder(dimensions=make_settings().embedding_dimensions).close()  # no-op, must not raise

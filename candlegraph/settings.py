@@ -18,6 +18,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 DEFAULT_SUBGRAPH_ID = "5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV"
 GATEWAY_BASE_URL = "https://gateway.thegraph.com/api/subgraphs/id"
 
+# The width of chunk.embedding (halfvec(1024)), set by the knowledge migration.
+# Declared here so a bad EMBEDDING_DIMENSIONS is refused at start-up; the
+# embedding module imports it rather than keeping a second copy.
+COLUMN_DIMENSIONS = 1024
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -249,6 +254,21 @@ class Settings(BaseSettings):
     # compose health probe is the only steady-state caller, and one line per
     # probe buried every real request. Failures are always logged.
     log_health_probes: bool = False
+
+    @model_validator(mode="after")
+    def _check_embedding_width(self) -> Settings:
+        """The vector column is ``halfvec(1024)``; a model of another width cannot be stored.
+
+        Caught here rather than by Postgres halfway through an embed run, which
+        is where it used to surface.
+        """
+        if self.embedding_dimensions != COLUMN_DIMENSIONS:
+            raise ValueError(
+                f"EMBEDDING_DIMENSIONS must be {COLUMN_DIMENSIONS}: that is the width of the "
+                "chunk.embedding column. Pick a model of that width, or set EMBEDDING_TRUNCATE=true "
+                "for a Matryoshka model that can be cut down to it."
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_pool_bounds(self) -> Settings:

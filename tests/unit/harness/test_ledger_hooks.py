@@ -158,3 +158,22 @@ def test_log_lines_inside_a_run_carry_its_run_id(db: FakeDatabase, monkeypatch: 
     run_filter.filter(outside)
     assert outside.run == ""  # type: ignore[attr-defined]
     assert current_run_id.get() is None
+
+
+def test_the_ingest_row_is_closed_even_if_opening_it_never_ran(db: FakeDatabase) -> None:
+    """A hook whose started() failed must still close the row, or the run
+    stays `running` forever and looks like a hung process."""
+    from datetime import timedelta
+
+    from candlegraph.harness.hooks import IngestLedgerHook
+    from candlegraph.harness.runs import Outcome, Run, RunOutcome
+
+    hook = IngestLedgerHook(db, lookback_days=7)
+    run = Run(job="ingest", trigger="scheduled", started_at=NOW)
+    run.finished_at = NOW + timedelta(seconds=2)
+
+    hook.finished(run, RunOutcome(outcome=Outcome.FAILED))  # started() deliberately skipped
+
+    (label, params) = db.executed[-1]
+    assert label == "finish_ingest_run"
+    assert params is not None and params["run_id"] == run.run_id and params["status"] == "failed"

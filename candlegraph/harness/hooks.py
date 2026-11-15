@@ -26,6 +26,7 @@ from candlegraph.utils.logging_utils import service_logger
 if TYPE_CHECKING:
     from candlegraph.harness.runs import Run, RunOutcome
     from candlegraph.harness.stages import StageRecord
+    from candlegraph.ingestion.ledger import RunRecord
     from candlegraph.storage import DatabaseManager
 
 
@@ -63,6 +64,9 @@ class IngestLedgerHook:
         self.db = db
         self.lookback_days = lookback_days
         self.stages: list[dict[str, Any]] = []
+        # None until started() runs. A hook whose started() raised must still
+        # be able to close the row, or the run stays `running` forever.
+        self.record: RunRecord | None = None
 
     def started(self, run: Run) -> None:
         from candlegraph.ingestion import ledger
@@ -88,9 +92,12 @@ class IngestLedgerHook:
             detail["stages"] = self.stages
         if run.exception is not None:
             detail["exception"] = type(run.exception).__name__
+        record = self.record or ledger.RunRecord(
+            run_id=run.run_id, trigger=run.trigger, started_at=run.started_at
+        )
         ledger.finish_run(
             self.db,
-            self.record,
+            record,
             outcome.outcome.value,
             dict(outcome.counts),
             dict(outcome.errors),

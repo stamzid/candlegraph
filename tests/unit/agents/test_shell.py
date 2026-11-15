@@ -58,3 +58,12 @@ def test_a_timeout_is_a_result_not_an_exception() -> None:
 
     assert result.timed_out
     assert not result.ok
+
+
+def test_bare_model_provider_keys_are_redacted() -> None:
+    """A key with a known prefix can reach output with no KEY= in front of it."""
+    from candlegraph.agents.shell import redact
+
+    assert "sk-ant-api03-SECRETVALUE" not in redact("anthropic said sk-ant-api03-SECRETVALUE is invalid")
+    assert "sk-proj-ABCDEFGH1234" not in redact("openai: sk-proj-ABCDEFGH1234")
+    assert redact("sk-short") == "sk-short", "too short to be a key; left alone"
