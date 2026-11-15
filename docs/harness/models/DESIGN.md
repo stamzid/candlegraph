@@ -31,12 +31,12 @@ text into vectors (embeddings), and writing a paragraph of prose
 
 1. **Bug, fixed this session:** `AGENT_LLM_MODEL` did nothing for the
    agents. It was documented, but the observer and janitor always built
-   the template narrator. They now use `build_agent_narrator(settings)`,
-   with a regression test.
+   the template narrator. Both now ask `NarratorSelector(settings).build()`
+   — one place that reads the setting — with a regression test.
 2. **Trap, fixed this session:** `EMBEDDING_PROVIDER=openai` with the
    default `EMBEDDING_MODEL=bge-m3` sent an Ollama model name to OpenAI
-   and failed mid-run. It is now refused up front with the fix in the
-   message.
+   and failed mid-run. `check_provider_model` now refuses any pair that
+   cannot work, in either direction, before a request is made.
 3. **Chat models are Claude only, and hard-wired twice.** The Anthropic
    call is copied in `agents/narrator.py` and `knowledge/explain.py`.
    There is no way to use OpenAI or an open-source model for prose.

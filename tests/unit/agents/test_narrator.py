@@ -77,11 +77,16 @@ def test_no_findings_never_calls_the_model() -> None:
 
 def test_agent_llm_model_actually_selects_the_model_narrator() -> None:
     """Regression, 2026-11-15: the setting was documented and ignored by both agents."""
-    from candlegraph.agents.narrator import AnthropicNarrator, TemplateNarrator, build_agent_narrator
+    from candlegraph.agents.narrator import AnthropicNarrator, NarratorSelector, TemplateNarrator
     from tests.conftest import make_settings
 
-    assert isinstance(build_agent_narrator(make_settings()), TemplateNarrator)
-    chosen = build_agent_narrator(make_settings(agent_llm_model="claude-sonnet-5-5", anthropic_api_key="k"))
+    default = NarratorSelector(make_settings())
+    assert default.model is None
+    assert isinstance(default.build(), TemplateNarrator)
+
+    configured = NarratorSelector(make_settings(agent_llm_model="claude-sonnet-5-5", anthropic_api_key="k"))
+    assert configured.model == "claude-sonnet-5-5"
+    chosen = configured.build()
     assert isinstance(chosen, AnthropicNarrator) and chosen.model == "claude-sonnet-5-5"
 
 
@@ -91,13 +96,16 @@ def test_the_observer_uses_the_configured_narrator(monkeypatch: pytest.MonkeyPat
 
     built: list[str] = []
 
-    def fake_builder(settings: object) -> object:
-        built.append("called")
-        from candlegraph.agents.narrator import TemplateNarrator
+    class FakeSelector:
+        def __init__(self, settings: object) -> None:
+            built.append("called")
 
-        return TemplateNarrator()
+        def build(self) -> object:
+            from candlegraph.agents.narrator import TemplateNarrator
 
-    monkeypatch.setattr("candlegraph.agents.observer.graph.build_agent_narrator", fake_builder)
+            return TemplateNarrator()
+
+    monkeypatch.setattr("candlegraph.agents.observer.graph.NarratorSelector", FakeSelector)
     run_observer(make_settings(), db=FakeDatabase(), sinks=[])
 
     assert built == ["called"]

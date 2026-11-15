@@ -33,7 +33,7 @@ between steps, if needed sooner):
 
 | # | Step | Size | Depends on | Status |
 |---|---|---|---|---|
-| 1 | Split the four large dashboard pages; draw the ingest stage strip | S | — | todo |
+| 1 | Split the four large dashboard pages; draw the ingest stage strip | S | — | done 2026-11-15 |
 | 2 | Write the pipelines design (no code) | S | — | todo |
 | 3 | Pipeline spec, loader and `candlegraph run` for one step | M | 2 | todo |
 | 4 | The hourly pipeline end to end: validate, analyse, signal, embed as jobs | M | 3 | todo |
@@ -88,7 +88,37 @@ their confirmation.
 `AppTest` suite passes unchanged except for new tests of the ingest strip;
 `make check` green.
 
-**Outcome.** Not started.
+**Outcome.** Done 2026-11-15.
+
+- The four named pages are now 8–23 lines each, over panel functions:
+  `_portfolio_*` (controls, metrics, allocation, frontier), `_strategy_*`
+  (controls, metrics, charts, tables, ledger), `_agents_*` (button,
+  metrics, news strip, findings, charts, history) and `_news_*` (metrics,
+  runway, fetch panel, charts, tables).
+- **Four more pages were over the 60-line criterion** than the goal
+  named — `_risk_page` (98), `_data_page` (86), `_compare_page` (81) and
+  `_forecast_page` (64). They were split too, so the criterion as written
+  is met rather than quietly narrowed. Every page function is now ≤ 59
+  lines; the longest remaining functions are panels (`_token_price_chart`,
+  `_execution_panel`, `_estimator_panel`), which this step did not claim.
+- **The ingest stage strip is drawn.** `AgentsView.ingest_stages` reads
+  the newest ingest run that recorded stages — not simply the newest row,
+  which is often a run still in progress whose stages are written when it
+  closes. `_stage_strip` is one function used for both ledgers.
+- Two small fixes found while splitting: the coverage chart was duplicated
+  between the Agents and Data pages and is now `_coverage_chart`; and the
+  stage detail column used its own formatter, so ingest's nested
+  `by_symbol` printed as a raw Python dict. It now uses `describe()`, the
+  same formatter `--progress` prints with.
+- One bug caught by the tests while splitting: `_strategy_config` draws
+  widgets, and the first split called it twice in one run, which
+  Streamlit rejects as duplicate element ids. It is built once and passed
+  down, with a comment saying why.
+- Widget keys were not touched, so a tab open across the change keeps its
+  selections.
+- Verified on a real stack: `make up` healthy, the UI serving (HTTP 200),
+  and the ingest strip showing the four real stages with readable detail.
+  `make check` green (1694 passed, 11 e2e skips).
 
 ---
 

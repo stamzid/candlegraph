@@ -255,13 +255,46 @@ class OpenAIEmbedder:
         return [fit_dimensions(item["embedding"], self._dimensions, truncate=False) for item in data]
 
 
-# The settings default. Named so the OpenAI branch can refuse it.
-OLLAMA_DEFAULT_MODEL = "bge-m3"
+# Model names that only one provider serves. A pair that cannot work is
+# caught here rather than by a 404 after the first batch has been sent.
+# Anything not listed is allowed: Ollama serves whatever is pulled locally.
+MODEL_OWNERS: dict[str, str] = {
+    "bge-m3": "ollama",
+    "nomic-embed-text": "ollama",
+    "mxbai-embed-large": "ollama",
+    "text-embedding-3-large": "openai",
+    "text-embedding-3-small": "openai",
+    "text-embedding-ada-002": "openai",
+}
+
+
+def check_provider_model(provider: str, model: str) -> None:
+    """Refuse a provider and model that cannot belong together.
+
+    Both directions are mistakes a config file makes easily: leaving the
+    default ``bge-m3`` while switching to ``openai``, or naming an OpenAI
+    model while the provider is still the local default.
+
+    Raises:
+        EmbeddingError: the model is known to belong to another provider.
+    """
+    owner = MODEL_OWNERS.get(model.strip())
+    if owner is None or owner == provider:
+        return
+    suggestion = next((name for name, who in MODEL_OWNERS.items() if who == provider), None)
+    fix = f" (for {provider}, try EMBEDDING_MODEL={suggestion})" if suggestion else ""
+    raise EmbeddingError(
+        f"EMBEDDING_MODEL={model} is a {owner} model but EMBEDDING_PROVIDER={provider}{fix}; "
+        "changing the model is a `make reembed`"
+    )
 
 
 def build_embedder(settings: Settings, transport: httpx.BaseTransport | None = None) -> Embedder:
     """The configured provider, or an error naming what is wrong."""
-    match settings.embedding_provider.strip().lower():
+    provider = settings.embedding_provider.strip().lower()
+    if provider in PROVIDERS and provider != "fake":
+        check_provider_model(provider, settings.embedding_model)
+    match provider:
         case "ollama":
             return OllamaEmbedder(
                 model=settings.embedding_model,
@@ -274,14 +307,6 @@ def build_embedder(settings: Settings, transport: httpx.BaseTransport | None = N
         case "openai":
             if settings.openai_api_key is None:
                 raise EmbeddingError("EMBEDDING_PROVIDER=openai needs OPENAI_API_KEY in .env")
-            if settings.embedding_model == OLLAMA_DEFAULT_MODEL:
-                # The default model name belongs to the local provider. Sending it
-                # to OpenAI fails with an opaque 404 after the first batch.
-                raise EmbeddingError(
-                    f"EMBEDDING_MODEL={OLLAMA_DEFAULT_MODEL} is an Ollama model; with "
-                    "EMBEDDING_PROVIDER=openai set EMBEDDING_MODEL=text-embedding-3-large "
-                    "(then `make reembed`)"
-                )
             return OpenAIEmbedder(
                 api_key=settings.openai_api_key.get_secret_value(),
                 model=settings.embedding_model,

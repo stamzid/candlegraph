@@ -104,17 +104,30 @@ class AnthropicNarrator:
         return "".join(getattr(block, "text", "") for block in response.content)
 
 
-def build_agent_narrator(settings: Settings) -> Narrator:
-    """The narrator the agents use: a model when ``AGENT_LLM_MODEL`` is set, the template otherwise.
+class NarratorSelector:
+    """Chooses the narrator an agent run uses: the model when one is configured, else the template.
+
+    One place that reads the settings, so the observer, the janitor and any
+    later graph cannot drift apart on what ``AGENT_LLM_MODEL`` means.
 
     Regression, 2026-11-15: ``AGENT_LLM_MODEL`` was documented but nothing
-    built an :class:`AnthropicNarrator`, so the observer and the janitor
-    always used the template whatever the setting said. Either way the
-    findings, status and exit code are unchanged (invariant 22); only the
-    summary paragraph differs, and a failing model call falls back to the
-    template.
+    built an :class:`AnthropicNarrator`, so both agents used the template
+    whatever the setting said. Either way the findings, status and exit code
+    are unchanged (invariant 22); only the summary paragraph differs, and a
+    failing model call falls back to the template.
     """
-    if not settings.agent_llm_model:
-        return TemplateNarrator()
-    key = settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else None
-    return AnthropicNarrator(settings.agent_llm_model, api_key=key)
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    @property
+    def model(self) -> str | None:
+        """The configured model name, or ``None`` when the template is used."""
+        return self.settings.agent_llm_model or None
+
+    def build(self) -> Narrator:
+        """The narrator to use for this run."""
+        if not self.model:
+            return TemplateNarrator()
+        key = self.settings.anthropic_api_key.get_secret_value() if self.settings.anthropic_api_key else None
+        return AnthropicNarrator(self.model, api_key=key)

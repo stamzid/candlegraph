@@ -301,7 +301,8 @@ def test_the_fake_provider_is_available_for_development() -> None:
 
 def test_the_hosted_provider_needs_a_key() -> None:
     with pytest.raises(EmbeddingError, match="OPENAI_API_KEY"):
-        build_embedder(make_settings(embedding_provider="openai"))
+        # A model the provider really serves, so the key is what is missing.
+        build_embedder(make_settings(embedding_provider="openai", embedding_model="text-embedding-3-large"))
 
     embedder = build_embedder(
         make_settings(
@@ -420,16 +421,27 @@ def test_the_backlog_reads_missing_and_stale_counts() -> None:
     assert db.fetches == [("count_embedding_backlog", {"model": "bge-m3"})]
 
 
-def test_switching_to_openai_without_changing_the_model_is_a_clear_error() -> None:
-    """The default EMBEDDING_MODEL is Ollama's; sent to OpenAI it fails opaquely mid-run."""
+def test_a_provider_and_model_that_cannot_work_together_are_refused_up_front() -> None:
+    """Either direction is an easy config mistake, and both fail opaquely mid-run.
+
+    Leaving the default `bge-m3` while switching to openai sends an Ollama
+    model name to OpenAI; naming an OpenAI model while the provider is still
+    the local default asks Ollama for a model it will never have.
+    """
     import pytest as _pytest
 
-    from candlegraph.knowledge.embed import EmbeddingError, build_embedder
+    from candlegraph.knowledge.embed import EmbeddingError, build_embedder, check_provider_model
     from tests.conftest import make_settings
 
     with _pytest.raises(EmbeddingError, match="text-embedding-3-large"):
         build_embedder(make_settings(embedding_provider="openai", openai_api_key="sk-x"))
 
+    with _pytest.raises(EmbeddingError, match="bge-m3"):
+        build_embedder(make_settings(embedding_model="text-embedding-3-large"))
+
+    # A matching pair, and a model nobody owns, both pass.
+    check_provider_model("openai", "text-embedding-3-large")
+    check_provider_model("ollama", "qwen3-embedding:8b")
     chosen = build_embedder(
         make_settings(
             embedding_provider="openai", openai_api_key="sk-x", embedding_model="text-embedding-3-large"

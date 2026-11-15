@@ -842,7 +842,8 @@ def _quality_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) 
 # --- RISK --------------------------------------------------------------------
 
 
-def _risk_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+def _risk_controls(settings: Settings, ctx: dict[str, Any]) -> tuple[str, str | None, RiskConfig, str]:
+    """Token, benchmark, confidence, horizon and estimator."""
     a, b, c, d, e = st.columns(5)
     symbol = _pick(a, "Token", ctx["symbols"], "risk_symbol", default_index(ctx["symbols"]))
     default_benchmark = settings.risk_benchmark if settings.risk_benchmark in ctx["symbols"] else None
@@ -867,9 +868,13 @@ def _risk_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> 
         risk_free_rate=ctx["risk_free"],
     )
     benchmark = None if benchmark_pick == "(none)" else benchmark_pick
-    view = build_risk_view(db, symbol, benchmark, ctx["days"], config)
-    report = view.report
+    return symbol, benchmark, config, horizon_label
 
+
+def _risk_metrics(view: Any, config: RiskConfig, horizon_label: str) -> None:
+    """VaR and CVaR beside the plain risk statistics."""
+    report = view.report
+    confidence = config.confidence
     cols = st.columns(6)
     cols[0].metric(
         f"VaR {confidence:.0%} {horizon_label}",
@@ -886,6 +891,10 @@ def _risk_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> 
     cols[4].metric("Sharpe", f"{report.sharpe:.2f}")
     cols[5].metric("Sortino", f"{report.sortino:.2f}")
 
+
+def _risk_charts(view: Any, config: RiskConfig) -> None:
+    """The loss profile, estimator disagreement, drawdown and the market split."""
+    report = view.report
     left, right = st.columns(2)
     with left:
         _title(
@@ -936,6 +945,13 @@ def _risk_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> 
         else:
             st.info("Pick a benchmark to split risk into market and token-specific parts.")
 
+
+def _risk_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+    symbol, benchmark, config, horizon_label = _risk_controls(settings, ctx)
+    view = build_risk_view(db, symbol, benchmark, ctx["days"], config)
+
+    _risk_metrics(view, config, horizon_label)
+    _risk_charts(view, config)
     st.caption(
         f"Risk-free rate {config.risk_free_rate:.2%}/yr (nominal, from the sidebar) "
         "feeds the Sharpe and Sortino above."
@@ -945,7 +961,10 @@ def _risk_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> 
 # --- COMPARE -----------------------------------------------------------------
 
 
-def _compare_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+def _compare_controls(
+    db: DatabaseManager, settings: Settings, ctx: dict[str, Any]
+) -> tuple[str, str, int, Any]:
+    """The two tokens, the rolling window, and the comparison over aligned bars."""
     first, second = DEFAULT_PAIR
     a, b, c = st.columns(3)
     symbol_a = _pick(a, "Token A", ctx["symbols"], "pair_a", default_index(ctx["symbols"], first))
@@ -956,8 +975,12 @@ def _compare_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) 
     view = build_pair_view(
         db, symbol_a, symbol_b, ctx["days"], window, settings.analytics_interval_hours, ctx["risk_free"]
     )
-    result = view.comparison
+    return symbol_a, symbol_b, window, view
 
+
+def _compare_metrics(view: Any, symbol_a: str, symbol_b: str) -> None:
+    """Correlation two ways, beta, tracking error and the relative return."""
+    result = view.comparison
     cols = st.columns(6)
     cols[0].metric(
         "Correlation (Pearson)",
@@ -975,6 +998,9 @@ def _compare_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) 
     cols[4].metric(f"Relative return {symbol_a} - {symbol_b}", _pct(result.relative_return))
     cols[5].metric("Aligned bars", f"{result.bars:,}")
 
+
+def _compare_legs(view: Any) -> None:
+    """Each token on its own, over the same aligned bars."""
     _title(
         "Each Leg on Its Own — over the same aligned bars",
         "Which token carried the return, and which carried the risk. Computed over the "
@@ -993,12 +1019,10 @@ def _compare_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) 
         hide_index=True,
     )
 
-    _title(
-        f"Relative Value — {symbol_a} priced in {symbol_b}",
-        "A rising line means A outruns B. Hours only one token traded are excluded, not filled.",
-    )
-    st.line_chart(result.frame[["ratio"]], height=280)
 
+def _compare_charts(view: Any, symbol_a: str, symbol_b: str, window: int) -> None:
+    """Relative value, the correlation regime, and the beta cloud."""
+    result = view.comparison
     left, right = st.columns(2)
     with left:
         _title(
@@ -1028,10 +1052,26 @@ def _compare_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) 
         _plot(cloud, height=280)
 
 
+def _compare_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+    symbol_a, symbol_b, window, view = _compare_controls(db, settings, ctx)
+
+    _compare_metrics(view, symbol_a, symbol_b)
+    _compare_legs(view)
+    _title(
+        f"Relative Value — {symbol_a} priced in {symbol_b}",
+        "A rising line means A outruns B. Hours only one token traded are excluded, not filled.",
+    )
+    st.line_chart(view.comparison.frame[["ratio"]], height=280)
+    _compare_charts(view, symbol_a, symbol_b, window)
+
+
 # --- PORTFOLIO ---------------------------------------------------------------
 
 
-def _portfolio_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+def _portfolio_controls(
+    settings: Settings, ctx: dict[str, Any]
+) -> tuple[list[str], PortfolioConfig, RiskConfig, int]:
+    """The pickers and sliders. Returns what building the view needs."""
     chosen = _pick_many(
         st,
         "Tokens",
@@ -1082,9 +1122,12 @@ def _portfolio_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]
         interval_hours=settings.analytics_interval_hours,
         risk_free_rate=ctx["risk_free"],
     )
-    view = build_portfolio_view(db, chosen, ctx["days"], config, frontier_points, risk)
-    result = view.result
+    return chosen, config, risk, frontier_points
 
+
+def _portfolio_metrics(view: Any, settings: Settings) -> None:
+    """The metric strip, plus the two warnings an unusual solve deserves."""
+    result = view.result
     cols = st.columns(6)
     cols[0].metric("Expected return (ann.)", _pct(result.expected_return))
     cols[1].metric("Volatility (ann.)", _pct(result.volatility))
@@ -1109,6 +1152,9 @@ def _portfolio_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]
             "cannot lose more than everything. The window contains a collapsing token."
         )
 
+
+def _portfolio_allocation(view: Any) -> None:
+    """Where the money sits, and who carries the risk."""
     left, right = st.columns(2)
     with left:
         _title("Capital Allocation — where the money sits")
@@ -1132,45 +1178,58 @@ def _portfolio_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]
             bar.update_layout(xaxis_tickformat=".0%")
             _plot(bar, height=300)
 
-    if view.frontier:
-        _title(
-            "Efficient Frontier — the price of return",
-            "Each dot is the cheapest volatility for its return. ★ is your allocation.",
-        )
-        frontier = view.frontier_frame
-        fig = go.Figure(
-            go.Scatter(
-                x=frontier["volatility"],
-                y=frontier["expected_return"],
-                mode="lines+markers",
-                marker={
-                    "color": frontier["sharpe"],
-                    "colorscale": "Viridis",
-                    "showscale": True,
-                    "colorbar": {"title": "Sharpe"},
-                },
-                name="frontier",
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=[result.volatility],
-                y=[result.expected_return],
-                mode="markers+text",
-                marker={"symbol": "star", "size": 16, "color": "#ffab00"},
-                text=[result.objective],
-                textposition="top center",
-                name="chosen",
-            )
-        )
-        fig.update_layout(
-            xaxis_title="volatility (ann.)",
-            yaxis_title="return (ann.)",
-            xaxis_tickformat=".0%",
-            yaxis_tickformat=".0%",
-        )
-        _plot(fig, height=360)
 
+def _portfolio_frontier(view: Any) -> None:
+    """The efficient frontier, with the chosen allocation marked."""
+    if not view.frontier:
+        return
+    result = view.result
+    _title(
+        "Efficient Frontier — the price of return",
+        "Each dot is the cheapest volatility for its return. ★ is your allocation.",
+    )
+    frontier = view.frontier_frame
+    fig = go.Figure(
+        go.Scatter(
+            x=frontier["volatility"],
+            y=frontier["expected_return"],
+            mode="lines+markers",
+            marker={
+                "color": frontier["sharpe"],
+                "colorscale": "Viridis",
+                "showscale": True,
+                "colorbar": {"title": "Sharpe"},
+            },
+            name="frontier",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[result.volatility],
+            y=[result.expected_return],
+            mode="markers+text",
+            marker={"symbol": "star", "size": 16, "color": "#ffab00"},
+            text=[result.objective],
+            textposition="top center",
+            name="chosen",
+        )
+    )
+    fig.update_layout(
+        xaxis_title="volatility (ann.)",
+        yaxis_title="return (ann.)",
+        xaxis_tickformat=".0%",
+        yaxis_tickformat=".0%",
+    )
+    _plot(fig, height=360)
+
+
+def _portfolio_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+    chosen, config, risk, frontier_points = _portfolio_controls(settings, ctx)
+    view = build_portfolio_view(db, chosen, ctx["days"], config, frontier_points, risk)
+
+    _portfolio_metrics(view, settings)
+    _portfolio_allocation(view)
+    _portfolio_frontier(view)
     st.dataframe(view.weights_frame.style.format({"weight": "{:.2%}"}), width="stretch")
 
 
@@ -1310,7 +1369,8 @@ on this page is against that.
         )
 
 
-def _strategy_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+def _strategy_controls(ctx: dict[str, Any]) -> tuple[str, str, BacktestConfig]:
+    """Token, rule, and the two execution assumptions that belong beside the result."""
     st.subheader("Strategy — does this rule beat holding the token, net of costs?")
 
     left, right = st.columns(2)
@@ -1356,14 +1416,11 @@ def _strategy_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any])
         f"Risk-free rate **{config.risk_free_rate:.2%}/yr** feeds the Sharpe and Sortino."
     )
     _backtest_explainer(config)
+    return symbol, name, config
 
-    strategy_config = _strategy_config(name)
-    if name == "arima":
-        st.caption("ARIMA refits on every cadence bar, so a long window takes a moment.")
 
-    with st.spinner("Running…"):
-        view = build_strategy_view(db, symbol, name, ctx["days"], strategy_config, config)
-
+def _strategy_metrics(view: Any) -> None:
+    """The six numbers, and the one note a costed loss deserves."""
     report = view.report
     cols = st.columns(6)
     cols[0].metric(
@@ -1388,6 +1445,22 @@ def _strategy_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any])
             "a finding about hourly trading, not a reason to tune the parameters."
         )
 
+
+def _strategy_charts(
+    db: DatabaseManager,
+    view: Any,
+    ctx: dict[str, Any],
+    symbol: str,
+    name: str,
+    config: BacktestConfig,
+    strategy_config: Any,
+) -> None:
+    """Equity, where the edge went, the look-ahead check, exposure and drawdown.
+
+    ``strategy_config`` is passed in, never rebuilt: `_strategy_config` draws
+    widgets, and drawing them twice in one run is a Streamlit duplicate-id error.
+    """
+    report = view.report
     _title(
         "Equity — strategy vs buy & hold, net of costs",
         "Both start at the same capital. If the strategy line is below the other, holding won.",
@@ -1422,6 +1495,9 @@ def _strategy_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any])
         _title("Underwater — strategy drawdown")
         st.area_chart(report.frame[["drawdown"]], height=200, color=DOWN)
 
+
+def _strategy_tables(db: DatabaseManager, view: Any, ctx: dict[str, Any], symbol: str, config: Any) -> None:
+    """The full report beside every other rule on the same token."""
     left, right = st.columns([2, 3])
     with left:
         _title("Every Number — the full report", "The same thirteen `candlegraph backtest` prints.")
@@ -1460,19 +1536,39 @@ def _strategy_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any])
                 hide_index=True,
             )
 
+
+def _strategy_ledger(view: Any) -> None:
+    """The last 30 position changes, and the newest signal."""
+    report = view.report
     _title(
         f"Trade Ledger — last 30 position changes of {report.trades:,} "
         f"(latest signal: {view.strategy.latest.name})"
     )
     st.dataframe(view.trades_frame.tail(30).style.format({"price": "{:,.4f}"}), width="stretch")
 
+
+def _strategy_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+    st.subheader("Strategy — does this rule beat holding the token, net of costs?")
+    symbol, name, config = _strategy_controls(ctx)
+    strategy_config = _strategy_config(name)
+    if name == "arima":
+        st.caption("ARIMA refits on every cadence bar, so a long window takes a moment.")
+
+    with st.spinner("Running…"):
+        view = build_strategy_view(db, symbol, name, ctx["days"], strategy_config, config)
+
+    _strategy_metrics(view)
+    _strategy_charts(db, view, ctx, symbol, name, config, strategy_config)
+    _strategy_tables(db, view, ctx, symbol, config)
+    _strategy_ledger(view)
     _explanation_panel(db, settings, view, symbol, name)
 
 
 # --- FORECAST ----------------------------------------------------------------
 
 
-def _forecast_page(db: DatabaseManager, ctx: dict[str, Any]) -> None:
+def _forecast_controls(ctx: dict[str, Any]) -> tuple[str, int, float, ArimaConfig]:
+    """Token, order, horizon and confidence."""
     a, b, c, d = st.columns(4)
     symbol = _pick(a, "Token", ctx["symbols"], "forecast_symbol", default_index(ctx["symbols"]))
     p = int(b.number_input("p", 0, 5, 1, 1, key="f_p"))
@@ -1482,19 +1578,16 @@ def _forecast_page(db: DatabaseManager, ctx: dict[str, Any]) -> None:
     left, right = st.columns(2)
     auto = left.checkbox("Pick p and q by AIC", value=False)
     confidence = right.slider("Confidence", 0.50, 0.99, 0.95, 0.01)
+    return (
+        symbol,
+        steps,
+        confidence,
+        ArimaConfig(order=(p, 1, q), auto_order=auto, forecast_steps=steps, confidence=confidence),
+    )
 
-    with st.spinner("Fitting…"):
-        prices, forecast = build_forecast(
-            db,
-            symbol,
-            ctx["days"],
-            ArimaConfig(order=(p, 1, q), auto_order=auto, forecast_steps=steps, confidence=confidence),
-        )
 
-    if not forecast.ok:
-        st.error(f"No forecast: {forecast.message}")
-        return
-
+def _forecast_metrics(forecast: Any, steps: int) -> None:
+    """Last price, the projection, the order chosen, and how wide the interval is."""
     cols = st.columns(4)
     cols[0].metric("Last price", f"{forecast.last_price:,.4f}")
     cols[1].metric(
@@ -1507,6 +1600,9 @@ def _forecast_page(db: DatabaseManager, ctx: dict[str, Any]) -> None:
         help="Interval span over price. Wide = the model is saying it does not know.",
     )
 
+
+def _forecast_chart(prices: Any, forecast: Any, steps: int, confidence: float) -> None:
+    """Recent history, the projected path, and the interval at the horizon."""
     _title(
         f"Projection — ARIMA path, {confidence:.0%} interval at the horizon",
         f"Interval at +{steps}h: {forecast.lower:,.4f} .. {forecast.upper:,.4f}. "
@@ -1535,6 +1631,18 @@ def _forecast_page(db: DatabaseManager, ctx: dict[str, Any]) -> None:
     )
     _plot(fig, height=360)
 
+
+def _forecast_page(db: DatabaseManager, ctx: dict[str, Any]) -> None:
+    symbol, steps, confidence, config = _forecast_controls(ctx)
+    with st.spinner("Fitting…"):
+        prices, forecast = build_forecast(db, symbol, ctx["days"], config)
+
+    if not forecast.ok:
+        st.error(f"No forecast: {forecast.message}")
+        return
+
+    _forecast_metrics(forecast, steps)
+    _forecast_chart(prices, forecast, steps, confidence)
     _posterior_panel(db, ctx, symbol, steps, confidence)
 
 
@@ -1848,9 +1956,8 @@ def _simulation_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any
 # --- AGENTS ------------------------------------------------------------------
 
 
-def _agents_page(db: DatabaseManager, settings: Settings) -> None:
-    st.subheader("Watchtower — is the data fresh, complete, and still the same market?")
-
+def _observer_button(db: DatabaseManager, settings: Settings) -> None:
+    """The one button on this page that does work, and its live stage stream."""
     if st.button("▶ Run observer now", type="primary", help="One observer run, written to the agent ledger."):
         # Each stage is written as it finishes, so a slow collect_metrics
         # over many tokens is visibly running rather than apparently hung.
@@ -1870,7 +1977,29 @@ def _agents_page(db: DatabaseManager, settings: Settings) -> None:
         )
         _symbols.clear()
 
-    view = build_agents_view(db)
+
+def _coverage_chart(view: Any, settings: Settings, height: int = 260) -> None:
+    """Stored against expected hours per token. Drawn on two pages, defined once."""
+    _title("Coverage — stored vs expected hours", "100% is not the target: an hour with no swaps has no row.")
+    if view.coverage.empty:
+        st.info("No stored history yet.")
+        return
+    fig = go.Figure(
+        go.Bar(
+            x=view.coverage["coverage"],
+            y=list(view.coverage.index),
+            orientation="h",
+            marker_color=[
+                "#ffab00" if v < settings.min_expected_coverage else UP for v in view.coverage["coverage"]
+            ],
+        )
+    )
+    fig.update_layout(xaxis_tickformat=".0%")
+    _plot(fig, height=height)
+
+
+def _agents_metrics(view: Any) -> None:
+    """The observer verdict, the two run counts, and the thinnest coverage."""
 
     status = view.status
     cols = st.columns(4)
@@ -1884,6 +2013,9 @@ def _agents_page(db: DatabaseManager, settings: Settings) -> None:
         help="Low coverage on a thin token is the market, not a fault.",
     )
 
+
+def _agents_news_strip(view: Any) -> None:
+    """News health in four numbers; the News dashboard has the ledger and budget."""
     counts = view.news_counts
     failed = counts.get("error", 0) + counts.get("rate_limited", 0)
     news_cols = st.columns(4)
@@ -1902,19 +2034,22 @@ def _agents_page(db: DatabaseManager, settings: Settings) -> None:
     )
     news_cols[3].metric("Budget refusals", f"{counts.get('budget_refused', 0)}")
 
-    _title(
-        "Stages — what the latest run did, in order",
-        "A skipped stage means the database-down short-circuit fired; a slow one says where the time went.",
-    )
-    if view.stages.empty:
-        st.caption("No stage records yet — runs recorded before this feature, or no run at all.")
-    else:
-        stage_cols = st.columns(len(view.stages))
-        for col, (_, row) in zip(stage_cols, view.stages.iterrows(), strict=True):
-            seconds = f"{row['seconds']:.2f}s" if pd.notna(row["seconds"]) else "—"
-            col.metric(str(row["stage"]), str(row["status"]).upper(), seconds, delta_color="off")
-            col.caption(str(row["detail"]) or "—")
 
+def _stage_strip(frame: pd.DataFrame, title: str, caption: str, empty: str) -> None:
+    """One metric per stage of a run, in order. Used for both ledgers."""
+    _title(title, caption)
+    if frame.empty:
+        st.caption(empty)
+        return
+    stage_cols = st.columns(len(frame))
+    for col, (_, row) in zip(stage_cols, frame.iterrows(), strict=True):
+        seconds = f"{row['seconds']:.2f}s" if pd.notna(row["seconds"]) else "—"
+        col.metric(str(row["stage"]), str(row["status"]).upper(), seconds, delta_color="off")
+        col.caption(str(row["detail"]) or "—")
+
+
+def _agents_findings(view: Any) -> None:
+    """The latest observer report's findings, coloured by severity."""
     _title(
         "Findings — latest observer report",
         "Severity is computed from the numbers; the prose is only a summary.",
@@ -1930,6 +2065,9 @@ def _agents_page(db: DatabaseManager, settings: Settings) -> None:
             width="stretch",
         )
 
+
+def _agents_charts(view: Any, settings: Settings) -> None:
+    """Ingest cadence beside per-token coverage."""
     left, right = st.columns(2)
     with left:
         _title(
@@ -1959,26 +2097,11 @@ def _agents_page(db: DatabaseManager, settings: Settings) -> None:
             fig.update_layout(barmode="stack")
             _plot(fig, height=260)
     with right:
-        _title(
-            "Coverage — stored vs expected hours", "100% is not the target: an hour with no swaps has no row."
-        )
-        if view.coverage.empty:
-            st.info("No stored history yet.")
-        else:
-            fig = go.Figure(
-                go.Bar(
-                    x=view.coverage["coverage"],
-                    y=list(view.coverage.index),
-                    orientation="h",
-                    marker_color=[
-                        "#ffab00" if v < settings.min_expected_coverage else UP
-                        for v in view.coverage["coverage"]
-                    ],
-                )
-            )
-            fig.update_layout(xaxis_tickformat=".0%")
-            _plot(fig, height=260)
+        _coverage_chart(view, settings)
 
+
+def _agents_history(view: Any) -> None:
+    """Every agent report, newest first."""
     _title("Run History — every agent report, newest first")
     if view.agent_runs.empty:
         st.info("No agent runs recorded yet.")
@@ -1992,13 +2115,37 @@ def _agents_page(db: DatabaseManager, settings: Settings) -> None:
         )
 
 
+def _agents_page(db: DatabaseManager, settings: Settings) -> None:
+    st.subheader("Watchtower — is the data fresh, complete, and still the same market?")
+    _observer_button(db, settings)
+
+    view = build_agents_view(db)
+    _agents_metrics(view)
+    _agents_news_strip(view)
+    _stage_strip(
+        view.stages,
+        "Observer Stages — what the latest run did, in order",
+        "A skipped stage means the database-down short-circuit fired; a slow one says where the time went.",
+        "No stage records yet — runs recorded before this feature, or no run at all.",
+    )
+    _stage_strip(
+        view.ingest_stages,
+        "Ingest Stages — what the latest ingest run did, in order",
+        "The same four steps `candlegraph ingest --progress` prints: metadata, token hours, "
+        "pool discovery, pool hours.",
+        "No stage records yet — the newest ingest run predates them.",
+    )
+    _agents_findings(view)
+    _agents_charts(view, settings)
+    _agents_history(view)
+
+
 # --- NEWS (Tavily) --------------------------------------------------------------
 
 
-def _news_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
-    st.subheader("News — the metered Tavily pipeline: budget, ledger, harvest")
-    view = build_news_view(db, settings)
-
+def _news_metrics(view: Any) -> None:
+    """Budget, corpus size, and the newest call's outcome."""
+    last = view.last_call
     last = view.last_call
     cols = st.columns(6)
     cols[0].metric(
@@ -2017,7 +2164,8 @@ def _news_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> 
     cols[2].metric(
         "Reserve",
         f"{view.reserve}",
-        help="Held back for manual searches; the pipeline treats it as already spent.",
+        help="Meant for manual searches. Known gap: no search may spend it today, manual or "
+        "not — see docs/knowledge/budget-manager/DESIGN.md.",
     )
     cols[3].metric(
         "Documents",
@@ -2036,6 +2184,9 @@ def _news_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> 
         help="Every call is a ledger row, refusals included.",
     )
 
+
+def _news_runway(view: Any) -> None:
+    """How much of the month and the day is gone, and what that means."""
     st.progress(min(view.monthly_usage, 1.0), text=f"Credit Runway — month ({view.monthly_usage:.0%})")
     st.progress(min(view.daily_usage, 1.0), text=f"Credit Runway — today ({view.daily_usage:.0%})")
     if view.level != "ok":
@@ -2049,6 +2200,9 @@ def _news_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> 
             f"{view.embedding_pending} chunks await embedding — run `make embed` so retrieval can see them."
         )
 
+
+def _news_fetch_panel(db: DatabaseManager, settings: Settings, view: Any, ctx: dict[str, Any]) -> None:
+    """The one control that spends credits: pick tokens, confirm, fetch."""
     _title(
         "Fetch news now — one budgeted search per token per UTC day",
         "Cached days cost nothing; the guard refuses before the provider would.",
@@ -2093,6 +2247,9 @@ def _news_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> 
                 st.session_state.pop("news_pending", None)
                 st.rerun()
 
+
+def _news_charts(view: Any) -> None:
+    """Spend per day against the cap, call outcomes, and what the credits bought."""
     left, right = st.columns(2)
     with left:
         _title("Credit Burn — spend per UTC day vs the daily cap")
@@ -2139,6 +2296,9 @@ def _news_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> 
             height=180,
         )
 
+
+def _news_tables(view: Any) -> None:
+    """Every ledgered call, and the newest stored documents."""
     _title("The Ledger — every call, refusals included, newest first")
     if view.calls.empty:
         st.info("No source calls yet. Press “Fetch news…” above (needs TAVILY_API_KEY in .env).")
@@ -2157,6 +2317,17 @@ def _news_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> 
         st.dataframe(view.documents, width="stretch")
 
 
+def _news_page(db: DatabaseManager, settings: Settings, ctx: dict[str, Any]) -> None:
+    st.subheader("News — the metered Tavily pipeline: budget, ledger, harvest")
+    view = build_news_view(db, settings)
+
+    _news_metrics(view)
+    _news_runway(view)
+    _news_fetch_panel(db, settings, view, ctx)
+    _news_charts(view)
+    _news_tables(view)
+
+
 def _news_color(status: str) -> str:
     return {
         "ok": UP,
@@ -2170,14 +2341,8 @@ def _news_color(status: str) -> str:
 # --- DATA ---------------------------------------------------------------------
 
 
-def _data_page(db: DatabaseManager, settings: Settings) -> None:
-    st.subheader("Data — what is stored, and loading more of it")
-    st.caption(
-        f"A first-time token is fetched {settings.lookback_days} days back (LOOKBACK_DAYS). "
-        "A backfill reaches further; it rewinds past what is stored and re-writes nothing twice."
-    )
-
-    view = build_agents_view(db)
+def _data_metrics(view: Any) -> None:
+    """How much history is stored, and how the last run went."""
     cols = st.columns(3)
     cols[0].metric("Tokens with history", f"{len(view.coverage):,}")
     cols[1].metric("Ingest runs on record", f"{len(view.ingest_runs):,}")
@@ -2189,6 +2354,9 @@ def _data_page(db: DatabaseManager, settings: Settings) -> None:
         delta_color="off",
     )
 
+
+def _backfill_panel(db: DatabaseManager, settings: Settings, view: Any) -> None:
+    """The window picker and the two-step confirmation a backfill needs."""
     _title("Backfill — load more history", "Pick a window, then confirm. Nothing starts until you do.")
     left, right = st.columns([1, 2])
     label = left.selectbox("Window", list(BACKFILL_CHOICES), index=2, key="backfill_window")
@@ -2229,33 +2397,31 @@ def _data_page(db: DatabaseManager, settings: Settings) -> None:
                 st.session_state.pop("backfill_pending", None)
                 st.rerun()
 
+
+def _data_tables(view: Any, settings: Settings) -> None:
+    """Coverage per token, and the recent ingest runs."""
     left, right = st.columns(2)
     with left:
-        _title(
-            "Coverage — stored vs expected hours", "100% is not the target: an hour with no swaps has no row."
-        )
-        if view.coverage.empty:
-            st.info("No stored history yet.")
-        else:
-            fig = go.Figure(
-                go.Bar(
-                    x=view.coverage["coverage"],
-                    y=list(view.coverage.index),
-                    orientation="h",
-                    marker_color=[
-                        "#ffab00" if v < settings.min_expected_coverage else UP
-                        for v in view.coverage["coverage"]
-                    ],
-                )
-            )
-            fig.update_layout(xaxis_tickformat=".0%")
-            _plot(fig, height=280)
+        _coverage_chart(view, settings, height=280)
     with right:
         _title("Recent Ingest Runs — newest first")
         if view.ingest_runs.empty:
             st.info("No ingest runs recorded yet.")
         else:
             st.dataframe(view.ingest_runs, width="stretch")
+
+
+def _data_page(db: DatabaseManager, settings: Settings) -> None:
+    st.subheader("Data — what is stored, and loading more of it")
+    st.caption(
+        f"A first-time token is fetched {settings.lookback_days} days back (LOOKBACK_DAYS). "
+        "A backfill reaches further; it rewinds past what is stored and re-writes nothing twice."
+    )
+    view = build_agents_view(db)
+
+    _data_metrics(view)
+    _backfill_panel(db, settings, view)
+    _data_tables(view, settings)
 
 
 # --- entry point --------------------------------------------------------------

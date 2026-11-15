@@ -565,7 +565,9 @@ def test_a_strategy_without_a_window_parameter_gets_the_default() -> None:
 
 
 def test_services_without_keys_are_absences_with_notes_not_errors() -> None:
-    source, embedder, notes = services_for(settings(embedding_provider="openai"))
+    source, embedder, notes = services_for(
+        settings(embedding_provider="openai", embedding_model="text-embedding-3-large")
+    )
 
     assert source is None and embedder is None
     assert any("TAVILY_API_KEY" in n for n in notes)

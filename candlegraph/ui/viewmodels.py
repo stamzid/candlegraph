@@ -23,7 +23,6 @@ import pandas as pd
 
 from candlegraph.agents.base import AgentReport
 from candlegraph.agents.reporting import build_sinks
-from candlegraph.agents.stages import StageHook, StageRecord
 from candlegraph.analytics.arima import ArimaConfig, ArimaForecast, fit_forecast
 from candlegraph.analytics.events import (
     ExecutionModel,
@@ -76,6 +75,7 @@ from candlegraph.analytics.simulation import (
     SimulationError,
     simulate_paths,
 )
+from candlegraph.harness.stages import StageHook, StageRecord, describe
 from candlegraph.ingestion.fills import (
     LINEAR,
     METHOD_SUMMARY,
@@ -1747,6 +1747,9 @@ class AgentsView:
     stages: pd.DataFrame = field(default_factory=pd.DataFrame)
     """The latest observer run's stages in order: stage, status, seconds, detail.
     Empty before the first run, and for runs recorded before stages existed."""
+    ingest_stages: pd.DataFrame = field(default_factory=pd.DataFrame)
+    """The latest ingest run's four stages, in the same shape. Ingest records
+    them since the harness pre-work; runs older than that have none."""
 
     @property
     def status(self) -> str:
@@ -1767,8 +1770,26 @@ class AgentsView:
         return {str(k): int(v) for k, v in counts.items()}
 
 
+def _latest_stages(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Stages of the newest run that recorded any.
+
+    The newest row is often a run still in progress, whose stages are written
+    when it closes. Falling back to the one before it keeps the strip showing
+    the last complete picture instead of going blank mid-run.
+    """
+    for row in rows:
+        frame = stages_frame(row.get("detail"))
+        if not frame.empty:
+            return frame
+    return stages_frame(None)
+
+
 def stages_frame(detail: Any) -> pd.DataFrame:
-    """The ``stages`` list of an ``agent_run.detail`` as a frame, order kept."""
+    """The ``stages`` list of a run's ``detail`` as a frame, order kept.
+
+    Works for any ledger: agent runs have recorded stages since the agent
+    framework, ingest runs since the harness pre-work.
+    """
     columns = ["stage", "status", "seconds", "detail"]
     raw = detail.get("stages") if isinstance(detail, dict) else None
     if not raw:
@@ -1779,7 +1800,9 @@ def stages_frame(detail: Any) -> pd.DataFrame:
             "stage": [r.name for r in records],
             "status": [r.status for r in records],
             "seconds": [r.duration_seconds for r in records],
-            "detail": [", ".join(f"{k}={v}" for k, v in r.detail.items()) for r in records],
+            # describe() is what `--progress` prints, so a nested detail such as
+            # ingest's by_symbol reads the same on screen as in the terminal.
+            "detail": [describe(r.detail) for r in records],
         }
     )
 
@@ -1844,6 +1867,7 @@ def build_agents_view(db: DatabaseManager, limit: int = 30) -> AgentsView:
         coverage=coverage,
         news_calls=news_calls,
         stages=stages_frame(latest.get("detail") if latest else None),
+        ingest_stages=_latest_stages(ingest_rows),
     )
 
 

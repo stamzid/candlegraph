@@ -250,6 +250,39 @@ def test_the_agents_dashboard_offers_an_on_demand_observer_run() -> None:
     assert any("Run observer" in b.label for b in app.main.button)
 
 
+def test_the_agents_dashboard_shows_both_stage_strips() -> None:
+    """Rollout step 1: the ingest run's four stages are drawn beside the observer's.
+
+    The data has been in `ingest_run.detail.stages` since the harness pre-work;
+    until this step only the observer's strip was rendered.
+    """
+    db = seeded_db()
+    agent_row = agent_run_row()
+    agent_row["detail"] = {
+        "stages": [{"name": "collect_ledger", "status": "ok", "started_at": None, "duration_seconds": 0.1}]
+    }
+    ingest_row = ingest_run_row()
+    ingest_row["detail"] = {
+        "stages": [
+            {"name": "token_metadata", "status": "ok", "started_at": None, "duration_seconds": 0.2},
+            {"name": "pool_hours", "status": "skipped", "started_at": None, "duration_seconds": None},
+        ]
+    }
+    db.reads["get_recent_agent_runs"] = [agent_row]
+    db.reads["get_recent_runs"] = [ingest_row]
+
+    app = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    app.run()
+    app.sidebar.radio[0].set_value("Agents").run()
+
+    assert not app.exception
+    headings = " ".join(str(m.value) for m in app.main.markdown)
+    assert "Observer Stages" in headings and "Ingest Stages" in headings
+    labels = [m.label for m in app.main.metric]
+    assert "collect_ledger" in labels
+    assert "token_metadata" in labels and "pool_hours" in labels
+
+
 def test_pressing_the_button_runs_the_observer_and_writes_the_ledger() -> None:
     seeded_db()
     app = AppTest.from_file(APP, default_timeout=TIMEOUT)

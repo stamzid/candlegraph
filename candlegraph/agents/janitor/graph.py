@@ -26,7 +26,7 @@ from candlegraph.agents.janitor.checks import (
     run_checks,
 )
 from candlegraph.agents.janitor.state import FIXERS, JanitorState
-from candlegraph.agents.narrator import Narrator, build_agent_narrator
+from candlegraph.agents.narrator import Narrator, NarratorSelector
 from candlegraph.agents.reporting import Sink, build_sinks, finish_report, publish
 from candlegraph.agents.shell import Shell, SubprocessShell
 from candlegraph.settings import Settings
@@ -151,7 +151,7 @@ def run_janitor(
     the process-wide manager is used.
     """
     shell = shell or SubprocessShell()
-    narrator = narrator or build_agent_narrator(settings)
+    narrator = narrator or NarratorSelector(settings).build()
     started = now_utc()
     if sinks is None:
         if db is None and "ledger" in settings.report_sinks:

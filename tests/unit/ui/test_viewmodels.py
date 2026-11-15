@@ -763,6 +763,58 @@ def test_a_run_recorded_before_stages_existed_gives_an_empty_frame_not_an_error(
     assert view.stages.empty and list(view.stages.columns) == ["stage", "status", "seconds", "detail"]
 
 
+def test_the_agents_view_reads_the_latest_ingest_runs_stages_too() -> None:
+    """Ingest records stages since the harness pre-work; the dashboard draws them."""
+    row = ingest_run_row()
+    row["detail"] = {
+        "stages": [
+            {
+                "name": "token_metadata",
+                "status": "ok",
+                "started_at": None,
+                "duration_seconds": 0.14,
+                "detail": {"tokens": 5},
+            },
+            {
+                "name": "pool_hours",
+                "status": "error",
+                "started_at": None,
+                "duration_seconds": 2.3,
+                "detail": {"pools": 28, "errors": 1},
+            },
+        ]
+    }
+
+    view = build_agents_view(FakeDatabase(get_recent_runs=[row]))
+
+    assert list(view.ingest_stages["stage"]) == ["token_metadata", "pool_hours"]
+    assert list(view.ingest_stages["status"]) == ["ok", "error"]
+    assert view.ingest_stages.iloc[1]["detail"] == "pools=28, errors=1"
+    # The observer strip is unaffected by what the ingest run recorded.
+    assert view.stages.empty
+
+
+def test_a_run_in_progress_does_not_blank_the_ingest_strip() -> None:
+    """The newest row is often still running, and stages are written when it closes."""
+    running = ingest_run_row()
+    running["detail"] = {}
+    finished = ingest_run_row()
+    finished["detail"] = {
+        "stages": [{"name": "token_hours", "status": "ok", "started_at": None, "duration_seconds": 1.0}]
+    }
+
+    view = build_agents_view(FakeDatabase(get_recent_runs=[running, finished]))
+
+    assert list(view.ingest_stages["stage"]) == ["token_hours"]
+
+
+def test_an_ingest_run_recorded_before_stages_existed_gives_an_empty_frame() -> None:
+    view = build_agents_view(FakeDatabase(get_recent_runs=[ingest_run_row()]))
+
+    assert view.ingest_stages.empty
+    assert list(view.ingest_stages.columns) == ["stage", "status", "seconds", "detail"]
+
+
 def test_the_agents_view_summarises_the_news_runs() -> None:
     db = FakeDatabase(
         get_recent_source_calls=[source_call_row("rate_limited"), source_call_row("ok")],
