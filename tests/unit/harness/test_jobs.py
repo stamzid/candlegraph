@@ -82,3 +82,54 @@ def test_every_job_writes_a_ledger_row_under_the_default_configuration(name: str
     hook = JOBS[name].ledger(make_settings(agent_report_sinks="log,ledger"), FakeDatabase(), {})
     assert hook is not None
     assert all(callable(getattr(hook, event)) for event in ("started", "stage", "finished"))
+
+
+# --- idempotence: the property that makes a job safe to be a pipeline step -------
+#
+# `Job.idempotent` is a claim, and a claim with nothing behind it is worth
+# nothing — a step is re-run after a crash, so "safe to re-run" has to be
+# shown. Each entry below names the test in this file that runs the job twice
+# and compares the state it left. Marking a job idempotent without adding one
+# fails the first test, which is the whole point of keeping this map by hand.
+
+IDEMPOTENCE_PROOFS = {
+    "observer": "test_running_the_observer_twice_writes_the_same_state",
+}
+
+
+def test_a_job_is_only_marked_idempotent_if_a_run_twice_proof_exists() -> None:
+    declared = {job.name for job in JOBS.values() if job.idempotent}
+
+    assert declared == set(IDEMPOTENCE_PROOFS), (
+        "every job declaring `idempotent=True` needs an entry in IDEMPOTENCE_PROOFS and the "
+        "run-twice test it names"
+    )
+    assert [name for name in IDEMPOTENCE_PROOFS.values() if name not in globals()] == []
+
+
+def test_running_the_observer_twice_writes_the_same_state() -> None:
+    """Two runs leave the same rows, apart from each run's own ledger row.
+
+    The observer is a reader: its whole write surface is `agent_run` and the
+    report sinks (invariant 21). So "the same state" means the second run
+    wrote nothing the first did not, and found the same things.
+    """
+    from candlegraph.harness import run_job
+    from tests.conftest import FakeDatabase, make_settings
+
+    settings = make_settings(agent_report_sinks="log,ledger")
+    db = FakeDatabase()
+
+    first = run_job(JOBS["observer"], settings, db=db)
+    writes_after_one = [label for label, _ in db.executed]
+    second = run_job(JOBS["observer"], settings, db=db)
+    writes_after_two = [label for label, _ in db.executed]
+
+    # Its own ledger row, twice over, and nothing else.
+    assert set(writes_after_one) == {"open_agent_run", "close_agent_run"}
+    assert writes_after_two == writes_after_one * 2
+    assert db.upserts == []
+    assert first.outcome is second.outcome
+    assert first.result is not None and second.result is not None
+    assert first.result.verdict == second.result.verdict
+    assert first.result.counts == second.result.counts

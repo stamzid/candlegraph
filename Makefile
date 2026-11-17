@@ -14,7 +14,7 @@ E2E_URL ?= http://localhost:$${APP_HOST_PORT:-8000}
         ingest backfill report runs ui logs-ui observe janitor agent-runs logs-agents sync-assets \
         up-knowledge logs-ollama embed reembed fetch-news search link-mentions explain mcp \
         fill fill-status fill-evaluate stats compare signals backtest strategies portfolio \
-        forecast forecast-posterior risk simulate simulate-execution jobs serve
+        forecast forecast-posterior risk simulate simulate-execution jobs serve run check-pipelines
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -191,6 +191,12 @@ reembed: ## Re-encode every chunk with the configured EMBEDDING_MODEL (resumable
 
 jobs: ## List the registered jobs (harness): schedule setting, process role, write surface
 	$(UV) run python -m candlegraph jobs
+
+run: ## Run a pipeline inside the stack: make run ARGS='pipelines/example.yaml'
+	$(COMPOSE) exec agents python -m candlegraph run $(ARGS)
+
+check-pipelines: ## Validate every committed pipeline spec without running anything
+	$(UV) run python -m candlegraph run --check pipelines/*.yaml
 
 serve: ## Run the API locally, outside compose: make serve ARGS='--port auto' (8000 is usually the stack's)
 	$(UV) run python -m candlegraph serve $(ARGS)

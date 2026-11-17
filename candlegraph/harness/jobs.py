@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
+from pydantic import BaseModel
+
 from candlegraph.harness.runs import Outcome, Run, RunOutcome
 from candlegraph.settings import Settings
 
@@ -32,6 +34,11 @@ Role = Literal["worker", "agents"]
 ROLES: tuple[Role, ...] = ("worker", "agents")
 WRITE_SURFACES = frozenset({"market_data", "ledger", "knowledge", "cache", "reports"})
 
+# The setting name :data:`NEVER` stands in for. A pipeline job is built from a
+# spec rather than registered, so it has no interval setting to read; the
+# sentinel keeps `seconds()` total instead of making the field optional.
+NEVER_SETTING = "__never__"
+
 
 @dataclass(frozen=True)
 class Every:
@@ -40,7 +47,14 @@ class Every:
     setting: str
 
     def seconds(self, settings: Settings) -> int:
+        if self.setting == NEVER_SETTING:
+            return 0
         return int(getattr(settings, self.setting))
+
+
+# "This job is never scheduled." Used by the jobs a pipeline spec builds: they
+# run when the pipeline runs, and the pipeline carries the schedule.
+NEVER = Every(NEVER_SETTING)
 
 
 @dataclass(frozen=True)
@@ -69,6 +83,18 @@ class Job:
     writes: frozenset[str]
     description: str
     ledger: LedgerFactory
+    # Running this twice with the same inputs leaves the same state as running
+    # it once — and a test in tests/unit/harness/test_jobs.py proves it by
+    # doing exactly that. Only an idempotent job may be a pipeline step
+    # (docs/harness/pipelines/DESIGN.md §6.2): a step is retried after a crash,
+    # so "safe to re-run" has to be a checked property rather than a hope.
+    # Defaults to False, so a job is a step only once someone has shown it.
+    idempotent: bool = False
+    # The pydantic model a spec's `params:` for this job are validated against.
+    # None means "this job takes no parameters from a spec", and a spec that
+    # passes some is refused at load time — failing closed, so a typo in a
+    # param name can never be silently ignored.
+    params: type[BaseModel] | None = None
 
     @property
     def interval_setting(self) -> str:
@@ -121,8 +147,12 @@ def _fetch_news(ctx: JobContext) -> RunOutcome:
     return news_job_body(ctx)
 
 
-def _run_ledger(settings: Settings, db: DatabaseManager, params: Mapping[str, Any]) -> RunHook:
-    """The generic `run` table: for every job without a ledger of its own."""
+def run_ledger(settings: Settings, db: DatabaseManager, params: Mapping[str, Any]) -> RunHook:
+    """The generic `run` table: for every job without a ledger of its own.
+
+    Public because a pipeline run records itself here too, and the job a
+    pipeline spec builds is assembled outside this module.
+    """
     from candlegraph.harness.hooks import RunLedgerHook
 
     return RunLedgerHook(db)
@@ -184,6 +214,12 @@ JOBS: dict[str, Job] = {
             writes=frozenset({"market_data", "ledger"}),
             description="Poll the subgraph for new hourly token and pool rows",
             ledger=_ingest_ledger,
+            # Idempotent in fact — every row upserts on its natural key
+            # (invariant 4) — but deliberately not declared so. A pipeline
+            # reacts to ingest and never runs it (pipelines DESIGN §7.1), the
+            # `market_data` rule refuses it as a step anyway, and declaring it
+            # would oblige a run-twice proof for a claim nothing relies on.
+            idempotent=False,
         ),
         Job(
             name="observer",
@@ -193,6 +229,10 @@ JOBS: dict[str, Job] = {
             writes=frozenset({"ledger", "reports"}),
             description="Check freshness, gaps on liquid tokens, and metric drift",
             ledger=_agent_ledger,
+            # Reads the ledgers and the series tables; writes its own agent_run
+            # row and its report sinks, nothing else. Proved by
+            # test_running_the_observer_twice_writes_the_same_state.
+            idempotent=True,
         ),
         Job(
             name="janitor",
@@ -210,7 +250,12 @@ JOBS: dict[str, Job] = {
             role="agents",
             writes=frozenset({"knowledge", "ledger"}),
             description="One budgeted news search per active token per UTC day",
-            ledger=_run_ledger,
+            ledger=run_ledger,
+            # Idempotent by the (asset, UTC day) cache and the url_hash upsert,
+            # and it will be a step of the daily pipeline. Not declared yet:
+            # the declaration costs a run-twice proof, and that proof belongs
+            # with the step that needs it (rollout step 4).
+            idempotent=False,
         ),
     )
 }

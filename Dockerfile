@@ -34,6 +34,9 @@ COPY --from=builder --chown=candlegraph:candlegraph /candlegraph/.venv /candlegr
 COPY --chown=candlegraph:candlegraph candlegraph ./candlegraph
 COPY --chown=candlegraph:candlegraph alembic ./alembic
 COPY --chown=candlegraph:candlegraph config ./config
+# Pipeline specs are reviewed definitions that ship with the image, like the
+# migrations above and unlike a per-deployment config file.
+COPY --chown=candlegraph:candlegraph pipelines ./pipelines
 COPY --chown=candlegraph:candlegraph alembic.ini pyproject.toml README.md entrypoint.sh ./
 
 RUN chmod +x ./entrypoint.sh

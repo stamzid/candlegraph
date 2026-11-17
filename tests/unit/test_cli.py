@@ -139,6 +139,95 @@ def test_jobs_lists_every_registered_job(cli_env: FakeDatabase, capsys: pytest.C
     assert "market_data" in out
 
 
+# --- run: pipelines --------------------------------------------------------
+
+
+def write_spec(tmp_path: Path, text: str) -> str:
+    path = tmp_path / "spec.yaml"
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+GOOD_SPEC = "name: tiny\nsteps:\n  - id: observe\n    job: observer\n"
+
+
+def test_check_validates_a_spec_without_running_it(
+    cli_env: FakeDatabase, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["run", "--check", write_spec(tmp_path, GOOD_SPEC)]) == 0
+
+    assert "ok  tiny" in capsys.readouterr().out
+    # Nothing ran, so nothing was recorded.
+    assert cli_env.executed == []
+
+
+def test_a_bad_spec_is_refused_with_the_file_and_line_and_a_separate_exit_code(
+    cli_env: FakeDatabase, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """2, not 1: the spec was refused and nothing ran, which is not a failed run."""
+    path = write_spec(tmp_path, "name: tiny\nsteps:\n  - id: one\n    job: nosuch\n")
+
+    assert main(["run", "--check", path]) == 2
+
+    assert f"{path}:4:" in capsys.readouterr().err
+
+
+def test_run_executes_the_steps_and_prints_each_one(
+    cli_env: FakeDatabase, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["run", write_spec(tmp_path, GOOD_SPEC)]) == 0
+
+    out = capsys.readouterr().out
+    assert "observe" in out
+    assert "tiny: succeeded" in out
+    assert [label for label, _ in cli_env.executed if label == "open_run"]
+
+
+def test_a_failed_pipeline_exits_non_zero(
+    cli_env: FakeDatabase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("the observer fell over")
+
+    monkeypatch.setattr("candlegraph.agents.observer.run_observer", boom)
+
+    assert main(["run", write_spec(tmp_path, GOOD_SPEC)]) == 1
+
+
+def test_several_specs_can_be_checked_at_once(
+    cli_env: FakeDatabase, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first = write_spec(tmp_path, GOOD_SPEC)
+    second = tmp_path / "other.yaml"
+    second.write_text("name: other\nsteps:\n  - id: one\n    job: nosuch\n", encoding="utf-8")
+
+    assert main(["run", "--check", first, str(second)]) == 2
+
+    # The good one is not reported as ok: --check is all-or-nothing, like a build.
+    captured = capsys.readouterr()
+    assert "unknown job" in captured.err
+    assert "ok  tiny" not in captured.out
+
+
+def test_a_spec_can_be_named_instead_of_pathed(
+    tokens_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "tiny.yaml").write_text(GOOD_SPEC, encoding="utf-8")
+    monkeypatch.setattr(
+        "candlegraph.cli.get_settings",
+        lambda: make_settings(tokens_file=str(tokens_file), pipelines_dir=str(tmp_path)),
+    )
+    set_db(FakeDatabase())
+
+    assert main(["run", "--check", "tiny"]) == 0
+    assert "ok  tiny" in capsys.readouterr().out
+
+
+def test_the_committed_example_passes_the_check_command(cli_env: FakeDatabase) -> None:
+    """`make check-pipelines`, as a test: a merged typo must fail the build."""
+    assert main(["run", "--check", "pipelines/example.yaml"]) == 0
+
+
 # --- ingest and backfill ---------------------------------------------------
 
 
@@ -1024,8 +1113,47 @@ def test_runs_job_reads_the_run_log_with_trigger_and_outcome(
     out = capsys.readouterr().out
     assert "ui" in out and "succeeded" in out and "warning" in out
     assert "running" in out  # an unfinished run is listed, not hidden
-    (label, params) = cli_env.fetches[-1]
-    assert label == "get_run_log" and params == {"limit": 10, "job": "observer"}
+    assert ("get_run_log", {"limit": 10, "job": "observer"}) in cli_env.fetches
+
+
+def test_runs_lists_a_pipeline_s_steps_under_it(
+    cli_env: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--job hourly` should show what the pipeline did, not only that it ran."""
+    parent = _log_row("hourly", "manual", "succeeded", None) | {"run_id": "11111111-0000-0000-0000-0"}
+    child = _log_row("observer", "manual", "succeeded", "ok") | {
+        "run_id": "22222222-0000-0000-0000-0",
+        "parent_run_id": parent["run_id"],
+    }
+    cli_env.reads["get_run_log"] = [parent]
+    cli_env.reads["get_run_log_children"] = [child]
+
+    assert main(["runs", "--job", "hourly"]) == 0
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if "succeeded" in line]
+    assert len(lines) == 2
+    assert "hourly" in lines[0] and not lines[0].startswith(" ")
+    # The step is indented under its parent rather than listed beside it.
+    assert "  observer" in lines[1]
+    assert ("get_run_log_children", {"parents": [parent["run_id"]]}) in cli_env.fetches
+
+
+def test_a_step_already_on_the_page_is_printed_once_under_its_parent(
+    cli_env: FakeDatabase, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parent = _log_row("hourly", "manual", "succeeded", None) | {"run_id": "11111111-0000-0000-0000-0"}
+    child = _log_row("observer", "manual", "succeeded", "ok") | {
+        "run_id": "22222222-0000-0000-0000-0",
+        "parent_run_id": parent["run_id"],
+    }
+    # `--all` returns both rows; the child must not appear twice.
+    cli_env.reads["get_run_log"] = [child, parent]
+    cli_env.reads["get_run_log_children"] = [child]
+
+    assert main(["runs", "--all"]) == 0
+
+    out = capsys.readouterr().out
+    assert out.count("observer") == 1
 
 
 def test_runs_all_reads_every_job_and_bare_runs_still_reads_ingest_run(

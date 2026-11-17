@@ -1,9 +1,10 @@
 # Rollout: stage 2, the harness — and what comes just before it
 
-**Status:** current — planned 2026-11-15, not started.
+**Status:** current — planned 2026-11-15; steps 1–3 done, step 4 next.
 **Designs it follows:** [`../harness/runner/DESIGN.md`](../harness/runner/DESIGN.md)
-(built), and `../harness/pipelines/DESIGN.md` (written in step 2 of this
-plan, before any pipeline code).
+(built), and [`../harness/pipelines/DESIGN.md`](../harness/pipelines/DESIGN.md)
+(written in step 2 of this plan, before any pipeline code; partly built
+from step 3).
 The previous plan, the harness pre-work, is in
 [`archive/2026-11-11-harness-prework.md`](archive/2026-11-11-harness-prework.md).
 
@@ -35,7 +36,7 @@ between steps, if needed sooner):
 |---|---|---|---|---|
 | 1 | Split the four large dashboard pages; draw the ingest stage strip | S | — | done 2026-11-15 |
 | 2 | Write the pipelines design (no code) | S | — | done 2026-11-16 — reviewed, five questions answered |
-| 3 | Pipeline spec, loader and `candlegraph run` for one step | M | 2 | todo |
+| 3 | Pipeline spec, loader and `candlegraph run` for one step | M | 2 | done 2026-11-17 |
 | 4 | The hourly pipeline end to end: validate, analyse, signal, embed as jobs | M | 3 | todo |
 | 5 | Events: run finished → next thing starts | M | 3 | todo |
 | 6 | Traces (OpenTelemetry) and continuous aggregates | M | 4 | todo |
@@ -211,7 +212,68 @@ pipeline through `run_job` and records a parent run and a child run.
 children; a bad spec is refused with a readable message and a line
 number; `make check` green.
 
-**Outcome.** Not started.
+**Outcome.** Done 2026-11-17.
+
+- `candlegraph/harness/pipelines.py` holds the pydantic spec, the loader
+  and the executor. `pipelines/example.yaml` is one `observer` step;
+  `candlegraph run` takes a path or a name (`PIPELINES_DIR`), `--check`
+  validates and runs nothing, `make run` executes it in the stack and
+  `make check-pipelines` is the CI gate. No migration: the pipeline's
+  name, version, as-of time and step records go in `run.detail`.
+- **A pipeline run is an ordinary run.** A spec is turned into a `Job` and
+  handed to `run_job`, so the parent row, the `run=` log prefix, the stage
+  fan-out and the never-raises rule all come from code that already
+  existed. Each step is another `run_job` call carrying `parent_run_id`
+  and the *parent's* trigger. The only new vocabulary is `Every.NEVER`,
+  for a job built from a file rather than registered.
+- **Each step is also a stage**, so a pipeline run draws with the stage
+  strip step 1 built, and step 4's page is panels over helpers that
+  exist. `StageStatus` gained `partial`: a step that half-worked must not
+  display as `OK`.
+- **Every rule in §5.2 is refused with a file and a line.** `yaml.compose`
+  keeps the marks `safe_load` throws away, so the line map costs one
+  extra parse and no new dependency. All problems are reported at once —
+  one `--check` is enough to see every mistake.
+- **`Job` gained `idempotent` and `params`, both failing closed.** A job
+  is a step only once a run-twice test proves it, and
+  `IDEMPOTENCE_PROOFS` in `tests/unit/harness/test_jobs.py` fails if a
+  job is marked without one. `observer` is declared and proved;
+  `fetch_news` is idempotent in fact and waits for the step that needs it
+  (step 4); `ingest` is deliberately left undeclared, because a pipeline
+  reacts to it and never runs it.
+- **Two rules the design named, narrowed on purpose.** The loop check
+  refuses an event trigger naming *this* pipeline; a loop through a second
+  pipeline needs every spec in hand, which is the dispatcher's job in step
+  5. Retries and timeouts are parsed and carried but not applied — step 4
+  owns error classification and backoff.
+- **Scope changed against design §15**, which put the durable queue,
+  leases and resume in this step: they moved to step 5, where the event
+  dispatcher is their first real producer. A claim/lease/reaper with only
+  a foreground `candlegraph run` behind it would be ~400 lines of
+  concurrency with nothing to prove it against, and this plan's own rule
+  is to keep steps 3 and 4 apart. §15 of the design is updated to say so.
+- Three small traps found while building it: pydantic drops a step that
+  fails validation and then also reports the list as empty, burying the
+  real mistake — "no steps" is a semantic check instead; a model-level
+  validator's error has no field location, so durations and `model_role`
+  validate on the field or the line is wrong; and the observer's child row
+  is written only when the configured sinks include `ledger`, which a test
+  now pins, or a pipeline run would show a parent with no children.
+- The Dockerfile gained one `COPY pipelines ./pipelines` — the one
+  deliberate exception to this plan's "compose and the Dockerfile change
+  only in a step that says so", recorded here. Specs are reviewed
+  definitions that ship with the image, like the migrations beside them.
+- **`runs --job <pipeline>` showed only the parent**, which fails this
+  step's criterion as written. `_run_log` now fetches each page's child
+  runs in one extra query and prints them indented under their parent,
+  without double-listing a child that is already on the page. `--limit`
+  still counts the runs a person asked for: a pipeline's steps are detail
+  of a row, not more rows.
+- Verified on a real stack as well as in CI: `make check` green (1778
+  passed, 11 e2e skips, integration ran), `make run
+  ARGS='pipelines/example.yaml'` succeeded against a live stack, and
+  `make runs ARGS='--job example'` showed the pipeline with its observer
+  step underneath it.
 
 ---
 

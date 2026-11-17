@@ -242,6 +242,7 @@ class Statements:
     close_agent_run: sql.Composed
     get_recent_agent_runs: sql.Composed
     get_run_log: sql.Composed
+    get_run_log_children: sql.Composed
 
 
 @lru_cache(maxsize=4)
@@ -754,6 +755,17 @@ def statements_for(schema: str) -> Statements:
         """
     ).format(ns=ns)
 
+    # The steps of the runs already fetched. Separate from get_run_log rather
+    # than a recursive CTE because `--limit` counts *runs a person asked for*:
+    # a pipeline's steps are detail of a row on the page, not more rows of it.
+    get_run_log_children = sql.SQL(
+        """
+        SELECT * FROM {ns}.run_log
+        WHERE parent_run_id::text = ANY(%(parents)s::text[])
+        ORDER BY started_at
+        """
+    ).format(ns=ns)
+
     return Statements(
         insert_token_hours=insert_token_hours,
         insert_token_hours_template=_TOKEN_HOUR_TEMPLATE,
@@ -797,4 +809,5 @@ def statements_for(schema: str) -> Statements:
         close_agent_run=close_agent_run,
         get_recent_agent_runs=get_recent_agent_runs,
         get_run_log=get_run_log,
+        get_run_log_children=get_run_log_children,
     )

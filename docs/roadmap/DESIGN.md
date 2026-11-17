@@ -391,8 +391,17 @@ analyst and its multi-day research loop — is in
 proposed.
 
 **Exit criterion.** A single `candlegraph run pipelines/hourly.yaml`
-executes ingest, validation, analysis and signal generation as one
-orchestrated run, emits traces, and records the run in a ledger.
+executes validation, analysis and signal generation as one orchestrated
+run, emits traces, and records the run in a ledger.
+
+*Amended 2026-11-15:* this said "executes ingest, validation, …". A
+pipeline **reacts to** ingest and never runs it — one writer of market
+data, and invariant 21 checkable at load time rather than hoped for
+([`../harness/pipelines/DESIGN.md`](../harness/pipelines/DESIGN.md)
+§7.1). Since 2026-11-17 the loader enforces it: a spec with an `ingest`
+step is refused. The hourly pipeline is started *by* a successful ingest
+once event triggers land, which is the same chain with the writer left
+where it belongs.
 
 ---
 

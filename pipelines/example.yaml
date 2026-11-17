@@ -1,0 +1,26 @@
+# The smallest pipeline that is a real one: a single registered job, run
+# through the harness so it gets a parent run of its own.
+#
+#   candlegraph run pipelines/example.yaml     # or: candlegraph run example
+#   candlegraph run --check pipelines/*.yaml   # validate, run nothing
+#
+# Afterwards, `candlegraph runs --all` shows two rows: this pipeline, and the
+# observer run underneath it carrying `parent_run_id`.
+#
+# Why the observer and not something larger: it reads the ledgers and the
+# series tables, writes only its own row and its report, and is declared
+# idempotent — the loader refuses any step that is not. The jobs the hourly
+# pipeline needs (validate, analyse, signal, embed) arrive in rollout step 4.
+name: example
+description: One observer run, as a pipeline. The example the docs point at.
+version: 1
+
+# Nothing starts this on its own yet. Event triggers are built in rollout
+# step 5; a `triggers:` block here would be a promise the code cannot keep.
+
+steps:
+  - id: observe
+    job: observer
+    # The default, written out once here because it is the interesting half of
+    # the spec: a failed step stops the ones behind it unless told otherwise.
+    on_failure: stop

@@ -334,6 +334,26 @@ def _parser() -> argparse.ArgumentParser:
 
     sub.add_parser("jobs", help="list the registered jobs: schedule, process role and write surface")
 
+    run = sub.add_parser(
+        "run",
+        help="run a pipeline spec: several registered jobs as one recorded unit",
+        description="Run the steps of a pipeline in order, each through the same runner every "
+        "other job uses. The pipeline gets a run of its own and each step becomes a child run, "
+        "so `candlegraph runs --all` shows the family. A spec that breaks a rule is refused in "
+        "full, with the line to fix; --check does that and runs nothing.",
+    )
+    run.add_argument(
+        "spec",
+        nargs="+",
+        help="a path to a spec, or the name of one in PIPELINES_DIR "
+        "(`example` and `pipelines/example.yaml` are the same thing)",
+    )
+    run.add_argument(
+        "--check",
+        action="store_true",
+        help="validate every spec and exit; nothing runs, nothing is written. This is what CI runs",
+    )
+
     agent_runs = sub.add_parser("agent-runs", help="show recent agent runs from the agent ledger")
     agent_runs.add_argument("--limit", type=int, default=10)
     agent_runs.add_argument("--agent", default=None, help="only this agent")
@@ -529,6 +549,65 @@ def _jobs(settings: Settings) -> int:
     for row in [header, *rows]:
         print("  ".join(str(cell).ljust(width) for cell, width in zip(row, widths, strict=True)).rstrip())
     return 0
+
+
+def _run(settings: Settings, args: argparse.Namespace) -> int:
+    """``candlegraph run``: validate one or more specs, then run them.
+
+    Three exit codes, because the two kinds of failure are not the same thing:
+    ``2`` a spec was refused and nothing ran, ``1`` a pipeline ran and failed,
+    ``0`` otherwise. CI uses ``--check``, which can only return 0 or 2.
+    """
+    from candlegraph.harness.pipelines import (
+        PipelineError,
+        PipelineSpec,
+        load_pipeline,
+        resolve_spec,
+        run_pipeline,
+        steps_of,
+    )
+    from candlegraph.harness.runs import Outcome
+
+    specs: list[PipelineSpec] = []
+    refused = False
+    for reference in args.spec:
+        path = resolve_spec(reference, settings)
+        try:
+            specs.append(load_pipeline(path))
+        except PipelineError as exc:
+            # Every problem in the file, one per line, so one --check is enough.
+            print(str(exc), file=sys.stderr)
+            refused = True
+    if refused:
+        return 2
+
+    if args.check:
+        for spec in specs:
+            print(f"ok  {spec.name}  v{spec.version}  {len(spec.steps)} step(s)")
+        return 0
+
+    exit_code = 0
+    for spec in specs:
+        print(f"{spec.name} v{spec.version}: {', '.join(step.id for step in spec.steps)}")
+        run = run_pipeline(spec, settings, on_stage=_pipeline_step_printer())
+        for result in steps_of(run):
+            if result.error:
+                print(f"     {result.id}: {result.error}", file=sys.stderr)
+        seconds = run.duration_seconds or 0.0
+        print(f"{spec.name}: {run.outcome.value} in {seconds:.1f}s  (run {run.run_id[:8]})")
+        if run.outcome is Outcome.FAILED:
+            exit_code = 1
+    return exit_code
+
+
+def _pipeline_step_printer() -> Any:
+    """One line per step as it finishes — the main output of ``run``, so stdout."""
+    from candlegraph.harness.stages import StageRecord, format_stage
+
+    def on_stage(record: StageRecord) -> None:
+        print(f"  {format_stage(record)}", flush=True)
+
+    return on_stage
 
 
 def _stage_printer(label: str) -> Any:
@@ -744,7 +823,12 @@ def _runs(limit: int) -> int:
 
 
 def _run_log(limit: int, job: str | None) -> int:
-    """Rows of the ``run_log`` view: every job in one vocabulary."""
+    """Rows of the ``run_log`` view: every job in one vocabulary.
+
+    A pipeline run owns its steps, so they are printed underneath it rather
+    than scattered through the list by start time — and `runs --job hourly`
+    shows what the pipeline did, not only that it ran.
+    """
     from candlegraph.storage import get_db
 
     db = get_db()
@@ -753,18 +837,48 @@ def _run_log(limit: int, job: str | None) -> int:
         print(f"no {job + ' ' if job else ''}runs recorded yet")
         return 0
 
-    # Wide enough for the longest registered job name plus a space.
-    width = max(len("fetch_news"), *(len(str(row["job"])) for row in rows)) + 2
+    rows = _with_steps(db, rows)
+    # Wide enough for the longest registered job name, the indent, and a space.
+    width = max(len("fetch_news"), *(len(str(row["job"])) for row in rows)) + 4
     print(f"{'started':<21}{'job':<{width}}{'trigger':<11}{'outcome':<11}{'verdict':<10}{'secs':>8}  run_id")
     for row in rows:
         duration = row["duration_seconds"]
         elapsed = f"{float(duration):>8.1f}" if duration is not None else f"{'-':>8}"
+        name = f"  {row['job']}" if row.get("_step") else str(row["job"])
         # NULL trigger = a row written before the column existed; shown as "-", never guessed.
         print(
-            f"{row['started_at']:%Y-%m-%d %H:%M:%S}  {row['job']:<{width}}{row['trigger'] or '-':<11}"
+            f"{row['started_at']:%Y-%m-%d %H:%M:%S}  {name:<{width}}{row['trigger'] or '-':<11}"
             f"{row['outcome']:<11}{row['verdict'] or '-':<10}{elapsed}  {str(row['run_id'])[:8]}"
         )
     return 0
+
+
+def _with_steps(db: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The page, with each run's child runs listed under it and marked ``_step``.
+
+    The children are fetched in one extra query rather than folded into the
+    first, because ``--limit`` counts the runs a person asked for: a
+    pipeline's steps are detail of a row on the page, not more rows of it.
+    """
+    parents = [str(row["run_id"]) for row in rows]
+    children = db.fetch_all(db.sql.get_run_log_children, {"parents": parents})
+    if not children:
+        return rows
+
+    on_page = {str(row["run_id"]) for row in rows}
+    by_parent: dict[str, list[dict[str, Any]]] = {}
+    for child in children:
+        by_parent.setdefault(str(child["parent_run_id"]), []).append(child)
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        # A child that is also on the page is printed under its parent, once.
+        if str(row.get("parent_run_id")) in on_page:
+            continue
+        out.append(row)
+        for child in by_parent.get(str(row["run_id"]), []):
+            out.append({**child, "_step": True})
+    return out
 
 
 # --- analytics -------------------------------------------------------------
@@ -1558,6 +1672,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _worker(settings, args.jobs)
         case "jobs":
             return _jobs(settings)
+        case "run":
+            return _run(settings, args)
         case "ingest":
             return _ingest(settings, None, "manual", args.progress)
         case "backfill":

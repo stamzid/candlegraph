@@ -36,7 +36,9 @@ def now_utc() -> datetime:
     return datetime.now(tz=UTC)
 
 
-StageStatus = Literal["ok", "error", "skipped"]
+# "partial" exists for pipeline steps, whose stage status is the step's own
+# outcome: a step that half-worked must not display as "ok".
+StageStatus = Literal["ok", "partial", "error", "skipped"]
 S_contra = TypeVar("S_contra", bound=Mapping[str, Any], contravariant=True)
 
 
@@ -52,7 +54,8 @@ class StageRecord:
 
     name: str
     status: str
-    """``ok``, ``error`` (the node recorded an error and the graph went on), or ``skipped``."""
+    """``ok``, ``partial``, ``error`` (the node recorded an error and the graph
+    went on), or ``skipped``."""
     started_at: datetime | None
     duration_seconds: float | None
     detail: dict[str, Any] = field(default_factory=dict)
@@ -196,7 +199,9 @@ def describe(detail: Mapping[str, Any]) -> str:
 
 def format_stage(record: StageRecord) -> str:
     """One line per stage, aligned, for ``--progress``."""
-    mark = {"ok": "ok", "error": "ERR", "skipped": "skip"}.get(record.status, record.status)
+    mark = {"ok": "ok", "partial": "part", "error": "ERR", "skipped": "skip"}.get(
+        record.status, record.status
+    )
     secs = f"{record.duration_seconds:6.2f}s" if record.duration_seconds is not None else "     - "
     return f"{mark:<4} {record.name:<16} {secs}  {describe(record.detail)}".rstrip()
 

@@ -1,8 +1,13 @@
 # Pipelines: running several jobs as one reliable unit
 
-**Status:** proposed — 2026-11-15. Nothing here is built. Rollout step 2
-(`docs/rollout/ROLLOUT.md`): this document must be reviewed before any
-pipeline code is written in step 3.
+**Status:** partly implemented — 2026-11-17. Rollout step 3 built the
+spec, the loader and the executor: §5 in full, §6.1 boxes 4–6, §6.3,
+§6.4 and §6.6, and the `idempotent` contract of §6.2. **Not built yet:**
+the queue, leases, resume and retries (§6.5, §7.2–7.5 — moved to step 5,
+see §15), events and the outbox (§7.7), circuit breakers (§7.6), the
+model picker (§9), metrics and traces (§8.3). Nothing in §8.2 is
+deployed. **Code:** `candlegraph/harness/pipelines.py`, `pipelines/`,
+`candlegraph run`.
 **Builds on:** [`../runner/DESIGN.md`](../runner/DESIGN.md) — jobs,
 `run_job`, the three ledgers, `parent_run_id`. All of it stays.
 **Related:** [`../models/DESIGN.md`](../models/DESIGN.md) (how a step gets
@@ -260,6 +265,13 @@ The pipeline's outcome is the worst outcome among steps that ran, except
 that a step with `on_failure: continue` downgrades its own failure to
 `partial` for the pipeline. Every skipped step still gets a row in
 `detail.steps`, so "what didn't run" is never an absence.
+
+`skip_rest` is the third option and the table above does not say how it
+differs from `stop`; settled while building step 3: **both stop the
+pipeline, and `skip_rest` leaves it `partial` rather than `failed`.** It
+is for a step whose failure means there is no more work to do rather than
+that something is wrong — "stop, but this run was not a failure". A step
+that stops the pipeline is recorded in `detail.stopped_by`.
 
 ### 6.5 Retries
 
@@ -663,7 +675,7 @@ All plain tables.
 
 | Change | Purpose |
 |---|---|
-| `run`: add `attempt`, `pipeline_version`, `as_of` | retries as separate rows; resume against the right spec; one as-of time per run |
+| `run`: add `attempt`, `pipeline_version`, `as_of` | retries as separate rows; resume against the right spec; one as-of time per run. **Deferred past step 3**, which ships no migration: the pipeline name, version, as-of time and per-step record go in `run.detail`, because nothing yet *queries* by version or attempt and a column that cannot be queried is a guess at what the query will be. They become columns in the step that reads them — 4 for `attempt`, 5 for the other two |
 | new `run_queue` | durable work queue (§7.2); `UNIQUE (pipeline, dedup_key)` |
 | new `run_event` | transactional outbox (§7.7) |
 | new `model_choice` | UI model choices per role (§9.3) |
@@ -708,10 +720,32 @@ Maps onto `docs/rollout/ROLLOUT.md` steps 3–6:
 
 | Step | Delivers from this document |
 |---|---|
-| 3 | spec + loader + `run --check` (§5); queue + claim + lease + resume (§7.2–7.4); plain-loop executor; one example pipeline; `idempotent` on `Job` |
+| 3 | spec + loader + `run --check` (§5); plain-loop executor; one example pipeline; `idempotent` on `Job` — **done 2026-11-17** |
 | 4 | `validate`, `analyse`, `signal`, `embed` (and `explain`, with `--no-search`) jobs; `pipelines/hourly.yaml`; retries and timeouts (§6.5, §7.5); per-step model resolution + `model_choice` + the Pipelines page picker |
-| 5 | outbox + dispatcher + event triggers (§7.7); circuit breaker (§7.6) |
+| 5 | queue + claim + lease + resume (§7.2–7.4); outbox + dispatcher + event triggers (§7.7); circuit breaker (§7.6) |
 | 6 | OpenTelemetry metrics and traces (§8.3); production deployment notes (§8.2) |
+
+**The queue moved from step 3 to step 5** (decided 2026-11-17). It was
+written into step 3 above because §7 reads as one piece, but a durable
+queue exists to hold work that something *produces* — a schedule or an
+event — and until step 5 the only producer is a person typing
+`candlegraph run`, which blocks until the run ends. Building the claim,
+lease and reaper first would have meant ~400 lines of concurrency with
+nothing but a test to exercise them, against the rollout's rule that
+steps 3 and 4 stay small enough for a failing test to point at one
+change. Nothing in §7.2–7.4 is withdrawn; it arrives beside the
+dispatcher that needs it.
+
+Two things step 3 narrowed rather than dropped, both recorded here so
+the next step does not assume they are finished:
+
+- **Loop detection** (§5.2) refuses an event trigger naming *its own*
+  pipeline. A cycle through a second pipeline needs every spec loaded at
+  once, which is the dispatcher's view of the world, not a single file's.
+- **Retries and timeouts** (§6.5, §7.5) are parsed, validated and carried
+  on the spec, and ignored by the executor. The format is fixed from now,
+  which is the part that is expensive to change later; the behaviour
+  lands with `harness.errors.classify` in step 4.
 
 Each step ships behind its own tests; none changes compose until step 6,
 and that change is an optional production overlay, not the default

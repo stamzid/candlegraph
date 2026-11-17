@@ -242,6 +242,13 @@ class Settings(BaseSettings):
     # of day it fires does not matter.
     fetch_news_interval: int = Field(default=0, ge=0)
 
+    # --- Pipelines ---------------------------------------------------------
+    # Where `candlegraph run <name>` looks for a spec it was given by name
+    # rather than by path. Specs are reviewed code that ships in the image,
+    # not per-deployment configuration, which is why they live beside the
+    # package rather than in config/.
+    pipelines_dir: Path = Path("pipelines")
+
     # --- UI ----------------------------------------------------------------
     ui_host: str = "0.0.0.0"
     ui_port: int = 8501
@@ -316,6 +323,13 @@ class Settings(BaseSettings):
         if self.tokens_file.is_absolute():
             return self.tokens_file
         return REPO_ROOT / self.tokens_file
+
+    @property
+    def pipelines_path(self) -> Path:
+        """``pipelines_dir`` resolved against the repo root when it is relative."""
+        if self.pipelines_dir.is_absolute():
+            return self.pipelines_dir
+        return REPO_ROOT / self.pipelines_dir
 
     @property
     def report_sinks(self) -> tuple[str, ...]:

@@ -53,6 +53,14 @@ The worker, the agents process and the API's optional in-process ingest are thre
 of jobs over the same code: one job registry, one scheduler, one way to run a job.
 `make jobs` lists the jobs, their schedule setting and what each one writes.
 
+Several jobs can also run as one unit. A **pipeline** is a YAML file naming registered jobs
+in order — `make run ARGS='pipelines/example.yaml'` — and it is an ordinary run with the
+steps as child runs, so `make runs ARGS='--job example'` lists the pipeline with what each
+step did underneath it. A spec is validated in full before anything runs, and a bad one is
+refused with the line to fix; `make check-pipelines` does that and runs nothing. Only a job
+declared idempotent can be a step, and no pipeline may write market data — ingestion stays
+the worker's.
+
 Ingestion runs in its own process so a long backfill cannot compete with query traffic, and
 so an unreachable subgraph degrades the data rather than the service — the API comes up and
 stays up regardless.
@@ -92,6 +100,8 @@ make report                              # coverage, gaps, field completeness
 make runs                                # the ingest ledger
 make runs ARGS='--all'                   # every job (ingest, observer, janitor), with trigger and outcome
 make jobs                                # the registered jobs and their schedules
+make run ARGS='pipelines/example.yaml'   # run a pipeline; its steps become child runs
+make check-pipelines                     # validate every committed spec, running nothing
 make serve ARGS='--port auto'            # the API locally, on a free port if 8000 is the stack's
 ```
 

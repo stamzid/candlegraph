@@ -34,8 +34,10 @@ a target, and never let CI run something that is not one either.
 | Recompute the gap-estimate cache | `make fill` (`candlegraph fill [SYMBOLS] [--method linear\|causal\|bridge] [--all-methods] [--days N] [--max-fill N] [--clear]`) |
 | What the fill cache holds | `make fill-status` (`candlegraph fill --status`) |
 | Score the estimators against held-out real hours | `make fill-evaluate` (`candlegraph fill --evaluate [--gap-hours N]`) |
-| Recent ingest runs; every job, or one job, from `run_log` | `make runs`, `make runs ARGS='--all'`, `make runs ARGS='--job observer'` |
+| Recent ingest runs; every job, or one job, from `run_log` (a pipeline's steps are listed under it) | `make runs`, `make runs ARGS='--all'`, `make runs ARGS='--job observer'` |
 | The registered jobs: schedule, process role, write surface | `make jobs` (`candlegraph jobs`) |
+| Run a pipeline: several registered jobs as one recorded unit | `make run ARGS='pipelines/example.yaml'` (`candlegraph run SPEC... `; a spec can be named instead of pathed) |
+| Validate every committed spec, running nothing | `make check-pipelines` (`candlegraph run --check pipelines/*.yaml`) |
 | The API locally, beside a running stack (8000 is usually the stack's) | `make serve ARGS='--port auto'` (`candlegraph serve [--host H] [--port N\|auto]`; a busy port is refused with free suggestions) |
 | Sync assets and aliases from `tokens.yaml` | `make sync-assets` (in the stack) or `candlegraph knowledge sync-assets` |
 | The embedding model server's log (Ollama is part of `make up`; the first start pulls `bge-m3`) | `make logs-ollama` |
@@ -142,7 +144,10 @@ candlegraph/
       tavily.py        The metered client: bounded news search, backoff on 5xx, 429/432 never retried.
   harness/             The runner: one way to schedule, run and record a job (invariant 27).
     jobs.py            Job, JobContext, the JOBS registry (ingest, observer, janitor, fetch_news), select(role | names).
+                       `idempotent` and `params` both fail closed: only a job proved safe to re-run can be a pipeline step.
     runs.py            Run, Outcome, RunOutcome, run_job — every run passes through it; never raises.
+    pipelines.py       The YAML spec, the loader (whole file refused, with the line) and the executor.
+                       A spec becomes a Job, so a pipeline run is an ordinary run and each step is a child of it.
     hooks.py           RunHook, the log hook and the three ledger hooks that write every ingest_run/agent_run/run row.
     ledger.py          The generic `run` table: open_run / close_run, for jobs with no ledger of their own.
     stages.py          StageRecord, staged() for graph nodes, timed_stage() for plain code. agents/stages.py re-exports it.
@@ -162,6 +167,7 @@ candlegraph/
     ports.py           Is a TCP port free to bind; `serve --port` uses it.
 alembic/versions/    Migrations. The schema name comes from settings.
 config/tokens.yaml   The tokens this deployment tracks, with their knowledge-layer aliases.
+pipelines/*.yaml     Pipeline specs: reviewed definitions that ship in the image. `make check-pipelines` validates them.
 docs/<area>/<topic>/DESIGN.md   Design documents. Why, not how; `docs/README.md` indexes them.
   roadmap/           Delivered stages, next stages, and each exit criterion.
   storage/           TimescaleDB adoption, which tables are hypertables, and how pgvector coexists.
@@ -381,9 +387,13 @@ unfalsifiable.
 
 ### In progress
 
-**Stage 2, the harness** — planned 2026-11-15, not started. The plan is
-`docs/rollout/ROLLOUT.md`: split the dashboard pages, write the pipelines
-design, then build pipelines, events and traces in five steps. The
+**Stage 2, the harness** — planned 2026-11-15; steps 1–3 of 7 done, step
+4 next. The plan is `docs/rollout/ROLLOUT.md`: the dashboard pages are
+split, the pipelines design is written and reviewed, and the spec, loader
+and `candlegraph run` are built (2026-11-17) — one example pipeline runs
+through `run_job` with its step as a child run. Still ahead: the hourly
+pipeline's jobs (step 4), the queue and event triggers (step 5), traces
+and continuous aggregates (step 6). The
 pre-work it builds on is archived at
 `docs/rollout/archive/2026-11-11-harness-prework.md`. Two designs wait
 beside it: the chat-model seam (`docs/harness/models/`) and the Tavily
@@ -416,8 +426,11 @@ analyst (`docs/harness/analyst/`) and its research loop
    at `docs/rollout/archive/2026-11-06-stage-1-knowledge-graph.md`.
 2. **Harness.** YAML pipeline specs, an event bus, OpenTelemetry metrics,
    and the continuous aggregates deferred from the TimescaleDB migration.
-   *Exit:* one `candlegraph run pipelines/hourly.yaml` executes ingest →
-   validate → analyse → signal as one orchestrated, traced run.
+   *Exit:* one `candlegraph run pipelines/hourly.yaml` executes
+   validate → analyse → signal as one orchestrated, traced run. A
+   pipeline **reacts to** ingest and never runs it — the loader refuses a
+   step that writes market data (invariant 21), and the hourly pipeline
+   is started by a successful ingest once events land.
 3. **Traditional markets.** NASDAQ and NYSE equities alongside crypto: a
    second ingestion adapter and an `instrument` supertype above `token`.
    Note that invariant 19 inverts here — a missing hour inside a trading
