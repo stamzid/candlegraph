@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from types import FrameType
 
 from candlegraph.harness import scheduler as harness_scheduler
+from candlegraph.harness import tracing as harness_tracing
 from candlegraph.harness.jobs import Job
 from candlegraph.settings import Settings, get_settings
 from candlegraph.storage import get_db
@@ -46,6 +47,9 @@ def run_process(
     """
     settings = settings or get_settings()
     stop = stop or threading.Event()
+    # Once per process, before the first run. A failure here is logged and
+    # the process carries on untraced.
+    harness_tracing.configure_tracing(settings)
 
     def handle_signal(signum: int, _frame: FrameType | None) -> None:
         service_logger.info("%s received signal %s; shutting down", name, signum)

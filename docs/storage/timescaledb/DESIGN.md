@@ -184,11 +184,130 @@ choosing an extension over a different database.
   problem.
 - **Retention policies.** Never. Invariant 4 says ingestion never deletes,
   and a retention policy is a scheduled `DELETE`.
-- **Continuous aggregates.** The payoff — daily and weekly candles as an
-  incrementally refreshed view instead of a per-request `GROUP BY` — belongs
-  with the harness, which is the phase that has a consumer for them.
-  `chart_query` was moved to `time_bucket` now precisely so that defining one
-  later is a new object rather than a rewrite.
+- ~~**Continuous aggregates.**~~ **Built 2026-11-18** (revision
+  `9d4b7a2c6e15`), as predicted: a new object, not a rewrite, because
+  `chart_query` had already moved to `time_bucket`. What it holds and why it
+  holds it that way is the next section.
+
+## `token_daily`: the continuous aggregate, and what the measurement said
+
+One aggregate, `token_daily`, one bucket per token per day, and one
+consumer: `fetch_chart_data` when the requested interval is a whole number
+of days. The route is in `api/schema.py::chart_statement`; a four-hour
+candle still comes from the hourly rows, because daily buckets cannot make
+one.
+
+### What was measured first
+
+The rollout said to measure before keeping it. On a real TimescaleDB,
+median of seven runs, one token:
+
+| rows in `token_hours_data` | daily, hourly rows | daily, aggregate | weekly, hourly rows | weekly, aggregate |
+|---|---|---|---|---|
+| 43,800 (1 year × 5 tokens) | 8.6 ms | 2.1 ms | 8.1 ms | 0.8 ms |
+| 219,000 (5 years × 5) | 36.9 ms | 5.2 ms | 25.2 ms | 1.4 ms |
+| 2,628,000 (10 years × 30) | 63.6 ms | 9.8 ms | 52.3 ms | 2.5 ms |
+
+Four to seven times faster, and **nothing was slow to begin with** — a
+decade of hourly data re-aggregates in 64 ms. On candle latency alone this
+was not worth a second definition of a candle.
+
+What is slow is a different query. The Market dashboard reads raw hourly
+rows and aggregates in pandas:
+
+| window | hourly rows | daily aggregate |
+|---|---|---|
+| 30 days | 12.7 ms (3,600 rows) | 0.7 ms (150) |
+| 180 days | 53.3 ms (21,600) | 2.3 ms (900) |
+| everything (5 years) | **610 ms** (219,000) | 22 ms (9,125) |
+
+That one is **not** switched over, and the reason is not performance: the
+dashboard plots hourly bars, and serving it daily data changes what the
+chart shows. Downsampling long windows is a display decision for whoever
+owns that page, and the 610 ms is recorded here so it is argued from a
+number when someone takes it.
+
+So the aggregate is kept for the candle API, where it is a strict
+improvement with no change in what is returned, and the dashboard is left
+alone.
+
+### Four things the definition gets right
+
+1. **It materialises sums and counts, never an average.** `AVG(price_usd)`
+   per day, averaged again per week, weights every day equally — and days
+   here are not equal, because Uniswap emits no row for an hour with no
+   swaps (invariant 19). A four-hour day would count as much as a full one.
+   `price_sum` and `price_hours` are stored and divided at read time.
+2. **It counts non-NULL values separately from rows.** `hours` is
+   `COUNT(*)`; `price_hours` and `tvl_hours` are `COUNT(column)`. A column
+   that was not collected is `NULL`, not zero (invariant 11), and dividing
+   by the wrong count would turn "half the hours reported TVL" into half the
+   real figure.
+3. **`first()`/`last()`, not `array_agg(… ORDER BY …)`.** TimescaleDB's
+   aggregates for exactly this; they parallelise and do not store a whole
+   day of values to use two of them.
+4. **Real-time aggregation is left on** (`materialized_only = false`), so a
+   bucket newer than the materialisation watermark is computed live from the
+   hourly rows. Without it, the newest candle would be absent between
+   refreshes and the API's answer would depend on when the pipeline last
+   ran. It also measured no slower than materialized-only.
+
+### Refreshing: the whole range, every time
+
+| | |
+|---|---|
+| full refresh, nothing changed | **0.79 ms** |
+| full refresh after one new hour | 1.04 ms |
+| full refresh after a 90-day backfill | 12.0 ms |
+| full refresh after a 3-year backfill | 133 ms |
+| 90-day *windowed* refresh, same change | 12.6 ms |
+
+`refresh_continuous_aggregate` works from the invalidation log, so
+refreshing everything costs what refreshing the changed part costs. A
+window would buy nothing and would introduce a failure that is hard to see:
+`backfill --days 365` can rewrite any hour (invariant 13), and anything
+older than the window would stay wrong until somebody noticed.
+
+There is **no refresh policy**. `refresh_aggregates` is a registered job and
+a step of `pipelines/hourly.yaml`, so the refresh is a recorded run with a
+`trigger`, an outcome and the view's extent in its counts — the same
+treatment as every other piece of work (invariant 27). A background policy
+would be a second schedule with its own window to keep in step with
+`LOOKBACK_DAYS`.
+
+### The one thing to know about staleness
+
+The watermark is a high-water mark: it moves forward with each refresh and
+never back. So
+
+- an hour **newer** than the watermark — what ingest has just written — is
+  served live and needs no refresh;
+- an hour **behind** it — what a backfill rewrote — is served from the
+  stored bucket until a refresh runs.
+
+Both are tested (`test_an_hour_newer_than_the_watermark_needs_no_refresh`,
+`test_an_hour_written_behind_the_watermark_waits_for_a_refresh`). The second
+is why the refresh runs every hour rather than daily: the drift after a
+backfill is bounded by one pipeline cycle. `AGGREGATES_ENABLED=false` pins
+every request to the hourly rows if that is ever in doubt.
+
+### The test that matters
+
+`test_the_aggregate_and_the_raw_path_agree` reads the same data both ways at
+daily, two-day, weekly and monthly widths and compares bucket by bucket.
+The risk a continuous aggregate introduces is not slowness, it is two
+definitions of a candle that drift apart — a missing hour, a NULL column, a
+partial bucket. Each of those is a test in
+`tests/integration/test_aggregates.py`.
+
+### Mechanics worth remembering
+
+`CREATE MATERIALIZED VIEW … WITH (timescaledb.continuous)` and `DROP` both
+run inside a transaction, so the Alembic revision is ordinary — but it must
+say `WITH NO DATA`, because creating it with data refreshes, and
+`refresh_continuous_aggregate()` **cannot** run inside a transaction block.
+That is also why `DatabaseManager.execute_outside_transaction` exists: the
+ordinary write helper opens a transaction before the first statement.
 
 ## Test plan, and what it proves
 

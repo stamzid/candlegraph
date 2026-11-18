@@ -257,5 +257,12 @@ class CompositeHook:
 
 
 def default_hooks() -> tuple[RunHook, ...]:
-    """Hooks every run gets in addition to its job's ledger hook."""
-    return (LogHook(),)
+    """Hooks every run gets in addition to its job's ledger hook.
+
+    The tracing hook is here unconditionally: with no OpenTelemetry SDK
+    configured — the default — its spans are no-ops, so there is nothing to
+    switch off. A fresh instance per call because one hook serves one run.
+    """
+    from candlegraph.harness.tracing import TracingHook
+
+    return (LogHook(), TracingHook())

@@ -39,7 +39,7 @@ between steps, if needed sooner):
 | 3 | Pipeline spec, loader and `candlegraph run` for one step | M | 2 | done 2026-11-17 |
 | 4 | The hourly pipeline end to end: validate, analyse, signal, embed as jobs | M | 3 | done 2026-11-17 |
 | 5 | Events: run finished → next thing starts | M | 3 | done 2026-11-18 |
-| 6 | Traces (OpenTelemetry) and continuous aggregates | M | 4 | todo |
+| 6 | Traces (OpenTelemetry) and continuous aggregates | M | 4 | done 2026-11-18 |
 | 7 | Closeout | S | 1–6 | todo |
 
 **Why this order.**
@@ -495,7 +495,104 @@ rollups are maintained by the database and refreshed by the harness.
 local collector; the aggregate refresh is a recorded run; `make check`
 green.
 
-**Outcome.** Not started.
+**Outcome.** Done 2026-11-18.
+
+### Traces
+
+- `harness/tracing.py`: a `TracingHook` in `default_hooks`, so every run is
+  a span and every stage an event on it. **No `if tracing_enabled:`
+  anywhere** — `opentelemetry-api` without an SDK hands back a
+  `NonRecordingSpan`, so the instrumentation is always compiled in and costs
+  a few no-op calls. Turning it on is installing the `otel` extra and
+  setting `OTEL_ENABLED`; the code is identical either way.
+- **Nothing wires up the nesting.** A pipeline's steps call `run_job` inside
+  the pipeline body on the same thread, so OpenTelemetry's context makes
+  each step a child of the pipeline span. Verified against a real collector:
+  one trace, `run hourly` at the root, `validate` / `refresh_aggregates` /
+  `analyse` / `signal` / `explain` beneath it.
+- A stage is an **event**, not a child span: a stage is reported after it
+  has already finished, so a span would need a start time we would have to
+  invent.
+- `docker-compose.otel.yaml` is an opt-in overlay (`make otel-up`,
+  `make otel-logs`) running a collector that prints spans and stores
+  nothing. The main compose file is untouched, which is what the two October
+  start-up post-mortems asked for. The Dockerfile gained `--extra otel`, the
+  one deliberate exception — without the SDK in the image the overlay would
+  start a collector that never receives a span.
+
+### Aggregates, and what the measurement actually said
+
+The step said to measure before keeping them. Full numbers and reasoning are
+in [`../storage/timescaledb/DESIGN.md`](../storage/timescaledb/DESIGN.md);
+the short version:
+
+- **The candle query was never slow.** A decade of hourly data (2.6M rows)
+  re-aggregates to daily candles in 64 ms. The aggregate makes it 9.8 ms —
+  4 to 7× across every scale tested, but from fast to fast. On its own this
+  did not justify a second definition of a candle.
+- **The query that *is* slow is one the aggregate cannot serve.** The Market
+  dashboard reads raw hourly rows: 610 ms for a five-year window. A daily
+  aggregate answers the same window in 22 ms, but the dashboard plots
+  *hourly* bars, so serving it daily data changes what the chart shows. That
+  is a display decision for whoever owns the page, **not taken here**, and
+  the 610 ms is recorded in the design so it is argued from a number.
+- **So the aggregate is kept for the candle API only**, where it is a strict
+  improvement and returns identical numbers. `chart_statement` routes any
+  interval that is a whole number of days to `token_daily`; anything finer
+  reads the hourly rows.
+
+Four things the definition had to get right, each now a test:
+
+1. **Sums and counts, never a materialised average.** Hours are missing by
+   design here (invariant 19), so an average of daily averages weights a
+   four-hour day the same as a full one.
+2. **`COUNT(column)` separately from `COUNT(*)`.** A not-collected column is
+   `NULL`, not zero (invariant 11); dividing by the wrong count halves the
+   figure.
+3. **`first()`/`last()`** rather than `array_agg(… ORDER BY …)`.
+4. **Real-time aggregation left on**, so the newest bucket is computed live
+   and the API's answer does not depend on when the refresh last ran.
+
+### Refresh: the whole range, every time
+
+Measured: a full refresh costs **0.79 ms when nothing changed**, 12 ms after
+a 90-day backfill, and 133 ms after a three-year one — a *windowed* refresh
+of the same change costs the same 12.6 ms. The refresh is driven by the
+invalidation log, so a window buys nothing and introduces a failure that is
+hard to see: `backfill --days 365` can rewrite any hour (invariant 13), and
+anything older than the window would stay wrong until somebody noticed.
+
+There is no refresh policy. `refresh_aggregates` is a registered job and a
+step of `pipelines/hourly.yaml`, so the refresh is a recorded run with a
+trigger, an outcome and the view's extent in its counts.
+
+### Things found while building
+
+- **The watermark is a high-water mark and never moves back.** An hour newer
+  than it is served live with no refresh; an hour behind it — what a
+  backfill rewrote — waits for one. Both are now tests. This also made one
+  test order-dependent: an earlier test pushed the watermark forward and a
+  later one wrote behind it, so the tests compute their base from the
+  watermark rather than from a constant.
+- `refresh_continuous_aggregate()` **cannot run inside a transaction block**,
+  and psycopg2 opens one before the first statement — hence
+  `DatabaseManager.execute_outside_transaction`. `CREATE MATERIALIZED VIEW
+  … WITH (timescaledb.continuous)` and `DROP` both *can*, so the migration is
+  ordinary; it says `WITH NO DATA` because creating with data refreshes.
+- The view argument to `refresh_continuous_aggregate` must be a **string
+  literal** cast to `regclass`; a bare qualified identifier parses as a
+  column reference and fails with "missing FROM-clause entry".
+
+### Not done, and why
+
+- **Metrics (§8.3).** The exit criterion names traces, and a span already
+  carries the duration, the outcome and the counts that table wants — a
+  metrics pipeline is a separate backend decision. The circuit breaker that
+  step 5 deferred "to step 6's metrics" therefore moves with them.
+- **The Market dashboard's 610 ms**, above: a display decision, not a
+  storage one.
+- **`pool_hours_data` has no aggregate.** Nothing reads pool candles
+  by day; `token_daily` exists because `chart_statement` is a consumer.
 
 ---
 

@@ -33,6 +33,7 @@ def test_the_registered_jobs_are_the_ones_the_docs_name() -> None:
         "analyse",
         "signal",
         "explain",
+        "refresh_aggregates",
         "embed",
     ]
 
@@ -132,6 +133,7 @@ def test_every_job_writes_a_ledger_row_under_the_default_configuration(name: str
 HERE = "tests.unit.harness.test_jobs"
 STEPS = "tests.unit.harness.test_steps"
 EVENTS = "tests.unit.harness.test_events"
+AGGS = "tests.integration.test_aggregates"
 
 IDEMPOTENCE_PROOFS = {
     "observer": f"{HERE}:test_running_the_observer_twice_writes_the_same_state",
@@ -142,6 +144,9 @@ IDEMPOTENCE_PROOFS = {
     "signal": f"{STEPS}:test_running_signal_twice_writes_the_same_state",
     "explain": f"{STEPS}:test_running_explain_twice_writes_the_same_state",
     "embed": f"{STEPS}:test_running_embed_twice_writes_the_same_state",
+    # Proved against real SQL: "refreshing twice changes nothing" is a claim
+    # about TimescaleDB's invalidation log, which a fake cannot answer.
+    "refresh_aggregates": f"{AGGS}:test_running_refresh_aggregates_twice_writes_the_same_state",
 }
 
 

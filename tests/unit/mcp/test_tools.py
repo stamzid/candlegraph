@@ -220,7 +220,11 @@ def test_an_error_crossing_the_boundary_is_redacted(wired: FakeDatabase) -> None
 
 
 def test_candles_bounds_the_query_by_the_window_it_was_given(wired: FakeDatabase) -> None:
-    wired.reads["chart_query"] = [
+    # 24 hours is a whole day, so the request is served from the `token_daily`
+    # continuous aggregate. Both statements return the same columns and the
+    # same numbers (tests/integration/test_aggregates.py compares them); this
+    # test is about the window, so it seeds whichever one will be asked.
+    wired.reads["chart_query_daily"] = [
         {
             "interval_start": datetime(2026, 11, 4, tzinfo=UTC),
             "opens": [Decimal("10")],
@@ -245,9 +249,19 @@ def test_candles_bounds_the_query_by_the_window_it_was_given(wired: FakeDatabase
             "price_usd": 10.5,
         }
     ]
-    params = dict(next(p for label, p in wired.fetches if label == "chart_query") or {})
+    params = dict(next(p for label, p in wired.fetches if label == "chart_query_daily") or {})
     assert params["start_unix"] == int(datetime(2026, 11, 1, tzinfo=UTC).timestamp())
     assert params["end_unix"] is None
+
+
+def test_candles_finer_than_a_day_read_the_hourly_rows(wired: FakeDatabase) -> None:
+    """A four-hour candle cannot be built from daily buckets."""
+    wired.reads["chart_query"] = []
+
+    tools.candles("wbtc", hours=4)
+
+    assert "chart_query" in [label for label, _ in wired.fetches]
+    assert "chart_query_daily" not in [label for label, _ in wired.fetches]
 
 
 def test_an_unknown_symbol_is_refused_with_the_tracked_ones_listed(wired: FakeDatabase) -> None:

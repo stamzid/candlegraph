@@ -231,7 +231,9 @@ def test_a_failed_validate_stops_the_pipeline_before_any_signal_is_stored(
     )
 
     assert run.outcome is Outcome.FAILED
-    assert [s.status for s in steps_of(run)] == ["failed", "skipped", "skipped", "skipped"]
+    statuses = [s.status for s in steps_of(run)]
+    assert statuses[0] == "failed"
+    assert set(statuses[1:]) == {"skipped"}  # every step behind it, whatever they are
     (count,) = pipeline_db.fetch_all(f'SELECT count(*) AS n FROM "{pipeline_db.schema}".signal')
     assert count["n"] == 0
     # And the steps that did not run left no rows pretending they did.

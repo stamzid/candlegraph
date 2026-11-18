@@ -12,15 +12,18 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /candlegraph
 
 # Dependencies first: this layer is cached until the lockfile changes.
+# `otel` ships the OpenTelemetry SDK. It is inert unless OTEL_ENABLED is set,
+# and without it docker-compose.otel.yaml would start a collector that never
+# receives a span.
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-install-project --no-dev --extra ui
+    uv sync --locked --no-install-project --no-dev --extra ui --extra otel
 
 # Then the project itself.
 COPY README.md ./
 COPY candlegraph ./candlegraph
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --extra ui
+    uv sync --locked --no-dev --extra ui --extra otel
 
 FROM python:3.12-slim AS runtime
 ENV PYTHONUNBUFFERED=1 \

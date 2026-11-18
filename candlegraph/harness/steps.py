@@ -324,6 +324,41 @@ def explain_job_body(ctx: JobContext) -> RunOutcome:
     )
 
 
+# --- refresh_aggregates ----------------------------------------------------------
+
+
+def refresh_aggregates_job_body(ctx: JobContext) -> RunOutcome:
+    """Bring `token_daily` up to date with the hourly rows.
+
+    The whole range, every time. The refresh is driven by TimescaleDB's
+    invalidation log, so "everything" costs 0.8 ms when nothing changed and
+    12 ms after a 90-day backfill — a window would cost the same for the same
+    change while leaving a deeper backfill stale, and `backfill --days N` can
+    rewrite any hour (invariant 13).
+
+    The run records the aggregate's extent, so the ledger says what the view
+    held rather than only that something ran.
+    """
+    db = ctx.db
+    db.execute_outside_transaction(db.sql.refresh_token_daily)
+    rows = db.fetch_all(db.sql.aggregate_status)
+    status = dict(rows[0]) if rows else {}
+    buckets = int(status.get("buckets") or 0)
+    return RunOutcome(
+        outcome=Outcome.SUCCEEDED,
+        counts={
+            "buckets": buckets,
+            "tokens": int(status.get("tokens") or 0),
+            "hours": int(status.get("hours") or 0),
+        },
+        detail={
+            "view": "token_daily",
+            "first_day": status.get("first_day"),
+            "last_day": status.get("last_day"),
+        },
+    )
+
+
 # --- embed ---------------------------------------------------------------------
 
 

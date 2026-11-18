@@ -124,6 +124,8 @@ make runs ARGS='--all'                   # every job (ingest, observer, janitor)
 make jobs                                # the registered jobs and their schedules
 make run ARGS='pipelines/hourly.yaml'    # run a pipeline; its steps become child runs
 make queue                               # what a trigger asked for, and what became of it
+make aggregates                          # what the daily candle view holds
+make otel-up                             # the stack plus a trace collector (opt-in overlay)
 make check-pipelines                     # validate every committed spec, running nothing
 make serve ARGS='--port auto'            # the API locally, on a free port if 8000 is the stack's
 ```

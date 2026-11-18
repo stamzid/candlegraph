@@ -25,7 +25,7 @@ triggers:
   - schedule: { every: 2h }
 
 # The SLO is 15 minutes after a successful ingest (DESIGN §16, answer 1).
-# The step timeouts below sum to 13 minutes, which is what the loader checks:
+# The step timeouts below sum to 14 minutes, which is what the loader checks:
 # a deadline shorter than the work it covers would always fire.
 deadline: 15m
 
@@ -45,6 +45,13 @@ steps:
     job: validate
     timeout: 2m
     on_failure: stop
+
+  # Right after validate, so the candles the API serves include the hour that
+  # just landed. Cheap: the refresh is invalidation-driven, so it is about a
+  # millisecond when ingest added one hour.
+  - id: refresh_aggregates
+    job: refresh_aggregates
+    timeout: 1m
 
   - id: analyse
     job: analyse

@@ -134,6 +134,25 @@ class DatabaseManager:
             cursor.execute(query, params)
             return int(cursor.rowcount)
 
+    def execute_outside_transaction(self, query: SqlQuery, params: dict[str, Any] | None = None) -> None:
+        """Run a statement that refuses to be inside a transaction block.
+
+        psycopg2 opens a transaction before the first statement, so the
+        ordinary helpers cannot run `refresh_continuous_aggregate()` —
+        it manages its own transactions and errors out with
+        "cannot run inside a transaction block". This borrows a connection,
+        flips it to autocommit for the one statement, and puts it back as it
+        found it so the pooled connection is not left in a different mode.
+        """
+        with self.connection() as conn:
+            previous = conn.autocommit
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(query, params)
+            finally:
+                conn.autocommit = previous
+
     def execute_returning(
         self, query: SqlQuery, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:

@@ -367,6 +367,16 @@ def _parser() -> argparse.ArgumentParser:
         "--state", default=None, choices=["queued", "claimed", "done", "dead"], help="only this state"
     )
 
+    aggregates = sub.add_parser(
+        "aggregates",
+        help="the token_daily continuous aggregate: what it holds, and refreshing it",
+        description="Daily candles maintained by the database, which the API serves for any "
+        "interval that is a whole number of days. The refresh is normally a step of the hourly "
+        "pipeline; this is for running it by hand after a deep backfill, or for seeing what the "
+        "view currently covers.",
+    )
+    aggregates.add_argument("--refresh", action="store_true", help="refresh it now instead of only reporting")
+
     agent_runs = sub.add_parser("agent-runs", help="show recent agent runs from the agent ledger")
     agent_runs.add_argument("--limit", type=int, default=10)
     agent_runs.add_argument("--agent", default=None, help="only this agent")
@@ -627,6 +637,49 @@ def _run(settings: Settings, args: argparse.Namespace) -> int:
         if run.outcome is Outcome.FAILED:
             exit_code = 1
     return exit_code
+
+
+def _aggregates(settings: Settings, args: argparse.Namespace) -> int:
+    """``candlegraph aggregates``: what `token_daily` holds, and refreshing it."""
+    from datetime import UTC, datetime
+
+    from candlegraph.harness import JOBS, Outcome, run_job
+    from candlegraph.harness.runs import MANUAL
+    from candlegraph.storage import get_db
+
+    db = get_db()
+    if args.refresh:
+        run = run_job(JOBS["refresh_aggregates"], settings, trigger=MANUAL, db=db)
+        if run.outcome is not Outcome.SUCCEEDED:
+            print(
+                f"refresh failed: {(run.result.errors if run.result else {}) or run.exception}",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"refreshed token_daily in {run.duration_seconds or 0:.2f}s  (run {run.run_id[:8]})")
+    rows = db.fetch_all(db.sql.aggregate_status)
+    status = dict(rows[0]) if rows else {}
+    buckets = int(status.get("buckets") or 0)
+    if not buckets:
+        print("token_daily holds nothing yet; run `candlegraph aggregates --refresh`")
+        return 0
+
+    def day(value: object) -> str:
+        return datetime.fromtimestamp(int(str(value)), tz=UTC).strftime("%Y-%m-%d") if value else "-"
+
+    print(
+        f"token_daily: {buckets:,} daily buckets over {int(status.get('tokens') or 0)} token(s), "
+        f"{day(status.get('first_day'))} to {day(status.get('last_day'))}, "
+        f"{int(status.get('hours') or 0):,} hourly rows summarised"
+    )
+    return 0
+
+
+def _configure_tracing(settings: Settings) -> None:
+    """Start the tracing SDK if it is configured. Imported late: see invariant 1."""
+    from candlegraph.harness.tracing import configure_tracing
+
+    configure_tracing(settings)
 
 
 def _queue(args: argparse.Namespace) -> int:
@@ -1723,6 +1776,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     settings = get_settings()
     configure_logging(settings.log_level)
+    # So a pipeline run started by hand is traced the same as one the
+    # dispatcher starts. A no-op unless OTEL_ENABLED is set.
+    _configure_tracing(settings)
 
     match args.command:
         case "serve":
@@ -1735,6 +1791,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run(settings, args)
         case "queue":
             return _queue(args)
+        case "aggregates":
+            return _aggregates(settings, args)
         case "ingest":
             return _ingest(settings, None, "manual", args.progress)
         case "backfill":

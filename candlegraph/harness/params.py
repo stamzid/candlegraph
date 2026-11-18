@@ -110,6 +110,16 @@ class ExplainParams(StrategiesMixin):
     """
 
 
+class RefreshAggregatesParams(_Params):
+    """``refresh_aggregates``: nothing to configure.
+
+    Declared rather than left as ``None`` so the loader's message for a spec
+    that passes something is "unknown parameter X" rather than the blunter
+    "takes no parameters" — the job may grow one (a second aggregate to
+    name), and the shape is already right for it.
+    """
+
+
 class EmbedParams(_Params):
     """``embed``: give the pending chunks the active model's vector."""
 

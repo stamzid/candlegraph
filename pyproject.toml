@@ -42,6 +42,13 @@ llm = [
 mcp = [
     "mcp>=2.3.0",
 ]
+# Optional: turns the always-present OpenTelemetry instrumentation into real
+# spans. `opentelemetry-api` alone (already resolved) is a no-op API; these
+# two are the implementation and the wire format.
+otel = [
+    "opentelemetry-sdk>=1.45.1",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.1",
+]
 
 [dependency-groups]
 dev = [

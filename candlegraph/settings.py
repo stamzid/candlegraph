@@ -242,6 +242,22 @@ class Settings(BaseSettings):
     # of day it fires does not matter.
     fetch_news_interval: int = Field(default=0, ge=0)
 
+    # --- Tracing -----------------------------------------------------------
+    # Off by default, and off costs nothing: the instrumentation is always
+    # compiled in, but without the SDK (`uv sync --extra otel`) every span is
+    # a no-op. On with no endpoint prints spans to the console, which is
+    # enough to see the shape of a pipeline run without running a collector.
+    otel_enabled: bool = False
+    otel_exporter_endpoint: str | None = None
+    otel_service_name: str = "candlegraph"
+
+    # --- Continuous aggregates ---------------------------------------------
+    # Whether the candle query may be served from the `token_daily`
+    # continuous aggregate when the requested interval is a whole number of
+    # days. False reads the hourly rows directly, which is what every version
+    # before stage 2 did and what the equality test compares against.
+    aggregates_enabled: bool = True
+
     # --- Pipelines: the dispatcher and its queue ----------------------------
     # Seconds between dispatcher ticks in `candlegraph agents`; 0 disables
     # events entirely and pipelines only run when someone asks. A tick is one

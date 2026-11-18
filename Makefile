@@ -15,7 +15,7 @@ E2E_URL ?= http://localhost:$${APP_HOST_PORT:-8000}
         up-knowledge logs-ollama embed reembed fetch-news search link-mentions explain mcp \
         fill fill-status fill-evaluate stats compare signals backtest strategies portfolio \
         forecast forecast-posterior risk simulate simulate-execution jobs serve run check-pipelines \
-        queue
+        queue aggregates otel-up otel-logs
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -201,6 +201,15 @@ check-pipelines: ## Validate every committed pipeline spec without running anyth
 
 queue: ## The pipeline work queue: what a trigger asked for and what became of it
 	$(COMPOSE) exec agents python -m candlegraph queue $(ARGS)
+
+aggregates: ## Refresh the token_daily continuous aggregate, or show what it holds
+	$(COMPOSE) exec agents python -m candlegraph aggregates $(ARGS)
+
+otel-up: ## The stack plus an OpenTelemetry collector, with tracing turned on
+	$(COMPOSE) -f docker-compose.yaml -f docker-compose.otel.yaml up -d --build --wait
+
+otel-logs: ## The spans, as the collector received them
+	$(COMPOSE) -f docker-compose.yaml -f docker-compose.otel.yaml logs -f otel-collector
 
 serve: ## Run the API locally, outside compose: make serve ARGS='--port auto' (8000 is usually the stack's)
 	$(UV) run python -m candlegraph serve $(ARGS)

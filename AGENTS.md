@@ -37,6 +37,8 @@ a target, and never let CI run something that is not one either.
 | Recent ingest runs; every job, or one job, from `run_log` (a pipeline's steps are listed under it) | `make runs`, `make runs ARGS='--all'`, `make runs ARGS='--job observer'` |
 | The registered jobs: schedule, process role, write surface | `make jobs` (`candlegraph jobs`) |
 | Run a pipeline: several registered jobs as one recorded unit | `make run ARGS='pipelines/hourly.yaml'` (`candlegraph run SPEC...`; a spec can be named instead of pathed). `daily.yaml` **spends search credits**; `hourly.yaml` and `example.yaml` do not |
+| Daily candles the database maintains: what the view holds, or refresh it by hand | `make aggregates` (`candlegraph aggregates [--refresh]`); normally a step of the hourly pipeline |
+| Traces: the stack plus a collector, and the spans it received | `make otel-up`, `make otel-logs` (an opt-in overlay; a plain `make up` runs no collector) |
 | Validate every committed spec, running nothing | `make check-pipelines` (`candlegraph run --check pipelines/*.yaml`; the only place a loop between two specs is caught) |
 | What a trigger asked for, and what became of it | `make queue` (`candlegraph queue [--pipeline P] [--state queued\|claimed\|done\|dead]`) — where to look when a pipeline did not run |
 | The API locally, beside a running stack (8000 is usually the stack's) | `make serve ARGS='--port auto'` (`candlegraph serve [--host H] [--port N\|auto]`; a busy port is refused with free suggestions) |
@@ -144,16 +146,17 @@ candlegraph/
       base.py          Source Protocol: search(query, window) -> RawDocuments. Never writes, never decides.
       tavily.py        The metered client: bounded news search, backoff on 5xx, 429/432 never retried.
   harness/             The runner: one way to schedule, run and record a job (invariant 27).
-    jobs.py            Job, JobContext, the JOBS registry (ingest, observer, janitor, fetch_news, dispatch, and the five pipeline steps), select(role | names).
+    jobs.py            Job, JobContext, the JOBS registry (ingest, observer, janitor, fetch_news, dispatch, and the six pipeline steps), select(role | names).
                        `idempotent` and `params` both fail closed: only a job proved safe to re-run can be a pipeline step.
     runs.py            Run, Outcome, RunOutcome, run_job — every run passes through it; never raises.
     pipelines.py       The YAML spec, the loader (whole file refused, with the line) and the executor.
                        A spec becomes a Job, so a pipeline run is an ordinary run and each step is a child of it.
     params.py          The typed params a spec may set per job. No domain imports: the registry imports this.
-    steps.py           The five step bodies (validate, analyse, signal, explain, embed). Adapters only — no arithmetic, no SQL.
+    steps.py           The six step bodies (validate, analyse, signal, explain, embed, refresh_aggregates). Adapters only — no arithmetic, no SQL.
     errors.py          classify(exc): transient, rate-limited or permanent. The one place "retry?" is answered.
     events.py          The dispatcher: finished runs and elapsed schedules -> queued pipeline runs. No event table; `run_log` is the event log.
     queue.py           The `run_queue` table: enqueue (deduplicated), claim with a lease, complete, reap, prune.
+    tracing.py         One span per run, one event per stage. Always on and free: no SDK means no-op spans.
     hooks.py           RunHook, the log hook and the three ledger hooks that write every ingest_run/agent_run/run row.
     ledger.py          The generic `run` table: open_run / close_run, for jobs with no ledger of their own.
     stages.py          StageRecord, staged() for graph nodes, timed_stage() for plain code. agents/stages.py re-exports it.
@@ -203,6 +206,7 @@ schema.graphql       Generated. `make sdl`; a test fails if it is stale.
 | `run` | one row per run of a job with no ledger of its own (`fetch_news`; stage 2 pipelines); counts and errors as JSONB | `run_id` | plain |
 | `run_log` | a **view** over `ingest_run`, `agent_run` and `run` with the same columns: `job`, `trigger`, `outcome`, `verdict` | — | view |
 | `run_queue` | one row per pipeline run a trigger asked for; `UNIQUE (pipeline, dedup_key)` is what makes "exactly once" true | `(pipeline, dedup_key)` | plain — work, not history, and deleted from once done |
+| `token_daily` | one row per token per day, summarising `token_hours_data` | `(token_id, day)` | **continuous aggregate** — a view the database maintains, refreshed by the `refresh_aggregates` job |
 | `asset` | one row per knowledge entity (token addresses today) | `id` | plain |
 | `source` | one row per document source (`tavily`, `rss:<feed>`, `manual`) | `id` | plain |
 | `document` | one row per retrieved document | `url_hash` (unique; sha256 of the normalised URL) | plain |
@@ -412,15 +416,17 @@ unfalsifiable.
 
 ### In progress
 
-**Stage 2, the harness** — planned 2026-11-15; steps 1–5 of 7 done, step
-6 next. The plan is `docs/rollout/ROLLOUT.md`: the dashboard pages are
+**Stage 2, the harness** — planned 2026-11-15; steps 1–6 of 7 done, only
+the closeout left. The plan is `docs/rollout/ROLLOUT.md`: the dashboard pages are
 split, the pipelines design is written and reviewed, the spec, loader,
 `candlegraph run`, the five step jobs and `pipelines/hourly.yaml` are
 built with retries and a deadline (2026-11-17), and since 2026-11-18 a
-successful ingest **starts** the hourly pipeline — the work queue, the
-dispatcher and event triggers. Still ahead: traces and continuous
-aggregates (step 6), and two things deferred with reasons — the per-step
-model picker, and step-level resume of an interrupted pipeline. The
+successful ingest **starts** the hourly pipeline (the work queue, the
+dispatcher and event triggers), every run is an OpenTelemetry span, and
+`token_daily` serves the candle API. Still ahead: the closeout (step 7),
+and three things deferred with reasons — the per-step model picker,
+step-level resume of an interrupted pipeline, and metrics with the circuit
+breaker that reads them. The
 pre-work it builds on is archived at
 `docs/rollout/archive/2026-11-11-harness-prework.md`. Two designs wait
 beside it: the chat-model seam (`docs/harness/models/`) and the Tavily

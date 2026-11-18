@@ -25,6 +25,7 @@ from candlegraph.harness.params import (
     AnalyseParams,
     EmbedParams,
     ExplainParams,
+    RefreshAggregatesParams,
     SignalParams,
     ValidateParams,
 )
@@ -198,6 +199,12 @@ def _embed(ctx: JobContext) -> RunOutcome:
     from candlegraph.harness.steps import embed_job_body
 
     return embed_job_body(ctx)
+
+
+def _refresh_aggregates(ctx: JobContext) -> RunOutcome:
+    from candlegraph.harness.steps import refresh_aggregates_job_body
+
+    return refresh_aggregates_job_body(ctx)
 
 
 def _dispatch(ctx: JobContext) -> RunOutcome:
@@ -389,6 +396,21 @@ JOBS: dict[str, Job] = {
             ledger=run_ledger,
             idempotent=True,
             params=ExplainParams,
+        ),
+        Job(
+            name="refresh_aggregates",
+            run=_refresh_aggregates,
+            schedule=NEVER,
+            role="agents",
+            # A continuous aggregate is derived data kept beside the rows it
+            # summarises — the same kind of thing as the fill cache.
+            writes=frozenset({"cache", "ledger"}),
+            description="Bring the token_daily continuous aggregate up to date with the hourly rows",
+            ledger=run_ledger,
+            # Refreshing twice is the second refresh finding nothing to do.
+            # Proved by test_running_refresh_aggregates_twice_writes_the_same_state.
+            idempotent=True,
+            params=RefreshAggregatesParams,
         ),
         Job(
             name="embed",

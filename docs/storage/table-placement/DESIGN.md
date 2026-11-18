@@ -288,6 +288,26 @@ queue's unique key makes re-reading the same window free. If a second consumer
 outside Postgres ever appears, the outbox comes back — and §10.2 already says
 what would bring it.
 
+## `token_daily` (stage 2, rollout step 6) — a continuous aggregate
+
+Not a table, so it needs no placement decision — but it gets a line here
+because what it holds is a **copy of data that lives somewhere else**, and
+that is the property this document exists to keep track of.
+
+| | |
+|---|---|
+| What | one row per token per day, summarising `token_hours_data` |
+| Storage | a TimescaleDB continuous aggregate: a materialised hypertable the database maintains, plus a live query over anything newer than the watermark |
+| Written by | `refresh_continuous_aggregate`, called by the `refresh_aggregates` job — never by application SQL |
+| Deleted from | no. Dropping a bucket would not remove the hours behind it, and the hours are the record |
+
+The rule it adds: **a derived object stores sums and counts, not averages.**
+`AVG` is not re-aggregatable when the groups have different sizes, and here
+they do — a day with four traded hours and a day with twenty-four are both
+one row (invariant 19). The full reasoning, the measurements that justified
+building it at all, and the refresh strategy are in
+[`../timescaledb/DESIGN.md`](../timescaledb/DESIGN.md).
+
 ## How to apply this to a new table
 
 Ask the four questions in "The rule" before writing the migration, and record

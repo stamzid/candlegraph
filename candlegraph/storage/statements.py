@@ -244,6 +244,10 @@ class Statements:
     get_run_log: sql.Composed
     get_run_log_children: sql.Composed
     # the pipeline work queue
+    # continuous aggregates
+    chart_query_daily: sql.Composed
+    refresh_token_daily: sql.Composed
+    aggregate_status: sql.Composed
     get_finished_runs_since: sql.Composed
     enqueue_run: sql.Composed
     claim_queued_run: sql.Composed
@@ -777,6 +781,70 @@ def statements_for(schema: str) -> Statements:
         """
     ).format(ns=ns)
 
+    # --- continuous aggregates (stage 2, step 6) ----------------------------
+    # The same candles as `chart_query`, read from `token_daily` instead of
+    # re-aggregating the hourly rows. Only valid when the requested interval
+    # is a whole number of days — a four-hour candle cannot be built from
+    # daily buckets, and `fetch_chart_data` is what decides.
+    #
+    # Note what the SELECT does and does not do:
+    #   * `first`/`last` over the daily opens and closes, so a week's open is
+    #     the first day's open and its close the last day's close;
+    #   * averages recomputed as SUM/COUNT. Averaging the daily averages would
+    #     weight a four-hour day the same as a full one, and missing hours are
+    #     normal here (invariant 19);
+    #   * `NULLIF(..., 0)` so a bucket with no priced hour is NULL, not a
+    #     division by zero and not a zero (invariant 11).
+    #
+    # `opens`/`closes` come back as one-element arrays so the row has the same
+    # shape as `chart_query`'s and `format_chart_data` needs no branch.
+    chart_query_daily = sql.SQL(
+        """
+        SELECT
+            to_timestamp(time_bucket(%(interval)s::bigint, day)) AS interval_start,
+            ARRAY[first(day_open, day)] AS opens,
+            ARRAY[last(day_close, day)] AS closes,
+            MAX(day_high) AS max_high,
+            MIN(day_low) AS min_low,
+            SUM(price_sum) / NULLIF(SUM(price_hours), 0) AS avg_price_usd,
+            SUM(volume) AS total_volume,
+            SUM(volume_usd) AS total_volume_usd,
+            SUM(fees_usd) AS total_fees_usd,
+            SUM(tvl_sum) / NULLIF(SUM(tvl_hours), 0) AS avg_tvl_usd,
+            SUM(hours) AS hours
+        FROM {ns}.token_daily
+        WHERE token_id = %(token_id)s
+          AND (%(start_unix)s::bigint IS NULL OR day >= %(start_unix)s)
+          AND (%(end_unix)s::bigint IS NULL OR day < %(end_unix)s)
+        GROUP BY time_bucket(%(interval)s::bigint, day)
+        ORDER BY interval_start
+        """
+    ).format(ns=ns)
+
+    # The whole range, every time. It is invalidation-driven, so this costs
+    # 0.8 ms when nothing changed; a window would cost the same for the same
+    # change and would leave a backfill deeper than the window silently stale
+    # (invariant 13 rewrites any hour). Cannot run inside a transaction block,
+    # which is why `refresh_aggregate` uses an autocommit connection.
+    # The view goes in as a string literal that Postgres casts to `regclass`.
+    # A bare qualified identifier parses as a column reference and fails with
+    # "missing FROM-clause entry for table".
+    refresh_token_daily = sql.SQL("CALL refresh_continuous_aggregate({view}, NULL, NULL)").format(
+        view=sql.Literal(f"{schema}.token_daily")
+    )
+
+    aggregate_status = sql.SQL(
+        """
+        SELECT
+            COUNT(*) AS buckets,
+            COUNT(DISTINCT token_id) AS tokens,
+            MIN(day) AS first_day,
+            MAX(day) AS last_day,
+            SUM(hours) AS hours
+        FROM {ns}.token_daily
+        """
+    ).format(ns=ns)
+
     # --- the pipeline work queue (stage 2, step 5) --------------------------
     # The dispatcher's view of "what finished recently". There is no event
     # table: the ledger already records every finished run with its outcome,
@@ -932,6 +1000,9 @@ def statements_for(schema: str) -> Statements:
         get_latest_pool_timestamps=get_latest_pool_timestamps,
         get_token_metadata=get_token_metadata,
         chart_query=chart_query,
+        chart_query_daily=chart_query_daily,
+        refresh_token_daily=refresh_token_daily,
+        aggregate_status=aggregate_status,
         get_tracked_pools=get_tracked_pools,
         get_pools_for_tokens=get_pools_for_tokens,
         start_ingest_run=start_ingest_run,

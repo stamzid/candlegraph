@@ -1,7 +1,9 @@
 """The GraphQL surface: token metadata plus OHLC candles, and signal explanations.
 
 Candles of any width are built at read time by grouping the stored hourly rows
-into ``timeUnitInHours`` buckets. The explanation fields live in
+into ``timeUnitInHours`` buckets — or, when the width is a whole number of
+days, by re-bucketing the ``token_daily`` continuous aggregate, which holds
+the same numbers a day at a time. The explanation fields live in
 :mod:`candlegraph.api.explanations` and are merged into the root types here.
 """
 
@@ -13,6 +15,7 @@ import strawberry
 
 from candlegraph.api.explanations import ExplanationQuery, Mutation
 from candlegraph.api.formatting import empty_chart_data, format_chart_data
+from candlegraph.settings import Settings, get_settings
 from candlegraph.storage import DatabaseManager, get_db
 from candlegraph.tokens import TokenRegistry, get_token_registry
 
@@ -26,6 +29,7 @@ def fetch_chart_data(
     registry: TokenRegistry | None = None,
     start_unix: int | None = None,
     end_unix: int | None = None,
+    settings: Settings | None = None,
 ) -> list[dict[str, Any]]:
     """Aggregated buckets for a token, or an empty list for an unknown symbol.
 
@@ -39,13 +43,35 @@ def fetch_chart_data(
         return []
 
     db = db or get_db()
+    interval = time_unit_in_hours * 3600
     params = {
-        "interval": time_unit_in_hours * 3600,
+        "interval": interval,
         "token_id": token.address,
         "start_unix": start_unix,
         "end_unix": end_unix,
     }
-    return db.fetch_all(db.sql.chart_query, params)
+    return db.fetch_all(chart_statement(db, interval, settings), params)
+
+
+DAY_SECONDS = 86_400
+
+
+def chart_statement(db: DatabaseManager, interval: int, settings: Settings | None = None) -> Any:
+    """The candle query to use for ``interval``: the aggregate, or the hourly rows.
+
+    `token_daily` holds one bucket per day, so it can answer any interval
+    that is a whole number of days by re-bucketing, and nothing finer. A
+    four-hour candle has to come from the hourly rows.
+
+    Both statements return the same columns and — the part that matters —
+    the same numbers; `test_the_aggregate_and_the_raw_path_agree` compares
+    them bucket by bucket over the same data. `AGGREGATES_ENABLED=false`
+    pins every request to the hourly path if that is ever in doubt.
+    """
+    settings = settings or get_settings()
+    if settings.aggregates_enabled and interval >= DAY_SECONDS and interval % DAY_SECONDS == 0:
+        return db.sql.chart_query_daily
+    return db.sql.chart_query
 
 
 def fetch_token_metadata(
