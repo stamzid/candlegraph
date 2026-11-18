@@ -142,7 +142,7 @@ class Job:
     run: Callable[[JobContext], RunOutcome]  # the job body
     schedule: Every  # which setting holds the interval; 0 disables
     role: Literal["worker", "agents"]  # which process runs it by default
-    writes: frozenset[str]  # "market_data", "ledger", "knowledge", "cache", "reports"
+    writes: frozenset[str]  # "market_data", "ledger", "knowledge", "cache", "reports", "signals"
     description: str  # one line, printed by `candlegraph jobs`
     ledger: LedgerFactory  # builds the hook that writes this job's ledger row
 ```
@@ -150,6 +150,13 @@ class Job:
 - **Interval settings keep their existing names** (`DATA_POLL_INTERVAL`,
   `OBSERVER_INTERVAL`, `JANITOR_INTERVAL`). Renaming them would touch
   every `.env`, compose and the docs for no benefit.
+- **Not every job has a clock.** Stage 2's pipeline steps are registered
+  jobs with `schedule=NEVER` and `Job.scheduled` False; `select(role=…)`
+  returns only the scheduled ones, so no process is handed a step on a
+  timer. Running `analyse` an hour after `validate` failed is the thing
+  pipelines exist to stop, and a timer for a step would reintroduce it.
+  Distinct from an interval of `0`, which is a scheduled job a deployment
+  has turned off — that one is still its process's to host.
 - **`writes` is checked by a test.** Only `ingest` may declare
   `market_data` (invariant 21).
 - **`role` is a default.** `--jobs` on `worker` or `agents` picks an

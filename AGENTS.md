@@ -36,7 +36,7 @@ a target, and never let CI run something that is not one either.
 | Score the estimators against held-out real hours | `make fill-evaluate` (`candlegraph fill --evaluate [--gap-hours N]`) |
 | Recent ingest runs; every job, or one job, from `run_log` (a pipeline's steps are listed under it) | `make runs`, `make runs ARGS='--all'`, `make runs ARGS='--job observer'` |
 | The registered jobs: schedule, process role, write surface | `make jobs` (`candlegraph jobs`) |
-| Run a pipeline: several registered jobs as one recorded unit | `make run ARGS='pipelines/example.yaml'` (`candlegraph run SPEC... `; a spec can be named instead of pathed) |
+| Run a pipeline: several registered jobs as one recorded unit | `make run ARGS='pipelines/hourly.yaml'` (`candlegraph run SPEC...`; a spec can be named instead of pathed). `daily.yaml` **spends search credits**; `hourly.yaml` and `example.yaml` do not |
 | Validate every committed spec, running nothing | `make check-pipelines` (`candlegraph run --check pipelines/*.yaml`) |
 | The API locally, beside a running stack (8000 is usually the stack's) | `make serve ARGS='--port auto'` (`candlegraph serve [--host H] [--port N\|auto]`; a busy port is refused with free suggestions) |
 | Sync assets and aliases from `tokens.yaml` | `make sync-assets` (in the stack) or `candlegraph knowledge sync-assets` |
@@ -148,6 +148,9 @@ candlegraph/
     runs.py            Run, Outcome, RunOutcome, run_job — every run passes through it; never raises.
     pipelines.py       The YAML spec, the loader (whole file refused, with the line) and the executor.
                        A spec becomes a Job, so a pipeline run is an ordinary run and each step is a child of it.
+    params.py          The typed params a spec may set per job. No domain imports: the registry imports this.
+    steps.py           The five step bodies (validate, analyse, signal, explain, embed). Adapters only — no arithmetic, no SQL.
+    errors.py          classify(exc): transient, rate-limited or permanent. The one place "retry?" is answered.
     hooks.py           RunHook, the log hook and the three ledger hooks that write every ingest_run/agent_run/run row.
     ledger.py          The generic `run` table: open_run / close_run, for jobs with no ledger of their own.
     stages.py          StageRecord, staged() for graph nodes, timed_stage() for plain code. agents/stages.py re-exports it.
@@ -387,13 +390,14 @@ unfalsifiable.
 
 ### In progress
 
-**Stage 2, the harness** — planned 2026-11-15; steps 1–3 of 7 done, step
-4 next. The plan is `docs/rollout/ROLLOUT.md`: the dashboard pages are
-split, the pipelines design is written and reviewed, and the spec, loader
-and `candlegraph run` are built (2026-11-17) — one example pipeline runs
-through `run_job` with its step as a child run. Still ahead: the hourly
-pipeline's jobs (step 4), the queue and event triggers (step 5), traces
-and continuous aggregates (step 6). The
+**Stage 2, the harness** — planned 2026-11-15; steps 1–4 of 7 done, step
+5 next. The plan is `docs/rollout/ROLLOUT.md`: the dashboard pages are
+split, the pipelines design is written and reviewed, and the spec, loader,
+`candlegraph run`, the five step jobs and `pipelines/hourly.yaml` are
+built (2026-11-17) — the stage's exit criterion now runs, with retries and
+a deadline. Still ahead: the queue and event triggers (step 5), traces and
+continuous aggregates (step 6), and the per-step model picker, which was
+deferred out of step 4 into its own small rollout. The
 pre-work it builds on is archived at
 `docs/rollout/archive/2026-11-11-harness-prework.md`. Two designs wait
 beside it: the chat-model seam (`docs/harness/models/`) and the Tavily

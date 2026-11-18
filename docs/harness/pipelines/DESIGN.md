@@ -1,13 +1,14 @@
 # Pipelines: running several jobs as one reliable unit
 
-**Status:** partly implemented — 2026-11-17. Rollout step 3 built the
-spec, the loader and the executor: §5 in full, §6.1 boxes 4–6, §6.3,
-§6.4 and §6.6, and the `idempotent` contract of §6.2. **Not built yet:**
-the queue, leases, resume and retries (§6.5, §7.2–7.5 — moved to step 5,
-see §15), events and the outbox (§7.7), circuit breakers (§7.6), the
-model picker (§9), metrics and traces (§8.3). Nothing in §8.2 is
-deployed. **Code:** `candlegraph/harness/pipelines.py`, `pipelines/`,
-`candlegraph run`.
+**Status:** partly implemented — 2026-11-17. Rollout steps 3 and 4 built
+the spec, the loader, the executor, the five step jobs and the hourly and
+daily pipelines: §5 in full, §6.1 boxes 4–6, §6.2, §6.3, §6.4, §6.5 and
+§6.6, and the cooperative half of §7.5. **Not built yet:** the queue,
+leases and resume (§7.2–7.4 — moved to step 5, see §15), events and the
+outbox (§7.7), circuit breakers (§7.6), the model picker (§9), metrics
+and traces (§8.3), and the enforced half of §7.5. Nothing in §8.2 is
+deployed. **Code:** `candlegraph/harness/pipelines.py`, `steps.py`,
+`params.py`, `errors.py`, `pipelines/`, `candlegraph run`.
 **Builds on:** [`../runner/DESIGN.md`](../runner/DESIGN.md) — jobs,
 `run_job`, the three ledgers, `parent_run_id`. All of it stays.
 **Related:** [`../models/DESIGN.md`](../models/DESIGN.md) (how a step gets
@@ -227,6 +228,12 @@ twice with the same inputs leaves the same state as running it once.
 a test fails if a job is marked idempotent without a test that runs it
 twice and compares state. This turns "retrying is safe" from a hope into
 a checked property.
+
+*Built as written.* `tests/unit/harness/test_jobs.py::IDEMPOTENCE_PROOFS`
+maps each declaring job to the run-twice test that shows it, and fails if
+the two sets differ. `ingest` is deliberately **not** declared: it is
+idempotent in fact, but a pipeline reacts to it and never runs it (§7.1),
+so declaring it would buy a proof nothing relies on.
 
 **Why this matters more than any retry logic:** with idempotent steps,
 the system can be *at-least-once* everywhere — re-deliver events, re-run
@@ -721,7 +728,7 @@ Maps onto `docs/rollout/ROLLOUT.md` steps 3–6:
 | Step | Delivers from this document |
 |---|---|
 | 3 | spec + loader + `run --check` (§5); plain-loop executor; one example pipeline; `idempotent` on `Job` — **done 2026-11-17** |
-| 4 | `validate`, `analyse`, `signal`, `embed` (and `explain`, with `--no-search`) jobs; `pipelines/hourly.yaml`; retries and timeouts (§6.5, §7.5); per-step model resolution + `model_choice` + the Pipelines page picker |
+| 4 | `validate`, `analyse`, `signal`, `embed` and `explain` jobs; `pipelines/hourly.yaml` and `daily.yaml`; retries and the cooperative half of timeouts (§6.5, §7.5) — **done 2026-11-17**. The model picker moved out; see below |
 | 5 | queue + claim + lease + resume (§7.2–7.4); outbox + dispatcher + event triggers (§7.7); circuit breaker (§7.6) |
 | 6 | OpenTelemetry metrics and traces (§8.3); production deployment notes (§8.2) |
 
@@ -742,10 +749,27 @@ the next step does not assume they are finished:
 - **Loop detection** (§5.2) refuses an event trigger naming *its own*
   pipeline. A cycle through a second pipeline needs every spec loaded at
   once, which is the dispatcher's view of the world, not a single file's.
-- **Retries and timeouts** (§6.5, §7.5) are parsed, validated and carried
-  on the spec, and ignored by the executor. The format is fixed from now,
-  which is the part that is expensive to change later; the behaviour
-  lands with `harness.errors.classify` in step 4.
+- ~~**Retries and timeouts** (§6.5, §7.5) are parsed and ignored.~~
+  *Applied in step 4*, with two refinements worth recording:
+  **only a step that raised is retried**, because a job that *returned*
+  `failed` has graded itself and re-running it would overrule a decision
+  it was better placed to make (`fetch_news` does this for a rate limit
+  it already backed off from); and **an unknown exception type is
+  permanent**, because a wrongly-permanent error fails once and visibly
+  while a wrongly-transient one burns the deadline three times and then
+  fails anyway, with the real message buried behind two retries.
+  Timeouts are cooperative only, as §7.5 says local should be — the
+  pipeline deadline is enforced between steps, and the step bodies check
+  their own between tokens. `observer` and `fetch_news` do not check and
+  run on; the hard kill is production's, and is not built.
+
+**The model picker moved out of step 4** (decided 2026-11-17). §9's
+per-step model choice, the `model_choice` table and the Pipelines page
+picker are a migration plus a UI page plus the resolution order from
+[`../models/DESIGN.md`](../models/DESIGN.md), which is itself unbuilt.
+None of it is in stage 2's exit criterion, and bundling it would have
+made the step that *is* the exit criterion hard to review. It wants its
+own small rollout after step 7, together with the models design.
 
 Each step ships behind its own tests; none changes compose until step 6,
 and that change is an optional production overlay, not the default

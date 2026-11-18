@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -756,3 +758,309 @@ def test_a_spec_is_frozen_once_loaded(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError):
         spec.name = "other"  # type: ignore[misc]
+
+
+# --- retries and timeouts (design §6.5, §7.5) ---------------------------------
+#
+# The clock, the sleep and the jitter are injected, so these assert the
+# *decision* — how many attempts, how long between — without waiting for it.
+
+
+class FakeClock:
+    """A clock that only moves when a test moves it, or when a step sleeps."""
+
+    def __init__(self, start: datetime | None = None) -> None:
+        self.now = start or datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
+        self.slept: list[float] = []
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += timedelta(seconds=seconds)
+
+
+def full_jitter(_low: float, high: float) -> float:
+    """The worst case of the jittered backoff, so the delay is predictable."""
+    return high
+
+
+def flaky(fails: int, exc: Exception) -> Callable[[JobContext], RunOutcome]:
+    """A body that raises ``exc`` the first ``fails`` times, then succeeds."""
+    attempts: list[int] = []
+
+    def body(ctx: JobContext) -> RunOutcome:
+        attempts.append(int(ctx.params.get("attempt", 0)))
+        if len(attempts) <= fails:
+            raise exc
+        return RunOutcome(outcome=Outcome.SUCCEEDED, counts={"attempts": len(attempts)})
+
+    body.attempts = attempts  # type: ignore[attr-defined]
+    return body
+
+
+def retrying(*steps: str, attempts: int = 3, **extra: Any) -> PipelineSpec:
+    return PipelineSpec.model_validate(
+        {
+            "name": "test_pipeline",
+            "defaults": {"retry": {"attempts": attempts, "backoff": 10, "max_backoff": 60}},
+            "steps": [{"id": f"s{i}", "job": job} for i, job in enumerate(steps)],
+            **extra,
+        }
+    )
+
+
+def with_clock(clock: FakeClock) -> dict[str, Any]:
+    return {"clock": clock, "sleep": clock.sleep, "jitter": full_jitter}
+
+
+def test_a_transient_failure_is_tried_again(jobs: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    body = flaky(1, ConnectionError("the network blinked"))
+    monkeypatch.setitem(JOBS, "flaky", fake_job("flaky", body))
+    clock = FakeClock()
+
+    run = run_pipeline(retrying("flaky"), make_settings(), db=FakeDatabase(), params=with_clock(clock))
+
+    assert run.outcome is Outcome.SUCCEEDED
+    step = steps_of(run)[0]
+    assert step.attempts == 2
+    # Exponential from the configured backoff: 10s before the second attempt.
+    assert clock.slept == [10.0]
+
+
+def test_each_attempt_is_told_which_one_it_is(jobs: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    body = flaky(2, ConnectionError("down"))
+    monkeypatch.setitem(JOBS, "flaky", fake_job("flaky", body))
+
+    run_pipeline(retrying("flaky"), make_settings(), db=FakeDatabase(), params=with_clock(FakeClock()))
+
+    assert body.attempts == [1, 2, 3]  # type: ignore[attr-defined]
+
+
+def test_every_attempt_is_its_own_child_run(jobs: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retries are visible in run_log rather than hidden inside one row."""
+    monkeypatch.setitem(JOBS, "flaky", fake_job("flaky", flaky(1, ConnectionError("down"))))
+    db = FakeDatabase()
+
+    run_pipeline(retrying("flaky"), make_settings(), db=db, params=with_clock(FakeClock()))
+
+    opened = [params for label, params in db.executed if label == "open_run" and params]
+    assert [p["job"] for p in opened] == ["test_pipeline", "flaky", "flaky"]
+    assert len({p["run_id"] for p in opened}) == 3
+
+
+def test_the_backoff_doubles_and_is_capped(jobs: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(JOBS, "flaky", fake_job("flaky", flaky(99, ConnectionError("down"))))
+    clock = FakeClock()
+
+    run_pipeline(retrying("flaky", attempts=5), make_settings(), db=FakeDatabase(), params=with_clock(clock))
+
+    # 10, 20, 40, then capped at max_backoff=60 rather than 80.
+    assert clock.slept == [10.0, 20.0, 40.0, 60.0]
+
+
+def test_a_permanent_failure_is_not_retried(jobs: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retrying a bad parameter spends the deadline to fail the same way."""
+    monkeypatch.setitem(JOBS, "flaky", fake_job("flaky", flaky(99, ValueError("window must be > 1"))))
+    clock = FakeClock()
+
+    run = run_pipeline(retrying("flaky"), make_settings(), db=FakeDatabase(), params=with_clock(clock))
+
+    assert run.outcome is Outcome.FAILED
+    step = steps_of(run)[0]
+    assert step.attempts == 1
+    assert step.error_class == "permanent"
+    assert clock.slept == []
+
+
+def test_a_step_that_returns_failed_is_not_retried(jobs: None) -> None:
+    """The job graded itself; running it again would overrule that.
+
+    `fetch_news` does exactly this for a rate limit it has already backed off
+    from — a second attempt would spend another refusal.
+    """
+    clock = FakeClock()
+
+    run = run_pipeline(retrying("failed"), make_settings(), db=FakeDatabase(), params=with_clock(clock))
+
+    assert run.outcome is Outcome.FAILED
+    assert steps_of(run)[0].attempts == 1
+    assert clock.slept == []
+
+
+def test_retries_stop_at_the_configured_limit(jobs: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(JOBS, "flaky", fake_job("flaky", flaky(99, ConnectionError("down"))))
+
+    run = run_pipeline(
+        retrying("flaky", attempts=2), make_settings(), db=FakeDatabase(), params=with_clock(FakeClock())
+    )
+
+    assert run.outcome is Outcome.FAILED
+    assert steps_of(run)[0].attempts == 2
+    assert steps_of(run)[0].error_class == "transient"
+
+
+def test_a_step_gets_the_earlier_of_its_timeout_and_the_run_s(
+    jobs: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A step may not grant itself more time than the pipeline has left."""
+    seen: list[Any] = []
+
+    def record(ctx: JobContext) -> RunOutcome:
+        seen.append(ctx.params["deadline"])
+        return RunOutcome(outcome=Outcome.SUCCEEDED)
+
+    monkeypatch.setitem(JOBS, "recorder", fake_job("recorder", record))
+    clock = FakeClock()
+    spec = PipelineSpec.model_validate(
+        {
+            "name": "test_pipeline",
+            "deadline": 60,
+            "steps": [
+                {"id": "short", "job": "recorder", "timeout": 10},
+                {"id": "long", "job": "recorder", "timeout": 600},
+            ],
+        }
+    )
+
+    run = run_pipeline(spec, make_settings(), db=FakeDatabase(), params=with_clock(clock))
+
+    assert run.outcome is Outcome.SUCCEEDED
+    # Its own 10s for the first; the run's remaining time for the second,
+    # whose 600s timeout is longer than the whole pipeline is allowed.
+    assert seen[0] == clock.now + timedelta(seconds=10)
+    assert seen[1] == clock.now + timedelta(seconds=60)
+
+
+def test_a_step_with_no_timeout_anywhere_is_given_no_deadline(
+    jobs: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[Any] = []
+
+    def record(ctx: JobContext) -> RunOutcome:
+        seen.append(ctx.params["deadline"])
+        return RunOutcome(outcome=Outcome.SUCCEEDED)
+
+    monkeypatch.setitem(JOBS, "recorder", fake_job("recorder", record))
+
+    run_pipeline(spec_of("recorder"), make_settings(), db=FakeDatabase())
+
+    assert seen == [None]
+
+
+def test_the_run_deadline_skips_the_steps_that_have_not_started(
+    jobs: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checked between steps: nothing in flight is interrupted."""
+
+    def slow(ctx: JobContext) -> RunOutcome:
+        clock.now += timedelta(seconds=120)
+        return RunOutcome(outcome=Outcome.SUCCEEDED)
+
+    clock = FakeClock()
+    monkeypatch.setitem(JOBS, "slow", fake_job("slow", slow))
+    spec = PipelineSpec.model_validate(
+        {
+            "name": "test_pipeline",
+            "deadline": 60,
+            "steps": [{"id": "first", "job": "slow"}, {"id": "second", "job": "ok"}],
+        }
+    )
+
+    run = run_pipeline(spec, make_settings(), db=FakeDatabase(), params=with_clock(clock))
+
+    assert run.outcome is Outcome.FAILED
+    results = steps_of(run)
+    assert results[0].status == "succeeded"  # it was not cut off mid-run
+    assert results[1].status == "skipped"
+
+
+def test_a_retry_that_would_sleep_past_the_deadline_does_not(
+    jobs: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sleeping past the deadline only delays the same failure."""
+    monkeypatch.setitem(JOBS, "flaky", fake_job("flaky", flaky(99, ConnectionError("down"))))
+    clock = FakeClock()
+
+    run = run_pipeline(
+        retrying("flaky", attempts=5, deadline=5),
+        make_settings(),
+        db=FakeDatabase(),
+        params=with_clock(clock),
+    )
+
+    assert run.outcome is Outcome.FAILED
+    assert clock.slept == []
+    assert steps_of(run)[0].attempts == 1
+
+
+# --- a step sees its params as its job defines them, not as they were typed ----
+
+
+def test_a_step_receives_the_validated_params_not_the_written_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`strategies: all` is the empty tuple meaning "every one", not three letters.
+
+    The loader validates these for the error message; this is the call whose
+    result is used. Passing the raw string through gave the body three
+    one-letter strategy names and a step that failed for every token.
+    """
+    seen: list[Any] = []
+
+    def record(ctx: JobContext) -> RunOutcome:
+        seen.append(ctx.params["strategies"])
+        return RunOutcome(outcome=Outcome.SUCCEEDED)
+
+    monkeypatch.setitem(JOBS, "signal", replace(JOBS["signal"], run=record))
+    spec = PipelineSpec.model_validate(
+        {"name": "p", "steps": [{"id": "s", "job": "signal", "params": {"strategies": "all"}}]}
+    )
+
+    run_pipeline(spec, make_settings(), db=FakeDatabase())
+
+    assert seen == [()]
+
+
+def test_a_step_receives_its_job_s_defaults_for_params_it_did_not_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """So a body never has to ask "was this omitted or set to the default?"."""
+    seen: list[Any] = []
+
+    def record(ctx: JobContext) -> RunOutcome:
+        seen.append(dict(ctx.params))
+        return RunOutcome(outcome=Outcome.SUCCEEDED)
+
+    monkeypatch.setitem(JOBS, "analyse", replace(JOBS["analyse"], run=record))
+    spec = PipelineSpec.model_validate({"name": "p", "steps": [{"id": "s", "job": "analyse"}]})
+
+    run_pipeline(spec, make_settings(), db=FakeDatabase())
+
+    assert seen[0]["window"] == 24  # AnalyseParams' default, not absent
+    assert seen[0]["symbols"] == ()
+
+
+def test_a_reserved_param_cannot_be_smuggled_past_the_loader(jobs: None) -> None:
+    """`model_validate` bypasses the loader, so the executor strips them too."""
+    seen: list[Any] = []
+
+    def record(ctx: JobContext) -> RunOutcome:
+        seen.append(ctx.params["deadline"])
+        return RunOutcome(outcome=Outcome.SUCCEEDED)
+
+    JOBS["recorder"] = fake_job("recorder", record, params=_Params)
+    try:
+        spec = PipelineSpec.model_validate(
+            {
+                "name": "p",
+                "steps": [{"id": "s", "job": "recorder", "params": {"deadline": "never"}}],
+            }
+        )
+        run_pipeline(spec, make_settings(), db=FakeDatabase())
+    finally:
+        del JOBS["recorder"]
+
+    # The executor's own value (None here, no timeout set), not the spec's.
+    assert seen == [None]

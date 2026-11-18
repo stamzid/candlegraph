@@ -37,7 +37,7 @@ between steps, if needed sooner):
 | 1 | Split the four large dashboard pages; draw the ingest stage strip | S | — | done 2026-11-15 |
 | 2 | Write the pipelines design (no code) | S | — | done 2026-11-16 — reviewed, five questions answered |
 | 3 | Pipeline spec, loader and `candlegraph run` for one step | M | 2 | done 2026-11-17 |
-| 4 | The hourly pipeline end to end: validate, analyse, signal, embed as jobs | M | 3 | todo |
+| 4 | The hourly pipeline end to end: validate, analyse, signal, embed as jobs | M | 3 | done 2026-11-17 |
 | 5 | Events: run finished → next thing starts | M | 3 | todo |
 | 6 | Traces (OpenTelemetry) and continuous aggregates | M | 4 | todo |
 | 7 | Closeout | S | 1–6 | todo |
@@ -305,7 +305,71 @@ pipeline before `signal` by default.
 steps as one parent run with child runs; `candlegraph jobs` lists the
 new jobs; `make check` green.
 
-**Outcome.** Not started.
+**Outcome.** Done 2026-11-17.
+
+- **Five jobs, not four.** `validate`, `analyse`, `signal` and `embed` as
+  planned, plus `explain` — it is a thin body over `explain_symbol` and
+  §16 answer 2 had already settled how it must behave. Their bodies are
+  in `candlegraph/harness/steps.py`, which says why they live together:
+  each is an adapter with no arithmetic and no SQL of its own, and the
+  alternative was a `JobContext` inside `analytics/`, which only reads
+  the database and only through `prices.py` (invariant 18).
+- **`pipelines/hourly.yaml`** — validate → analyse → signal → explain,
+  under a 15-minute deadline matching the SLO. **`pipelines/daily.yaml`**
+  — fetch news → embed, the one pipeline that spends money. Ingest is a
+  step of neither: the loader refuses a job that writes market data.
+- **Retries and timeouts are applied, not just parsed.** Step 3 carried
+  them and ignored them, which made `timeout: 2m` a quiet lie.
+  `harness/errors.py::classify` decides in one place whether another
+  attempt could help; backoff is exponential with full jitter; every
+  attempt is its own child run, so retries are visible in `run_log`
+  rather than hidden in one row.
+- **Only a step that *raised* is retried.** A job that *returned* `failed`
+  has graded itself — `fetch_news` does this for a rate limit it already
+  backed off from — and re-running it would overrule a decision the job
+  was better placed to make. An unknown exception type is **permanent**:
+  a wrongly-permanent error fails once, visibly, while a wrongly-transient
+  one burns the deadline three times and then fails anyway.
+- **The deadline is enforced between steps; per-step timeouts are
+  cooperative.** The five new bodies check their deadline between tokens;
+  `observer` and `fetch_news` do not yet, and run on. Python cannot safely
+  kill a thread, and §7.5 puts the hard kill in production, so saying so
+  beats pretending.
+- **`Job.scheduled` splits the registry in two.** A pipeline step has no
+  interval setting, and `select(role=…)` now returns only the scheduled
+  jobs — otherwise the agents process would have been handed `analyse` on
+  a timer, which is exactly what this stage exists to stop. `candlegraph
+  jobs` prints "pipeline step only" rather than "disabled", because they
+  are different things.
+- **A real bug the integration test caught: the executor passed the spec's
+  *raw* params.** The loader validated them for the message and threw the
+  result away, so `strategies: all` reached the body as the three
+  characters `a`, `l`, `l` — three unknown strategy names, and a step that
+  failed for every token. `step_params()` now validates at execution too,
+  which also covers a spec built in Python that never saw the loader. Two
+  unit tests pin it.
+- **The causal rule the step was asked to prove.** `signal` reads only
+  through `load_symbol_series`, and the test that matters compares two
+  runs over the same gap where the gap runs to the end of the shorter
+  window — so its right endpoint exists only in the longer one. Under
+  `ffill` both runs score the gap's bars identically; under
+  `interpolate` they would not (verified: 141/141/141 against
+  142/143/144). A second test asserts the fill cache is never read on the
+  way to a signal at all.
+- Two smaller decisions recorded in the code: strategy names are checked
+  at **load** time (code, the same everywhere) and symbols at **run**
+  time (deployment config, so a spec valid in CI must not fail in a
+  deployment tracking a different set); and `explain` has no `search`
+  parameter at all, so no pipeline can turn spending on.
+- **Deferred from design §15's step 4, deliberately:** the per-step model
+  picker, the `model_choice` table and the Pipelines dashboard page.
+  That is a migration plus a UI page plus the resolution order from
+  `../harness/models/DESIGN.md`, which is itself unbuilt — a separate
+  seam, and none of it is in this stage's exit criterion. It wants its
+  own small rollout after step 7.
+- `make check` green (1854 passed, 11 e2e skips, integration ran), and
+  verified on a real stack: `make run ARGS='pipelines/hourly.yaml'` runs
+  four steps as one family in `run_log`.
 
 ---
 

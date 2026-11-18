@@ -533,12 +533,19 @@ def _worker(settings: Settings, names: str | None = None) -> int:
 def _jobs(settings: Settings) -> int:
     from candlegraph.harness.jobs import JOBS
 
+    def schedule_of(job: Any) -> str:
+        # A pipeline step is not "disabled" — it has no clock at all, and
+        # runs when the pipeline that orders it runs.
+        if not job.scheduled:
+            return "pipeline step only"
+        seconds = job.schedule.seconds(settings)
+        return f"{job.interval_setting.upper()}={seconds}" + ("" if seconds > 0 else " (disabled)")
+
     rows = [
         (
             job.name,
             job.role,
-            f"{job.interval_setting.upper()}={job.schedule.seconds(settings)}"
-            + ("" if job.schedule.seconds(settings) > 0 else " (disabled)"),
+            schedule_of(job),
             ",".join(sorted(job.writes)),
             job.description,
         )

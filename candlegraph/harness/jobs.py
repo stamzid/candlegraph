@@ -21,6 +21,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel
 
+from candlegraph.harness.params import (
+    AnalyseParams,
+    EmbedParams,
+    ExplainParams,
+    SignalParams,
+    ValidateParams,
+)
 from candlegraph.harness.runs import Outcome, Run, RunOutcome
 from candlegraph.settings import Settings
 
@@ -32,7 +39,7 @@ if TYPE_CHECKING:
 
 Role = Literal["worker", "agents"]
 ROLES: tuple[Role, ...] = ("worker", "agents")
-WRITE_SURFACES = frozenset({"market_data", "ledger", "knowledge", "cache", "reports"})
+WRITE_SURFACES = frozenset({"market_data", "ledger", "knowledge", "cache", "reports", "signals"})
 
 # The setting name :data:`NEVER` stands in for. A pipeline job is built from a
 # spec rather than registered, so it has no interval setting to read; the
@@ -101,6 +108,17 @@ class Job:
         return self.schedule.setting
 
     @property
+    def scheduled(self) -> bool:
+        """Does this job run on a clock at all?
+
+        False for a pipeline step: it has no interval setting to read, and it
+        runs when the pipeline that orders it runs. Distinct from an interval
+        of ``0``, which means a scheduled job this deployment has turned off —
+        that one is still the process's to host.
+        """
+        return self.schedule.setting != NEVER_SETTING
+
+    @property
     def label(self) -> str:
         """The capitalised name the log lines have always used ("Ingest run failed…")."""
         return self.name.capitalize()
@@ -145,6 +163,41 @@ def _fetch_news(ctx: JobContext) -> RunOutcome:
     from candlegraph.knowledge.news import news_job_body
 
     return news_job_body(ctx)
+
+
+# The pipeline steps. Each body is an adapter over code that already exists;
+# `harness/steps.py` says why they live together rather than in their own
+# packages. Imported lazily like every other body (invariant 1).
+
+
+def _validate(ctx: JobContext) -> RunOutcome:
+    from candlegraph.harness.steps import validate_job_body
+
+    return validate_job_body(ctx)
+
+
+def _analyse(ctx: JobContext) -> RunOutcome:
+    from candlegraph.harness.steps import analyse_job_body
+
+    return analyse_job_body(ctx)
+
+
+def _signal(ctx: JobContext) -> RunOutcome:
+    from candlegraph.harness.steps import signal_job_body
+
+    return signal_job_body(ctx)
+
+
+def _explain(ctx: JobContext) -> RunOutcome:
+    from candlegraph.harness.steps import explain_job_body
+
+    return explain_job_body(ctx)
+
+
+def _embed(ctx: JobContext) -> RunOutcome:
+    from candlegraph.harness.steps import embed_job_body
+
+    return embed_job_body(ctx)
 
 
 def run_ledger(settings: Settings, db: DatabaseManager, params: Mapping[str, Any]) -> RunHook:
@@ -251,11 +304,69 @@ JOBS: dict[str, Job] = {
             writes=frozenset({"knowledge", "ledger"}),
             description="One budgeted news search per active token per UTC day",
             ledger=run_ledger,
-            # Idempotent by the (asset, UTC day) cache and the url_hash upsert,
-            # and it will be a step of the daily pipeline. Not declared yet:
-            # the declaration costs a run-twice proof, and that proof belongs
-            # with the step that needs it (rollout step 4).
-            idempotent=False,
+            # The (asset, UTC day) cache makes the second run of a day free,
+            # and documents upsert on url_hash. Proved by
+            # test_running_fetch_news_twice_writes_the_same_state.
+            idempotent=True,
+        ),
+        # --- the pipeline steps -----------------------------------------------
+        # None is scheduled on its own clock: a pipeline is what orders them,
+        # and running `analyse` an hour after `validate` failed is exactly
+        # what stage 2 exists to stop.
+        Job(
+            name="validate",
+            run=_validate,
+            schedule=NEVER,
+            role="agents",
+            writes=frozenset({"ledger"}),
+            description="Check stored coverage and row sanity before anything computes on it",
+            ledger=run_ledger,
+            idempotent=True,
+            params=ValidateParams,
+        ),
+        Job(
+            name="analyse",
+            run=_analyse,
+            schedule=NEVER,
+            role="agents",
+            writes=frozenset({"ledger"}),
+            description="Rolling statistics for the tracked tokens; stores nothing but the run",
+            ledger=run_ledger,
+            idempotent=True,
+            params=AnalyseParams,
+        ),
+        Job(
+            name="signal",
+            run=_signal,
+            schedule=NEVER,
+            role="agents",
+            writes=frozenset({"signals", "ledger"}),
+            description="Run every registered strategy over causal prices and store the signals",
+            ledger=run_ledger,
+            idempotent=True,
+            params=SignalParams,
+        ),
+        Job(
+            name="explain",
+            run=_explain,
+            schedule=NEVER,
+            role="agents",
+            writes=frozenset({"knowledge", "ledger"}),
+            description="Cited prose for the newest signals, from stored news only — never searches",
+            ledger=run_ledger,
+            idempotent=True,
+            params=ExplainParams,
+        ),
+        Job(
+            name="embed",
+            run=_embed,
+            schedule=NEVER,
+            role="agents",
+            writes=frozenset({"knowledge", "ledger"}),
+            description="Give pending chunks the active model's vector, bounded per run",
+            ledger=run_ledger,
+            idempotent=True,
+            params=EmbedParams,
         ),
     )
 }
@@ -263,6 +374,12 @@ JOBS: dict[str, Job] = {
 
 def select(role: Role | None = None, names: Iterable[str] | None = None) -> tuple[Job, ...]:
     """The jobs a process hosts: an explicit list of names, else every job of ``role``.
+
+    Selecting by role returns the **scheduled** jobs of that role only. A
+    pipeline step is not one: it has no clock, and handing it to the
+    scheduler would run `analyse` on its own timer, which is the thing stage
+    2 exists to stop. Naming a job explicitly still selects it, so a step can
+    be run on its own for debugging.
 
     Raises:
         ValueError: A name is not registered, or neither argument was given.
@@ -275,4 +392,4 @@ def select(role: Role | None = None, names: Iterable[str] | None = None) -> tupl
         return tuple(JOBS[name] for name in wanted)
     if role is None:
         raise ValueError("select() needs a role or a list of names")
-    return tuple(job for job in JOBS.values() if job.role == role)
+    return tuple(job for job in JOBS.values() if job.role == role and job.scheduled)

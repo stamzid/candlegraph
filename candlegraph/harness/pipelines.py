@@ -38,9 +38,12 @@ foreground ``candlegraph run`` needs.
 
 from __future__ import annotations
 
+import random
 import re
-from collections.abc import Iterator, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
@@ -55,6 +58,7 @@ from pydantic import (
     model_validator,
 )
 
+from candlegraph.harness.errors import ErrorClass, classify
 from candlegraph.harness.jobs import JOBS, NEVER, Job, JobContext, run_ledger
 from candlegraph.harness.runs import MANUAL, Outcome, Run, RunOutcome, run_job
 from candlegraph.harness.stages import StageHook, StageRecord, now_utc
@@ -73,9 +77,12 @@ OnPartial = Literal["continue", "stop"]
 # there and has no model behind it yet.
 MODEL_ROLES = ("agent", "knowledge", "analyst")
 
-# Params the executor supplies. A spec that sets one of these is refused:
-# `as_of` fixes the moment the whole run sees (§6.3), so a step may not move it.
-RESERVED_PARAMS = frozenset({"as_of"})
+# Params the executor supplies, which a spec may therefore not set. `as_of`
+# fixes the moment the whole run sees (§6.3); `deadline` and `attempt` are
+# what the executor is telling the step about its own retry and timeout, and
+# a step that could overwrite them could grant itself more time than the
+# pipeline has.
+RESERVED_PARAMS = frozenset({"as_of", "deadline", "attempt"})
 
 # Worst-first, so a pipeline's outcome is a max over its steps.
 _SEVERITY = {Outcome.SUCCEEDED: 0, Outcome.PARTIAL: 1, Outcome.FAILED: 2}
@@ -510,6 +517,10 @@ class StepResult:
     duration_seconds: float | None = None
     error: str | None = None
     counts: Mapping[str, int] = field(default_factory=dict)
+    attempts: int = 0
+    """How many times the step was run. Above 1 means a transient failure was retried."""
+    error_class: str | None = None
+    """Why it was or was not retried: ``transient``, ``rate_limited``, ``permanent``."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -520,6 +531,8 @@ class StepResult:
             "duration_seconds": self.duration_seconds,
             "error": self.error,
             "counts": dict(self.counts),
+            "attempts": self.attempts,
+            "error_class": self.error_class,
         }
 
 
@@ -595,25 +608,31 @@ def pipeline_job(spec: PipelineSpec) -> Job:
 
 def _run_steps(spec: PipelineSpec, ctx: JobContext) -> RunOutcome:
     """Run the steps in order, obeying §6.4. The body of the pipeline job."""
+    sleep = ctx.params.get("sleep") or time.sleep
+    jitter = ctx.params.get("jitter") or random.uniform
+    clock = ctx.params.get("clock") or now_utc
+    # From when the steps start, on the same clock the checks below read.
+    # Taking it from `ctx.now` would mix two time sources, and a test that
+    # injects a clock would measure the gap between them.
+    expires_at = clock() + timedelta(seconds=spec.deadline) if spec.deadline else None
+
     results: list[StepResult] = []
     contributions: list[Outcome] = []
     stopped_by: str | None = None
 
     for step in spec.steps:
+        if stopped_by is None and expires_at is not None and clock() >= expires_at:
+            # The deadline is the pipeline's, checked between steps: no step
+            # is interrupted, and the ones that have not started do not.
+            stopped_by = "deadline"
+            contributions.append(Outcome.FAILED)
         if stopped_by is not None:
             results.append(StepResult(id=step.id, job=step.job, status=SKIPPED))
             _stage(ctx, step, SKIPPED, {"job": step.job, "after": stopped_by})
             continue
 
-        child = run_job(
-            JOBS[step.job],
-            ctx.settings,
-            # Not "manual": a step ran because the pipeline did, and the
-            # pipeline knows why it did.
-            trigger=ctx.run.trigger,
-            params={"as_of": ctx.now, **step.params},
-            parent_run_id=ctx.run.run_id,
-            db=ctx.db,
+        child, attempts, error_class = _run_with_retries(
+            spec, step, ctx, expires_at=expires_at, sleep=sleep, jitter=jitter, clock=clock
         )
         outcome = child.outcome
         results.append(
@@ -625,10 +644,15 @@ def _run_steps(spec: PipelineSpec, ctx: JobContext) -> RunOutcome:
                 duration_seconds=child.duration_seconds,
                 error=(child.result.errors.get("__run__") if child.result else None),
                 counts=(child.result.counts if child.result else {}),
+                attempts=attempts,
+                error_class=error_class.value if error_class else None,
             )
         )
         contributions.append(step_contribution(outcome, step.on_failure))
-        _stage(ctx, step, _STAGE_STATUS[outcome], {"job": step.job, "run": child.run_id[:8]})
+        detail: dict[str, Any] = {"job": step.job, "run": child.run_id[:8]}
+        if attempts > 1:
+            detail["attempts"] = attempts
+        _stage(ctx, step, _STAGE_STATUS[outcome], detail)
         if not continues_after(outcome, step):
             stopped_by = step.id
 
@@ -662,6 +686,109 @@ def _run_steps(spec: PipelineSpec, ctx: JobContext) -> RunOutcome:
     )
 
 
+def _run_with_retries(
+    spec: PipelineSpec,
+    step: StepSpec,
+    ctx: JobContext,
+    *,
+    expires_at: datetime | None,
+    sleep: Callable[[float], None],
+    jitter: Callable[[float, float], float],
+    clock: Callable[[], datetime],
+) -> tuple[Run, int, ErrorClass | None]:
+    """Run one step, trying again while the failure is worth trying again.
+
+    **Only a step that raised is retried**, and only when
+    :func:`harness.errors.classify` says another attempt could help. A job
+    that *returned* ``failed`` has graded itself — the news fetch does this
+    for a rate limit it already backed off from — and running it again would
+    overrule a decision the job was in a better position to make.
+
+    Every attempt is its own ``run_job`` call, so every attempt is its own
+    ledger row with its own ``parent_run_id``; the step's record says how
+    many there were. Backoff is exponential with **full jitter**: without the
+    jitter, several steps that failed together retry together and fail
+    together again.
+
+    Returns:
+        The last attempt's run, how many attempts there were, and the class
+        of the final error (``None`` when it did not fail).
+    """
+    retry = spec.retry_for(step)
+    timeout = spec.timeout_for(step)
+    job = JOBS[step.job]
+    params = step_params(step)
+    error_class: ErrorClass | None = None
+
+    for attempt in range(1, retry.attempts + 1):
+        deadline = _step_deadline(timeout, expires_at, clock)
+        child = run_job(
+            job,
+            ctx.settings,
+            # Not "manual": a step ran because the pipeline did, and the
+            # pipeline knows why it did.
+            trigger=ctx.run.trigger,
+            params={"as_of": ctx.now, "deadline": deadline, "attempt": attempt, **params},
+            parent_run_id=ctx.run.run_id,
+            db=ctx.db,
+        )
+        if child.outcome is not Outcome.FAILED or child.exception is None:
+            return child, attempt, None
+        error_class = classify(child.exception)
+        if not error_class.retryable or attempt == retry.attempts:
+            return child, attempt, error_class
+
+        delay = jitter(0.0, min(retry.max_backoff, retry.backoff * (2 ** (attempt - 1))))
+        if expires_at is not None and clock() + timedelta(seconds=delay) >= expires_at:
+            # Sleeping past the deadline only delays the same failure.
+            return child, attempt, error_class
+        service_logger.warning(
+            "Pipeline %s step %s failed (%s); attempt %d of %d in %.1fs",
+            spec.name,
+            step.id,
+            error_class.value,
+            attempt,
+            retry.attempts,
+            delay,
+        )
+        sleep(delay)
+
+    raise AssertionError("unreachable: the loop returns on the last attempt")  # pragma: no cover
+
+
+def step_params(step: StepSpec) -> dict[str, Any]:
+    """The step's params as its job's model defines them, not as they were typed.
+
+    The loader validates these too, but for the *message* — it needs the line
+    number. This is the call whose **result** is used, because a validated
+    value is often not the written one: ``strategies: all`` is the empty
+    tuple that means "every registered strategy", and handing the body the
+    raw string instead gives it three one-letter strategy names. Doing it
+    here rather than at load time also covers a spec built in Python, which
+    never went through the loader at all.
+    """
+    job = JOBS.get(step.job)
+    if job is None or job.params is None:
+        return dict(step.params)
+    given = {key: value for key, value in step.params.items() if key not in RESERVED_PARAMS}
+    return job.params.model_validate(given).model_dump()
+
+
+def _step_deadline(
+    timeout: float | None, expires_at: datetime | None, clock: Callable[[], datetime]
+) -> datetime | None:
+    """When this attempt should stop, as the earlier of its timeout and the run's.
+
+    Cooperative: it is passed to the job, which checks it between units of
+    work. A job that does not check simply runs on — Python cannot safely
+    kill a thread, and pretending otherwise would be worse than saying so
+    (pipelines DESIGN §7.5).
+    """
+    own = clock() + timedelta(seconds=timeout) if timeout is not None else None
+    candidates = [moment for moment in (own, expires_at) if moment is not None]
+    return min(candidates) if candidates else None
+
+
 def _counts(results: Sequence[StepResult]) -> dict[str, int]:
     counts = {"steps": len(results)}
     for status in (Outcome.SUCCEEDED.value, Outcome.PARTIAL.value, Outcome.FAILED.value, SKIPPED):
@@ -693,11 +820,17 @@ def run_pipeline(
     db: DatabaseManager | None = None,
     on_stage: StageHook | None = None,
     parent_run_id: str | None = None,
+    params: Mapping[str, Any] | None = None,
 ) -> Run:
     """Run a loaded spec once and return the closed parent :class:`Run`.
 
     Never raises, for the same reason ``run_job`` does not: a caller on a
     scheduler must not be taken down by the work it scheduled.
+
+    Args:
+        params: Seams for tests and direct callers — ``sleep``, ``jitter``
+            and ``clock``, so a retry's backoff can be asserted without
+            waiting for it. Steps get their parameters from the spec.
     """
     try:
         job = pipeline_job(spec)
@@ -717,6 +850,7 @@ def run_pipeline(
         db=db,
         on_stage=on_stage,
         parent_run_id=parent_run_id,
+        params=params,
     )
 
 
@@ -733,6 +867,8 @@ def steps_of(run: Run) -> list[StepResult]:
             duration_seconds=item.get("duration_seconds"),
             error=item.get("error"),
             counts=item.get("counts") or {},
+            attempts=int(item.get("attempts") or 0),
+            error_class=item.get("error_class"),
         )
         for item in raw
     ]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import subprocess
 import sys
 from pathlib import Path
@@ -11,19 +12,47 @@ import pytest
 from candlegraph.harness import JOBS, select
 from candlegraph.harness.jobs import ROLES, WRITE_SURFACES
 from candlegraph.settings import Settings
+from tests.conftest import make_settings
 
 ROOT = Path(__file__).resolve().parents[3]
 
+SCHEDULED = [job.name for job in JOBS.values() if job.scheduled]
+STEPS_ONLY = [job.name for job in JOBS.values() if not job.scheduled]
 
-def test_the_registered_jobs_are_the_four_the_docs_name() -> None:
-    assert list(JOBS) == ["ingest", "observer", "janitor", "fetch_news"]
+
+def test_the_registered_jobs_are_the_ones_the_docs_name() -> None:
+    assert list(JOBS) == [
+        # On a clock, hosted by a process.
+        "ingest",
+        "observer",
+        "janitor",
+        "fetch_news",
+        # Pipeline steps: no clock, ordered by a spec.
+        "validate",
+        "analyse",
+        "signal",
+        "explain",
+        "embed",
+    ]
 
 
-@pytest.mark.parametrize("name", list(JOBS))
-def test_every_job_reads_an_interval_setting_that_exists_and_is_documented(name: str) -> None:
+@pytest.mark.parametrize("name", SCHEDULED)
+def test_every_scheduled_job_reads_an_interval_setting_that_exists_and_is_documented(name: str) -> None:
     setting = JOBS[name].interval_setting
     assert setting in Settings.model_fields
     assert f"{setting.upper()}=" in (ROOT / ".env.example").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("name", STEPS_ONLY)
+def test_a_pipeline_step_has_no_clock_and_asks_settings_for_nothing(name: str) -> None:
+    """A step runs when its pipeline runs; a timer for one would undo the ordering."""
+    job = JOBS[name]
+
+    assert job.scheduled is False
+    # `seconds()` must answer without reading a setting that does not exist.
+    assert job.schedule.seconds(make_settings()) == 0
+    assert job not in select(role=job.role)
+    assert select(names=[name]) == (job,)
 
 
 def test_only_ingest_declares_market_data() -> None:
@@ -41,6 +70,8 @@ def test_every_job_declares_a_known_write_surface_and_role(name: str) -> None:
 
 def test_selection_by_role_and_by_name() -> None:
     assert [job.name for job in select(role="worker")] == ["ingest"]
+    # The pipeline steps share the agents role but have no clock, so the
+    # agents process is not handed them.
     assert [job.name for job in select(role="agents")] == ["observer", "janitor", "fetch_news"]
     assert [job.name for job in select(names=["janitor"])] == ["janitor"]
     with pytest.raises(ValueError, match="unknown job"):
@@ -92,8 +123,17 @@ def test_every_job_writes_a_ledger_row_under_the_default_configuration(name: str
 # and compares the state it left. Marking a job idempotent without adding one
 # fails the first test, which is the whole point of keeping this map by hand.
 
+HERE = "tests.unit.harness.test_jobs"
+STEPS = "tests.unit.harness.test_steps"
+
 IDEMPOTENCE_PROOFS = {
-    "observer": "test_running_the_observer_twice_writes_the_same_state",
+    "observer": f"{HERE}:test_running_the_observer_twice_writes_the_same_state",
+    "fetch_news": f"{STEPS}:test_running_fetch_news_twice_writes_the_same_state",
+    "validate": f"{STEPS}:test_running_validate_twice_writes_the_same_state",
+    "analyse": f"{STEPS}:test_running_analyse_twice_writes_the_same_state",
+    "signal": f"{STEPS}:test_running_signal_twice_writes_the_same_state",
+    "explain": f"{STEPS}:test_running_explain_twice_writes_the_same_state",
+    "embed": f"{STEPS}:test_running_embed_twice_writes_the_same_state",
 }
 
 
@@ -104,7 +144,12 @@ def test_a_job_is_only_marked_idempotent_if_a_run_twice_proof_exists() -> None:
         "every job declaring `idempotent=True` needs an entry in IDEMPOTENCE_PROOFS and the "
         "run-twice test it names"
     )
-    assert [name for name in IDEMPOTENCE_PROOFS.values() if name not in globals()] == []
+    missing = []
+    for reference in IDEMPOTENCE_PROOFS.values():
+        module, _, name = reference.partition(":")
+        if not hasattr(importlib.import_module(module), name):
+            missing.append(reference)
+    assert missing == [], f"IDEMPOTENCE_PROOFS names tests that do not exist: {missing}"
 
 
 def test_running_the_observer_twice_writes_the_same_state() -> None:

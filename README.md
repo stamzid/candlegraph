@@ -54,12 +54,26 @@ of jobs over the same code: one job registry, one scheduler, one way to run a jo
 `make jobs` lists the jobs, their schedule setting and what each one writes.
 
 Several jobs can also run as one unit. A **pipeline** is a YAML file naming registered jobs
-in order — `make run ARGS='pipelines/example.yaml'` — and it is an ordinary run with the
-steps as child runs, so `make runs ARGS='--job example'` lists the pipeline with what each
+in order — `make run ARGS='pipelines/hourly.yaml'` — and it is an ordinary run with the
+steps as child runs, so `make runs ARGS='--job hourly'` lists the pipeline with what each
 step did underneath it. A spec is validated in full before anything runs, and a bad one is
 refused with the line to fix; `make check-pipelines` does that and runs nothing. Only a job
 declared idempotent can be a step, and no pipeline may write market data — ingestion stays
 the worker's.
+
+Two pipelines ship:
+
+| | Steps | Spends money? |
+|---|---|---|
+| `pipelines/hourly.yaml` | validate → analyse → signal → explain | **no** — it explains from stored news only |
+| `pipelines/daily.yaml` | fetch news → embed | **yes** — one search credit per active token per UTC day |
+
+`validate` is the gate: a token with no rows at all, or an impossible row, stops the hour
+before any signal is written. Coverage merely below the threshold is `partial`, not a
+failure — a thin token legitimately has missing hours. A step that fails with a transient
+error (the network blinked, Postgres restarted) is retried with jittered backoff, and each
+attempt is its own row in `run_log`; a step that fails because of a bad parameter is not,
+because another attempt would spend the deadline to fail the same way.
 
 Ingestion runs in its own process so a long backfill cannot compete with query traffic, and
 so an unreachable subgraph degrades the data rather than the service — the API comes up and
@@ -100,7 +114,7 @@ make report                              # coverage, gaps, field completeness
 make runs                                # the ingest ledger
 make runs ARGS='--all'                   # every job (ingest, observer, janitor), with trigger and outcome
 make jobs                                # the registered jobs and their schedules
-make run ARGS='pipelines/example.yaml'   # run a pipeline; its steps become child runs
+make run ARGS='pipelines/hourly.yaml'    # run a pipeline; its steps become child runs
 make check-pipelines                     # validate every committed spec, running nothing
 make serve ARGS='--port auto'            # the API locally, on a free port if 8000 is the stack's
 ```

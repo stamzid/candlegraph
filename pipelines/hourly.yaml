@@ -1,0 +1,58 @@
+# The hour's work, as one run.
+#
+#   candlegraph run pipelines/hourly.yaml      # or: candlegraph run hourly
+#
+# This is stage 2's exit criterion: validate, analyse, signal and explain as
+# one orchestrated run, with a child run per step in `candlegraph runs --all`.
+#
+# Ingest is NOT a step. One process writes market data (the worker), and a
+# pipeline reacts to it — the loader refuses any step whose job declares
+# `market_data` (invariant 21, pipelines DESIGN §7.1). Until event triggers
+# land in rollout step 5, this pipeline is started by hand or by its own
+# schedule, and `validate` is what notices if ingest has not run.
+name: hourly
+description: Turn each new hour of data into checked statistics, stored signals and cited prose.
+version: 1
+
+# The SLO is 15 minutes after a successful ingest (DESIGN §16, answer 1).
+# The step timeouts below sum to 13 minutes, which is what the loader checks:
+# a deadline shorter than the work it covers would always fire.
+deadline: 15m
+
+defaults:
+  # Only a step that *raised* is retried, and only when the error classifies
+  # as transient — a blink of the network, not a bad parameter.
+  retry: { attempts: 3, backoff: 30s, max_backoff: 2m }
+  timeout: 3m
+
+steps:
+  # Bad data must not reach the signals, so this is the one step whose
+  # failure stops the rest. Note what counts as failure: a token with no rows
+  # at all, or an impossible row. Coverage merely under the threshold is
+  # `partial`, because a thin token legitimately has missing hours
+  # (invariant 19) and that is a reason to look, not to stop the hour.
+  - id: validate
+    job: validate
+    timeout: 2m
+    on_failure: stop
+
+  - id: analyse
+    job: analyse
+    params: { window: 24 }
+
+  # Reads only through `load_symbol_series`, which refuses a fill policy that
+  # reads across the gap it fills, so no estimated hour can reach a signal.
+  - id: signal
+    job: signal
+    params: { strategies: all }
+    timeout: 5m
+    on_partial: continue
+
+  # Prose is optional (invariant 22), so a failure here does not spoil the
+  # hour's signals. It runs on stored news only and cannot search: spending a
+  # credit stays something a person asks for, or the daily pipeline does.
+  - id: explain
+    job: explain
+    model_role: knowledge
+    timeout: 3m
+    on_failure: continue

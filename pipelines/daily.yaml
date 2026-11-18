@@ -1,0 +1,40 @@
+# The once-a-day work: fetch the news, then give it vectors.
+#
+#   candlegraph run pipelines/daily.yaml       # or: candlegraph run daily
+#
+# This is the pipeline that **spends money** — one Tavily credit per active
+# token per UTC day, guarded by the budget. Run it deliberately. The hourly
+# pipeline deliberately does not search; it explains from whatever this has
+# already stored.
+#
+# `embed` follows `fetch_news` in the same run rather than sitting on its own
+# timer, which is what closes the backlog gap the harness pre-work left: an
+# explanation whose news has no vector quietly falls back to the lexical leg
+# (docs/incidents/2026-11-04-explain-ran-lexical-only/).
+name: daily
+description: Fetch each active token's news for the day, then embed what landed.
+version: 1
+
+deadline: 30m
+
+defaults:
+  # A minute, not thirty seconds: the things that fail here are a model
+  # server still pulling and a search API under load, and both want longer.
+  retry: { attempts: 3, backoff: 1m, max_backoff: 5m }
+
+steps:
+  # A budget refusal is the guard working, so the job counts it and still
+  # succeeds. A real failure here leaves the corpus as it was, which is worth
+  # embedding anyway — hence `continue`.
+  - id: fetch_news
+    job: fetch_news
+    timeout: 10m
+    on_failure: continue
+
+  # Bounded per run: a long backlog is cleared over several days rather than
+  # in one run that holds the deadline. `remaining` in the run's counts says
+  # whether there is more.
+  - id: embed
+    job: embed
+    params: { limit: 2000 }
+    timeout: 15m

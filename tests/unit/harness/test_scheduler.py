@@ -15,6 +15,10 @@ from candlegraph.harness.scheduler import build_scheduler
 from tests.conftest import make_settings
 
 ALL = tuple(JOBS.values())
+# Only the jobs that have a clock. A pipeline step is handed to the scheduler
+# by nobody — `select(role=...)` filters it out — so asking the builder for one
+# is asking about a configuration that does not occur.
+SCHEDULED = tuple(job.name for job in JOBS.values() if job.scheduled)
 
 
 def test_the_ingest_job_fires_immediately_then_on_the_interval() -> None:
@@ -26,7 +30,7 @@ def test_the_ingest_job_fires_immediately_then_on_the_interval() -> None:
     assert job.next_run_time is not None
 
 
-@pytest.mark.parametrize("name", list(JOBS))
+@pytest.mark.parametrize("name", SCHEDULED)
 def test_a_slow_run_cannot_stack_up_behind_the_next_tick(name: str) -> None:
     """A 90-day backfill outlasts a 300s interval; overlap would double-write."""
     settings = make_settings(observer_interval=42, janitor_interval=7, fetch_news_interval=86400)
