@@ -1,14 +1,16 @@
 # Pipelines: running several jobs as one reliable unit
 
-**Status:** partly implemented — 2026-11-17. Rollout steps 3 and 4 built
-the spec, the loader, the executor, the five step jobs and the hourly and
-daily pipelines: §5 in full, §6.1 boxes 4–6, §6.2, §6.3, §6.4, §6.5 and
-§6.6, and the cooperative half of §7.5. **Not built yet:** the queue,
-leases and resume (§7.2–7.4 — moved to step 5, see §15), events and the
-outbox (§7.7), circuit breakers (§7.6), the model picker (§9), metrics
-and traces (§8.3), and the enforced half of §7.5. Nothing in §8.2 is
-deployed. **Code:** `candlegraph/harness/pipelines.py`, `steps.py`,
-`params.py`, `errors.py`, `pipelines/`, `candlegraph run`.
+**Status:** partly implemented — 2026-11-18. Rollout steps 3, 4 and 5
+built the spec, the loader, the executor, the five step jobs, the hourly
+and daily pipelines, the work queue and the dispatcher: §5 in full, §6.1
+end to end, §6.2 to §6.6, §7.1 to §7.4 except resume, the cooperative
+half of §7.5, and §7.7 **without the outbox** — the ledger is the event
+log, and the section says why. **Not built:** resume (§7.4) and circuit
+breakers (§7.6), both moved on with reasons in §15; the model picker
+(§9); metrics and traces (§8.3); the enforced half of §7.5. Nothing in
+§8.2 is deployed. **Code:** `candlegraph/harness/pipelines.py`,
+`events.py`, `queue.py`, `steps.py`, `params.py`, `errors.py`,
+`pipelines/`, `candlegraph run`, `candlegraph queue`.
 **Builds on:** [`../runner/DESIGN.md`](../runner/DESIGN.md) — jobs,
 `run_job`, the three ledgers, `parent_run_id`. All of it stays.
 **Related:** [`../models/DESIGN.md`](../models/DESIGN.md) (how a step gets
@@ -424,11 +426,49 @@ minutes, calls fail fast for 2 minutes, then one trial call is let
 through. Its state is in process memory locally and in a small Postgres
 table in production, so all replicas share it.
 
-### 7.7 Events: transactional outbox
+### 7.7 Events: the ledger is the event log
 
-"Ingest finished" must reach the pipeline even if the executor is
-restarting at that moment. Postgres `LISTEN/NOTIFY` alone loses
-notifications when no one is listening, so:
+> **Changed in the build, 2026-11-18.** This section specified a
+> transactional outbox — a `run_event` row written in the same
+> transaction as the ledger close. It is not built, and the original
+> text is kept below the line so the change is legible.
+
+"Ingest finished" must reach the pipeline even if the dispatcher is
+restarting at that moment. What the dispatcher actually does:
+
+1. nothing extra is written when a run closes. `run_log` already records
+   every finished run with its job, outcome and `finished_at`;
+2. each tick reads the runs that finished inside a **lookback window**
+   (`EVENT_LOOKBACK_MINUTES`, default 60) and enqueues every pipeline
+   whose event trigger matches, into `run_queue`;
+3. the queue's `UNIQUE (pipeline, dedup_key)` makes re-reading the same
+   window free, so the window **is** the catch-up: a dispatcher that was
+   down for ten minutes finds what it missed on its first tick.
+
+**Why not the outbox.** The pattern exists to keep an event and a state
+change consistent **across two stores** — Postgres and Kafka, say. Here
+the producer and the consumer are the same database. A second row saying
+"this run finished" is one more thing that can disagree with the first,
+and the failure it protects against — the event written but the run not
+recorded — cannot happen when there is only one write. It also removes
+the dispatched-watermark, and therefore the possibility of losing one.
+
+**What it costs.** One slightly larger query per tick, and a hard edge:
+an event older than the lookback window is never acted on. That edge is
+exactly what a pipeline's `schedule` trigger is for, which is why the
+hourly pipeline carries one.
+
+**What would bring the outbox back:** a consumer outside Postgres.
+§10.2 lists the signals; the dispatcher is the piece that would be
+replaced, not the pipelines.
+
+`NOTIFY` is not built either. It is an optimisation on poll latency, and
+with a 15-minute SLO behind a 60-second poll there is nothing to optimise
+yet.
+
+---
+
+*The original §7.7, for the record:*
 
 1. when a run closes, its ledger update and an insert into `run_event`
    happen **in the same transaction** — the event exists if and only if
@@ -438,9 +478,6 @@ notifications when no one is listening, so:
    marks the event dispatched;
 3. `NOTIFY` is sent as well, but only to **wake** the dispatcher early.
    If it is lost, the dispatcher's 10-second poll finds the event anyway.
-
-This is the *transactional outbox* pattern. It gives durable,
-at-least-once events with no new infrastructure.
 
 ### 7.8 Failure scenarios, end to end
 
@@ -683,8 +720,8 @@ All plain tables.
 | Change | Purpose |
 |---|---|
 | `run`: add `attempt`, `pipeline_version`, `as_of` | retries as separate rows; resume against the right spec; one as-of time per run. **Deferred past step 3**, which ships no migration: the pipeline name, version, as-of time and per-step record go in `run.detail`, because nothing yet *queries* by version or attempt and a column that cannot be queried is a guess at what the query will be. They become columns in the step that reads them — 4 for `attempt`, 5 for the other two |
-| new `run_queue` | durable work queue (§7.2); `UNIQUE (pipeline, dedup_key)` |
-| new `run_event` | transactional outbox (§7.7) |
+| new `run_queue` | durable work queue (§7.2); `UNIQUE (pipeline, dedup_key)`. **Built 2026-11-18**, revision `7c2e9b41f08d` |
+| ~~new `run_event`~~ | ~~transactional outbox (§7.7)~~ **Not built**, and not wanted: the ledger is the event log. See §7.7 and `docs/storage/table-placement/DESIGN.md` |
 | new `model_choice` | UI model choices per role (§9.3) |
 | new `circuit_state` (production only uses it) | shared breaker state (§7.6) |
 | `run_log` view | unchanged columns; pipeline rows already appear through `run` |
@@ -729,7 +766,7 @@ Maps onto `docs/rollout/ROLLOUT.md` steps 3–6:
 |---|---|
 | 3 | spec + loader + `run --check` (§5); plain-loop executor; one example pipeline; `idempotent` on `Job` — **done 2026-11-17** |
 | 4 | `validate`, `analyse`, `signal`, `embed` and `explain` jobs; `pipelines/hourly.yaml` and `daily.yaml`; retries and the cooperative half of timeouts (§6.5, §7.5) — **done 2026-11-17**. The model picker moved out; see below |
-| 5 | queue + claim + lease + resume (§7.2–7.4); outbox + dispatcher + event triggers (§7.7); circuit breaker (§7.6) |
+| 5 | queue + claim + lease (§7.2–7.4); dispatcher + event triggers (§7.7, built without the outbox); cross-pipeline loop refusal — **done 2026-11-18**. Resume and the circuit breaker moved; see below |
 | 6 | OpenTelemetry metrics and traces (§8.3); production deployment notes (§8.2) |
 
 **The queue moved from step 3 to step 5** (decided 2026-11-17). It was
@@ -762,6 +799,21 @@ the next step does not assume they are finished:
   pipeline deadline is enforced between steps, and the step bodies check
   their own between tokens. `observer` and `fetch_news` do not check and
   run on; the hard kill is production's, and is not built.
+
+**Resume moved out of step 5** (decided 2026-11-18). §7.4 ends by saying a
+resumed run skips the steps whose latest attempt succeeded. The queue, the
+lease and the reaper are built; the skipping is not. A re-claimed row
+re-runs the pipeline **from the start**, which is safe for exactly the
+reason §6.2 gives — every step is idempotent, and at-least-once over
+idempotent work is effectively once. Resume is therefore an optimisation
+(it saves re-running the steps that already worked), not a correctness
+requirement, and it needs the `run` columns §12 defers. It belongs with
+whichever step first finds a pipeline long enough for the saving to matter.
+
+**The circuit breaker moved out of step 5** too. §7.6's breaker is a
+reaction to a signal — five consecutive transient failures — and step 5
+ships nothing that can see that signal. Step 6 adds the metrics; the
+breaker goes with them, where it can be observed rather than assumed.
 
 **The model picker moved out of step 4** (decided 2026-11-17). §9's
 per-step model choice, the `model_choice` table and the Pipelines page

@@ -41,9 +41,10 @@ from __future__ import annotations
 import random
 import re
 import time
+import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
@@ -179,6 +180,16 @@ class EventTrigger(_Spec):
 
     job: str
     outcome: tuple[Outcome, ...] = (Outcome.SUCCEEDED,)
+    once_per: Literal["hour", "day", "run"] = "hour"
+    """How often a matching event may start a run.
+
+    The default is **not** ``run``, and that is the field's whole point.
+    Ingest polls every five minutes, so "one hourly pipeline per successful
+    ingest" would be twelve runs an hour, each writing signals and explaining
+    them. ``hour`` is the bar grain the pipeline works at, so twelve matching
+    events inside one hour produce one run. ``run`` is for a job whose every
+    completion genuinely deserves its own pipeline.
+    """
 
     @model_validator(mode="after")
     def _finished_outcomes_only(self) -> EventTrigger:
@@ -187,6 +198,9 @@ class EventTrigger(_Spec):
         if not self.outcome:
             raise ValueError("an event trigger needs at least one outcome")
         return self
+
+    def matches(self, job: str, outcome: str) -> bool:
+        return job == self.job and outcome in {value.value for value in self.outcome}
 
 
 class ScheduleTrigger(_Spec):
@@ -259,6 +273,23 @@ class PipelineSpec(_Spec):
 
     def retry_for(self, step: StepSpec) -> Retry:
         return step.retry if step.retry is not None else self.defaults.retry
+
+    @property
+    def events(self) -> tuple[EventTrigger, ...]:
+        return tuple(t.event for t in self.triggers if t.event is not None)
+
+    @property
+    def schedules(self) -> tuple[ScheduleTrigger, ...]:
+        return tuple(t.schedule for t in self.triggers if t.schedule is not None)
+
+    @property
+    def emits(self) -> frozenset[str]:
+        """The job names a run of this pipeline puts in the ledger.
+
+        Its own name — a pipeline run is a `run` row like any other — and
+        every step's. This is what a cycle check compares triggers against.
+        """
+        return frozenset({self.name, *(step.job for step in self.steps)})
 
 
 # --- line numbers ------------------------------------------------------------
@@ -396,14 +427,19 @@ def _semantic_problems(
         yield from _step_problems(spec, step, index, lines)
 
     for index, trigger in enumerate(spec.triggers):
-        # A pipeline triggered by its own completion never stops. Loops through
-        # a *second* pipeline need every spec in hand, so the dispatcher checks
-        # for those when it is built (rollout step 5).
-        if trigger.event is not None and trigger.event.job == spec.name:
+        # A pipeline triggered by anything it emits never stops — its own name
+        # (a pipeline run writes a ledger row too) or any of its steps. Loops
+        # through a *second* pipeline need every spec in hand, and are
+        # `check_cycles`' business; this one can name the line.
+        if trigger.event is not None and trigger.event.job in spec.emits:
+            what = (
+                "names this pipeline"
+                if trigger.event.job == spec.name
+                else f"names {trigger.event.job!r}, which is one of its own steps"
+            )
             yield SpecProblem(
                 lines.get(("triggers", index, "event")),
-                f"the event trigger names this pipeline ({spec.name!r}), so each run would start "
-                "the next one",
+                f"the event trigger {what}, so each run would start the next one",
             )
 
     if spec.deadline is not None:
@@ -484,6 +520,119 @@ def _param_problems(
                 else f"{where}: {item['msg']}".lstrip(": ")
             )
             yield SpecProblem(_line_for(lines, loc) or at_params, f"{step.job}: {message}")
+
+
+# --- triggers: what makes a pipeline run ---------------------------------------
+
+
+def event_dedup_key(trigger: EventTrigger, *, occurred_at: datetime, cause_run_id: str) -> str:
+    """The idempotency key for one matching event.
+
+    This single value is what "exactly one run per trigger" reduces to: the
+    queue's unique index does the rest, so the property survives a restart,
+    two dispatchers, and the same window being scanned twice.
+    """
+    if trigger.once_per == "run":
+        return f"run:{cause_run_id}"
+    moment = occurred_at.astimezone(UTC)
+    if trigger.once_per == "day":
+        return f"day:{moment:%Y-%m-%d}"
+    return f"hour:{moment:%Y-%m-%dT%H}"
+
+
+def schedule_dedup_key(trigger: ScheduleTrigger, *, now: datetime) -> str:
+    """The idempotency key for a schedule trigger: which interval we are in.
+
+    A bucket rather than a timestamp, so the safety net can be re-evaluated
+    every tick without ever asking for the same interval twice.
+    """
+    every = max(1, int(trigger.every))
+    return f"every{every}:{int(now.astimezone(UTC).timestamp()) // every}"
+
+
+def manual_dedup_key(now: datetime) -> str:
+    """A key that never collides: a person asking twice means twice."""
+    return f"manual:{now.astimezone(UTC).isoformat()}:{uuid.uuid4().hex[:8]}"
+
+
+class PipelineCycleError(ValueError):
+    """Two or more specs would trigger each other for ever.
+
+    Not a :class:`PipelineError`: a cycle is a property of a *set* of files,
+    so there is no single file and line to point at.
+    """
+
+
+def check_cycles(specs: Sequence[PipelineSpec]) -> None:
+    """Refuse a set of specs where a run would cause a run that causes it.
+
+    A pipeline *emits* its own name and its steps' job names (every one of
+    them writes a ledger row), and it is *triggered by* the jobs its event
+    triggers name. An edge A → B means "a run of A can start B". A cycle in
+    that graph is a pipeline that never stops, and a load-time refusal is the
+    only cheap place to catch it — at run time it is a full disk.
+
+    The single-file half of this (a trigger naming its own pipeline) is also
+    checked by the loader, where it can carry a line number.
+
+    Raises:
+        PipelineCycleError: a cycle exists, named in the message.
+    """
+    edges: dict[str, set[str]] = {spec.name: set() for spec in specs}
+    for source in specs:
+        for target in specs:
+            if any(trigger.job in source.emits for trigger in target.events):
+                edges[source.name].add(target.name)
+
+    # Depth-first search, colouring nodes: grey = on the current path.
+    white, grey, black = 0, 1, 2
+    colour = dict.fromkeys(edges, white)
+
+    def walk(node: str, path: list[str]) -> None:
+        colour[node] = grey
+        for nxt in sorted(edges[node]):
+            if colour[nxt] == grey:
+                cycle = [*path[path.index(nxt) :], nxt] if nxt in path else [node, nxt]
+                raise PipelineCycleError(
+                    "these pipelines trigger each other in a loop: "
+                    + " -> ".join(cycle)
+                    + ". A run would cause a run that causes it; break the chain by removing "
+                    "one of the event triggers."
+                )
+            if colour[nxt] == white:
+                walk(nxt, [*path, nxt])
+        colour[node] = black
+
+    for spec in specs:
+        if colour[spec.name] == white:
+            walk(spec.name, [spec.name])
+
+
+def load_pipelines(paths: Sequence[Path]) -> tuple[PipelineSpec, ...]:
+    """Load several specs and check what only a set of them can be checked for.
+
+    Each file is validated on its own first, so a mistake inside one still
+    reports with its own line; the cycle check runs over whatever loaded.
+
+    Raises:
+        PipelineError: one of the files is invalid.
+        PipelineCycleError: together they would trigger each other for ever.
+    """
+    specs = tuple(load_pipeline(path) for path in paths)
+    duplicates = sorted({s.name for s in specs if [x.name for x in specs].count(s.name) > 1})
+    if duplicates:
+        raise PipelineCycleError(
+            f"two specs share the name(s) {', '.join(duplicates)}; a pipeline's name is its "
+            "identity in run_log and in the queue's dedup key"
+        )
+    check_cycles(specs)
+    return specs
+
+
+def load_pipeline_dir(directory: Path) -> tuple[PipelineSpec, ...]:
+    """Every ``*.yaml`` in a directory, loaded and cross-checked, newest rules applied."""
+    paths = sorted(p for p in directory.glob("*.yaml") if p.is_file())
+    return load_pipelines(paths)
 
 
 def resolve_spec(reference: str, settings: Settings) -> Path:

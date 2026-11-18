@@ -201,6 +201,38 @@ class RunLedgerHook:
             service_logger.warning("Could not close run row for run %s: %s", run.run_id, exc)
 
 
+class QuietRunLedgerHook(RunLedgerHook):
+    """A generic ``run`` row, written only when the run did something.
+
+    **A narrow, named exception to invariant 27's two-phase row**, and the
+    reason is arithmetic. The dispatcher ticks every minute and almost always
+    finds nothing; a row per tick is 1,440 rows a day of "looked, nothing
+    there", which would bury every real run in ``run_log`` and give the prune
+    job most of its work. A job may use this only when it is read-mostly and
+    sub-second, so the thing two phases exist for — a crash leaving a visible
+    half-state — has nothing to show anyway.
+
+    A failure is always written, however quiet the job: the whole point of
+    not recording the empty ticks is that the interesting ones stand out.
+    """
+
+    def started(self, run: Run) -> None:
+        pass  # deliberately: see the class docstring
+
+    def finished(self, run: Run, outcome: RunOutcome) -> None:
+        if _did_something(outcome):
+            super().finished(run, outcome)
+
+
+def _did_something(outcome: RunOutcome) -> bool:
+    """Whether a quiet job's run is worth a row: it worked, or it failed."""
+    from candlegraph.harness.runs import Outcome
+
+    if outcome.outcome is not Outcome.SUCCEEDED or outcome.errors:
+        return True
+    return any(bool(value) for value in outcome.counts.values())
+
+
 class CompositeHook:
     """Call every hook for each event; one failing never stops the rest."""
 

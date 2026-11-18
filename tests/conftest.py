@@ -155,6 +155,12 @@ class FakeDatabase:
         self.executed.append((self._label(query), params))
         return self.delete_rowcount
 
+    def execute_returning(self, query: Any, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """A write that returns rows: recorded like a write, answered like a read."""
+        label = self._label(query)
+        self.executed.append((label, params))
+        return list(self.reads.get(label, []))
+
     def upsert_many(
         self, query: Any, template: str, records: list[dict[str, Any]], page_size: int = 500
     ) -> int:

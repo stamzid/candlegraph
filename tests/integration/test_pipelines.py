@@ -8,7 +8,8 @@ view as a family, which is what `candlegraph runs --all` shows a person.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -255,3 +256,137 @@ def test_running_the_hourly_pipeline_twice_leaves_the_same_signals(hourly_db: Da
 
     assert first == second
     assert len(first) > 0
+
+
+# --- events: a finished run starts a pipeline (rollout step 5) -----------------
+
+
+def ingest_run(db: DatabaseManager, *, finished_at: datetime, outcome: str = "succeeded") -> str:
+    """A closed ingest run in the ledger, which is what the dispatcher reads."""
+    from candlegraph.ingestion import ledger
+
+    run_id = str(uuid.uuid4())
+    record = ledger.start_run(
+        db, trigger="scheduled", lookback_days=1, now=finished_at - timedelta(seconds=10), run_id=run_id
+    )
+    ledger.finish_run(db, record, outcome, {}, {}, {}, now=finished_at)
+    return run_id
+
+
+@pytest.fixture
+def events_db(hourly_db: DatabaseManager) -> DatabaseManager:
+    hourly_db.execute(f'TRUNCATE "{hourly_db.schema}".run_queue, "{hourly_db.schema}".ingest_run')
+    return hourly_db
+
+
+def dispatch(db: DatabaseManager, *, now: datetime, **kwargs: Any) -> Any:
+    from candlegraph.harness.events import dispatch_once
+
+    return dispatch_once(
+        db,
+        make_settings(agent_report_sinks="log,ledger", min_expected_coverage=0.5),
+        now=now,
+        **kwargs,
+    )
+
+
+def test_a_successful_ingest_causes_exactly_one_hourly_run(events_db: DatabaseManager) -> None:
+    """Step 5's exit criterion, and the reason the dedup key is the bar hour.
+
+    Ingest polls every five minutes. Three successful runs inside one hour
+    must produce **one** pipeline run, not three.
+    """
+    base = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0)
+    for minutes in (1, 6, 11):
+        ingest_run(events_db, finished_at=base + timedelta(minutes=minutes))
+
+    first = dispatch(events_db, now=base + timedelta(minutes=12))
+    second = dispatch(events_db, now=base + timedelta(minutes=13))
+
+    assert first.enqueued == 1
+    assert first.duplicates == 2  # the other two ingests, collapsed
+    assert second.enqueued == 0
+    hourly = run_log(events_db, "hourly")
+    assert len(hourly) == 1
+    assert hourly[0]["trigger"] == "event"
+
+
+def test_the_pipeline_run_points_at_the_ingest_that_caused_it(events_db: DatabaseManager) -> None:
+    base = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0)
+    cause = ingest_run(events_db, finished_at=base + timedelta(minutes=1))
+
+    dispatch(events_db, now=base + timedelta(minutes=2))
+
+    (row,) = run_log(events_db, "hourly")
+    assert row["parent_run_id"] == cause
+    # And the steps still belong to the pipeline, not to the ingest run.
+    steps = run_log(events_db, "signal")
+    assert [s["parent_run_id"] for s in steps] == [row["run_id"]]
+
+
+def test_a_failed_ingest_is_not_an_event(events_db: DatabaseManager) -> None:
+    """The hourly pipeline's safety net still fires — but nothing was *caused*.
+
+    Asserting "nothing ran" would be asserting the net does not work; what
+    the trigger promises is that a failed ingest does not cause a run.
+    """
+    from candlegraph.harness import queue as run_queue
+
+    base = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0)
+    ingest_run(events_db, finished_at=base + timedelta(minutes=1), outcome="failed")
+
+    dispatch(events_db, now=base + timedelta(minutes=2))
+
+    assert [row["trigger"] for row in run_queue.recent(events_db)] == ["scheduled"]
+    assert [row["cause_run_id"] for row in run_queue.recent(events_db)] == [None]
+
+
+def test_the_next_hour_runs_again(events_db: DatabaseManager) -> None:
+    base = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+    ingest_run(events_db, finished_at=base + timedelta(minutes=1))
+    dispatch(events_db, now=base + timedelta(minutes=2))
+
+    ingest_run(events_db, finished_at=base + timedelta(hours=1, minutes=1))
+    dispatch(events_db, now=base + timedelta(hours=1, minutes=2))
+
+    assert len(run_log(events_db, "hourly")) == 2
+
+
+def test_an_event_from_before_the_lookback_window_is_not_acted_on(events_db: DatabaseManager) -> None:
+    """The window bounds the catch-up; the schedule trigger is the net beyond it."""
+    now = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0)
+    ingest_run(events_db, finished_at=now - timedelta(hours=6))
+
+    from candlegraph.harness import queue as run_queue
+
+    summary = dispatch(events_db, now=now)
+
+    assert summary.events_seen == 0
+    # Only the safety net asked for anything, and it says so.
+    assert [row["trigger"] for row in run_queue.recent(events_db)] == ["scheduled"]
+
+
+def test_a_dispatcher_that_was_down_catches_up_on_its_next_tick(events_db: DatabaseManager) -> None:
+    """No watermark to keep, so none to lose: the window *is* the catch-up."""
+    now = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0)
+    ingest_run(events_db, finished_at=now - timedelta(minutes=20))
+
+    summary = dispatch(events_db, now=now)
+
+    assert summary.enqueued == 1
+    assert len(run_log(events_db, "hourly")) == 1
+
+
+def test_the_queue_row_records_the_run_it_produced(events_db: DatabaseManager) -> None:
+    from candlegraph.harness import queue as run_queue
+
+    base = datetime.now(tz=UTC).replace(minute=0, second=0, microsecond=0)
+    ingest_run(events_db, finished_at=base + timedelta(minutes=1))
+
+    dispatch(events_db, now=base + timedelta(minutes=2))
+
+    (entry,) = run_queue.recent(events_db)
+    (run,) = run_log(events_db, "hourly")
+    assert entry["state"] == "done"
+    assert str(entry["run_id"]) == str(run["run_id"])
+    assert entry["dedup_key"].startswith("hour:")

@@ -14,7 +14,8 @@ E2E_URL ?= http://localhost:$${APP_HOST_PORT:-8000}
         ingest backfill report runs ui logs-ui observe janitor agent-runs logs-agents sync-assets \
         up-knowledge logs-ollama embed reembed fetch-news search link-mentions explain mcp \
         fill fill-status fill-evaluate stats compare signals backtest strategies portfolio \
-        forecast forecast-posterior risk simulate simulate-execution jobs serve run check-pipelines
+        forecast forecast-posterior risk simulate simulate-execution jobs serve run check-pipelines \
+        queue
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -197,6 +198,9 @@ run: ## Run a pipeline inside the stack: make run ARGS='pipelines/example.yaml'
 
 check-pipelines: ## Validate every committed pipeline spec without running anything
 	$(UV) run python -m candlegraph run --check pipelines/*.yaml
+
+queue: ## The pipeline work queue: what a trigger asked for and what became of it
+	$(COMPOSE) exec agents python -m candlegraph queue $(ARGS)
 
 serve: ## Run the API locally, outside compose: make serve ARGS='--port auto' (8000 is usually the stack's)
 	$(UV) run python -m candlegraph serve $(ARGS)

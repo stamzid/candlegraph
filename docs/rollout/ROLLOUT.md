@@ -38,7 +38,7 @@ between steps, if needed sooner):
 | 2 | Write the pipelines design (no code) | S | — | done 2026-11-16 — reviewed, five questions answered |
 | 3 | Pipeline spec, loader and `candlegraph run` for one step | M | 2 | done 2026-11-17 |
 | 4 | The hourly pipeline end to end: validate, analyse, signal, embed as jobs | M | 3 | done 2026-11-17 |
-| 5 | Events: run finished → next thing starts | M | 3 | todo |
+| 5 | Events: run finished → next thing starts | M | 3 | done 2026-11-18 |
 | 6 | Traces (OpenTelemetry) and continuous aggregates | M | 4 | todo |
 | 7 | Closeout | S | 1–6 | todo |
 
@@ -396,7 +396,82 @@ event.
 pipeline run, visible in `run_log` with trigger `event`; `make check`
 green.
 
-**Outcome.** Not started.
+**Outcome.** Done 2026-11-18.
+
+- **`run_queue` and a dispatcher**, not an event hook. The rollout said
+  `RunHook.finished` → publish. A hook turned out to be the wrong seam:
+  it fires inside the *worker* process, and the pipeline runs in the
+  *agents* process, so the hook would have had to write somewhere the
+  other process reads — which is the queue. Going straight to the queue
+  removes a hop and a failure mode, and the hook stays available for
+  step 6's tracing, which genuinely is per-process.
+- **No `run_event` outbox**, against design §7.7. The outbox pattern keeps
+  an event and a state change consistent across two *stores*; here both
+  are the same Postgres, and `run_log` already records every finished run
+  with its outcome and time. A second row is one more thing that can
+  disagree. The dispatcher reads `run_log` over a lookback window, and
+  the queue's unique key makes re-reading free — so **the window is the
+  catch-up**, which is also how the rollout's "a missed notification must
+  not lose work" is satisfied, with no watermark to keep and therefore
+  none to lose. §7.7 and the table-placement document both record it.
+- **The dedup key is the bar hour.** `once_per: hour | day | run` on the
+  trigger, defaulting to `hour`. This is the load-bearing decision of the
+  step: ingest polls every five minutes, so `run` would have been twelve
+  hourly pipelines an hour, each re-writing the same signals. Three
+  ingests in one hour now produce one run and two counted duplicates.
+- **`dispatch` is a "quiet" job**, which is a narrow amendment to
+  invariant 27 and is written into it. A 60-second poll that recorded
+  every tick would be 1,440 rows a day of "looked, nothing there" — it
+  would bury every real run in `run_log` and give the prune job most of
+  its work. A quiet job writes a row only when it did something, and
+  **always** when it failed. It may only be used by a job that is
+  read-mostly and sub-second, so the half-state two-phase rows exist to
+  show has nothing to show.
+- **The advisory lock is real and tested.** A manual `candlegraph run
+  hourly` while the dispatcher is working does not produce two concurrent
+  runs: the second finds the lock taken and the queue row goes back with
+  `available_at` pushed out.
+- **Two bugs the integration tier caught**, neither visible from a fake
+  database:
+  1. `enqueue` and `claim` used `fetch_all`, which **rolls back** — it is
+     the read helper. An `INSERT … ON CONFLICT DO NOTHING RETURNING *`
+     through it looks like it worked and leaves nothing behind, so the
+     queue deduplicated nothing at all. `execute_returning` now exists for
+     writes that return rows, and says in its docstring why it is not
+     `fetch_all`.
+  2. The schedule net was evaluated **before** the tick's events were
+     queued, so it fired alongside every event it existed to cover and the
+     first tick started every pipeline twice. Schedules are now evaluated
+     after, and see the row the event just made.
+- **Deferred, each with a reason in design §15:** step-level *resume*
+  (a re-claimed row re-runs from the start, which is safe because every
+  step is idempotent — resume saves work, it does not make anything
+  correct), and the circuit breaker (§7.6 reacts to a signal nothing in
+  this step can see; it goes with step 6's metrics).
+- **A third bug the real stack caught, which no test could have.** The
+  quiet ledger leaked: `events_seen` is a non-zero count, so for the whole
+  hour after an ingest every tick looked like work and wrote a row — ten
+  rows in fifteen minutes. A count of what a tick *looked at* is not work
+  done, and only the job knows the difference, so the body now returns
+  empty counts when it did nothing and the generic hook rule stands. After
+  the fix, five ingest events over ten ticks produced exactly one dispatch
+  row: `enqueued 1, duplicates 4, events_seen 5`.
+- `make check` green (1917 passed, 11 e2e skips, integration ran), and
+  verified end to end on a real stack: ingest finished, the dispatcher
+  queued one `hourly` row per bar hour, and `run_log` showed the pipeline
+  and all four steps with trigger `event` under the ingest that caused it.
+
+**Known limitations**, recorded rather than discovered later:
+
+| | |
+|---|---|
+| An event older than `EVENT_LOOKBACK_MINUTES` is never acted on | By design; the `schedule` trigger is the net, which is why `hourly.yaml` carries one |
+| A broken spec stops **its** pipeline silently | The dispatcher skips it and records the error in the tick's run rather than dying, because the other pipelines still need to run. `make check-pipelines` in CI is what stops it being merged |
+| A pipeline slower than `QUEUE_LEASE_SECONDS` (900s) would be reclaimed while still running | The advisory lock stops the second run starting, and the row returns to the queue — so it is wasteful, not wrong. Raise the lease before adding a long step |
+| `parent_run_id` means "caused by" for an event-triggered run and "owned by" for a step | The two share one column; `trigger` is what distinguishes them, and `event` is only ever written by this path |
+| The dispatcher runs at most one pipeline per tick | Keeps a tick bounded by one pipeline. Two pipelines due at once run a minute apart |
+| On a cold start the safety net fires before any data exists | Observed: the first tick ran `hourly`, which failed at `validate` because nothing was ingested yet. Left alone deliberately — "there is no data" is a true and useful thing for the ledger to say, and the next ingest starts a real run a minute later |
+| An event and the safety net can both fire in the same hour | Their dedup keys are different by construction (the net's is its interval bucket, the event's is the bar hour), so a cold start can produce one extra run. Harmless — every step is idempotent — and the net stands down for its whole interval afterwards |
 
 ---
 

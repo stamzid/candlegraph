@@ -7,12 +7,22 @@
 #
 # Ingest is NOT a step. One process writes market data (the worker), and a
 # pipeline reacts to it — the loader refuses any step whose job declares
-# `market_data` (invariant 21, pipelines DESIGN §7.1). Until event triggers
-# land in rollout step 5, this pipeline is started by hand or by its own
-# schedule, and `validate` is what notices if ingest has not run.
+# `market_data` (invariant 21, pipelines DESIGN §7.1).
 name: hourly
 description: Turn each new hour of data into checked statistics, stored signals and cited prose.
 version: 1
+
+triggers:
+  # A successful ingest starts this, once per bar hour. `once_per: hour` is
+  # the load-bearing word: ingest polls every five minutes, so matching every
+  # run would be twelve pipeline runs an hour, each writing the same signals
+  # again. `partial` counts too — a token that errored is still an hour of
+  # new data for the others.
+  - event: { job: ingest, outcome: [succeeded, partial], once_per: hour }
+  # The safety net, not a second trigger: it only fires when nothing has
+  # asked for this pipeline in two hours, which happens when ingest has been
+  # failing or the dispatcher was down longer than its lookback window.
+  - schedule: { every: 2h }
 
 # The SLO is 15 minutes after a successful ingest (DESIGN §16, answer 1).
 # The step timeouts below sum to 13 minutes, which is what the loader checks:

@@ -12,7 +12,14 @@ Importing this package connects to nothing and imports no job body
 """
 
 from candlegraph.harness.jobs import JOBS, Every, Job, JobContext, select
-from candlegraph.harness.pipelines import PipelineError, PipelineSpec, load_pipeline, run_pipeline
+from candlegraph.harness.pipelines import (
+    PipelineCycleError,
+    PipelineError,
+    PipelineSpec,
+    load_pipeline,
+    load_pipelines,
+    run_pipeline,
+)
 from candlegraph.harness.runs import Outcome, Run, RunOutcome, run_job
 
 __all__ = [
@@ -21,11 +28,13 @@ __all__ = [
     "Job",
     "JobContext",
     "Outcome",
+    "PipelineCycleError",
     "PipelineError",
     "PipelineSpec",
     "Run",
     "RunOutcome",
     "load_pipeline",
+    "load_pipelines",
     "run_job",
     "run_pipeline",
     "select",

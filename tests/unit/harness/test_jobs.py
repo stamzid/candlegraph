@@ -27,6 +27,7 @@ def test_the_registered_jobs_are_the_ones_the_docs_name() -> None:
         "observer",
         "janitor",
         "fetch_news",
+        "dispatch",
         # Pipeline steps: no clock, ordered by a spec.
         "validate",
         "analyse",
@@ -72,7 +73,12 @@ def test_selection_by_role_and_by_name() -> None:
     assert [job.name for job in select(role="worker")] == ["ingest"]
     # The pipeline steps share the agents role but have no clock, so the
     # agents process is not handed them.
-    assert [job.name for job in select(role="agents")] == ["observer", "janitor", "fetch_news"]
+    assert [job.name for job in select(role="agents")] == [
+        "observer",
+        "janitor",
+        "fetch_news",
+        "dispatch",
+    ]
     assert [job.name for job in select(names=["janitor"])] == ["janitor"]
     with pytest.raises(ValueError, match="unknown job"):
         select(names=["nope"])
@@ -125,10 +131,12 @@ def test_every_job_writes_a_ledger_row_under_the_default_configuration(name: str
 
 HERE = "tests.unit.harness.test_jobs"
 STEPS = "tests.unit.harness.test_steps"
+EVENTS = "tests.unit.harness.test_events"
 
 IDEMPOTENCE_PROOFS = {
     "observer": f"{HERE}:test_running_the_observer_twice_writes_the_same_state",
     "fetch_news": f"{STEPS}:test_running_fetch_news_twice_writes_the_same_state",
+    "dispatch": f"{EVENTS}:test_running_dispatch_twice_writes_the_same_state",
     "validate": f"{STEPS}:test_running_validate_twice_writes_the_same_state",
     "analyse": f"{STEPS}:test_running_analyse_twice_writes_the_same_state",
     "signal": f"{STEPS}:test_running_signal_twice_writes_the_same_state",

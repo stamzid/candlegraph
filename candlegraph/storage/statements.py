@@ -243,6 +243,17 @@ class Statements:
     get_recent_agent_runs: sql.Composed
     get_run_log: sql.Composed
     get_run_log_children: sql.Composed
+    # the pipeline work queue
+    get_finished_runs_since: sql.Composed
+    enqueue_run: sql.Composed
+    claim_queued_run: sql.Composed
+    complete_queued_run: sql.Composed
+    release_queued_run: sql.Composed
+    reap_expired_leases: sql.Composed
+    renew_lease: sql.Composed
+    get_queue: sql.Composed
+    get_last_queued_at: sql.Composed
+    prune_done_queue_rows: sql.Composed
 
 
 @lru_cache(maxsize=4)
@@ -766,6 +777,148 @@ def statements_for(schema: str) -> Statements:
         """
     ).format(ns=ns)
 
+    # --- the pipeline work queue (stage 2, step 5) --------------------------
+    # The dispatcher's view of "what finished recently". There is no event
+    # table: the ledger already records every finished run with its outcome,
+    # and a second row saying the same thing is one more thing to keep in
+    # sync. The window plus the queue's unique key make re-reading free, which
+    # is also what makes a restart catch up by itself.
+    get_finished_runs_since = sql.SQL(
+        """
+        SELECT run_id, job, trigger, outcome, verdict, started_at, finished_at, parent_run_id
+        FROM {ns}.run_log
+        WHERE finished_at IS NOT NULL
+          AND finished_at >= %(since)s
+          AND job = ANY(%(jobs)s::text[])
+        ORDER BY finished_at
+        LIMIT %(limit)s
+        """
+    ).format(ns=ns)
+
+    # DO NOTHING, not DO UPDATE: a second trigger for the same key is not a
+    # revision of the first, it is the same work asked for twice. Returning no
+    # row is how the caller learns it was a duplicate.
+    enqueue_run = sql.SQL(
+        """
+        INSERT INTO {ns}.run_queue (
+            pipeline, version, dedup_key, trigger, cause_run_id,
+            state, available_at, created_at
+        )
+        VALUES (
+            %(pipeline)s, %(version)s, %(dedup_key)s, %(trigger)s, %(cause_run_id)s,
+            'queued', %(available_at)s, %(now)s
+        )
+        ON CONFLICT (pipeline, dedup_key) DO NOTHING
+        RETURNING *
+        """
+    ).format(ns=ns)
+
+    # The standard Postgres queue claim. SKIP LOCKED lets any number of
+    # dispatchers poll the same table without blocking each other or taking
+    # the same row, which is what keeps this honest if a second process ever
+    # appears. `attempts` increments here, not on failure: a claim that never
+    # reports back still counts, or a row that kills its dispatcher would be
+    # claimed forever.
+    claim_queued_run = sql.SQL(
+        """
+        UPDATE {ns}.run_queue SET
+            state = 'claimed',
+            claimed_by = %(claimed_by)s,
+            lease_expires_at = %(lease_expires_at)s,
+            attempts = attempts + 1
+        WHERE id = (
+            SELECT id FROM {ns}.run_queue
+            WHERE state = 'queued'
+              AND available_at <= %(now)s
+              AND (%(pipeline)s::text IS NULL OR pipeline = %(pipeline)s)
+            ORDER BY available_at, id
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        RETURNING *
+        """
+    ).format(ns=ns)
+
+    complete_queued_run = sql.SQL(
+        """
+        UPDATE {ns}.run_queue SET
+            state = 'done',
+            run_id = %(run_id)s,
+            finished_at = %(now)s,
+            last_error = %(last_error)s,
+            claimed_by = NULL,
+            lease_expires_at = NULL
+        WHERE id = %(id)s
+        """
+    ).format(ns=ns)
+
+    # Back to the pool, not failed: the dispatcher could not start it (another
+    # process holds the pipeline's lock), so someone should try again.
+    release_queued_run = sql.SQL(
+        """
+        UPDATE {ns}.run_queue SET
+            state = 'queued',
+            available_at = %(available_at)s,
+            claimed_by = NULL,
+            lease_expires_at = NULL,
+            last_error = %(last_error)s
+        WHERE id = %(id)s
+        """
+    ).format(ns=ns)
+
+    # A claimed row whose dispatcher died. Past `max_claims` it becomes `dead`
+    # instead of being handed to the next process in turn — a run that keeps
+    # killing its dispatcher must not take every one of them down (invariant 8
+    # in spirit: never retry forever in place).
+    reap_expired_leases = sql.SQL(
+        """
+        UPDATE {ns}.run_queue SET
+            state = CASE WHEN attempts >= %(max_claims)s THEN 'dead' ELSE 'queued' END,
+            claimed_by = NULL,
+            lease_expires_at = NULL,
+            available_at = %(now)s,
+            last_error = 'lease expired'
+        WHERE state = 'claimed' AND lease_expires_at < %(now)s
+        RETURNING id, pipeline, dedup_key, state, attempts
+        """
+    ).format(ns=ns)
+
+    renew_lease = sql.SQL(
+        """
+        UPDATE {ns}.run_queue SET lease_expires_at = %(lease_expires_at)s
+        WHERE id = %(id)s AND claimed_by = %(claimed_by)s AND state = 'claimed'
+        """
+    ).format(ns=ns)
+
+    get_queue = sql.SQL(
+        """
+        SELECT * FROM {ns}.run_queue
+        WHERE (%(pipeline)s::text IS NULL OR pipeline = %(pipeline)s)
+          AND (%(state)s::text IS NULL OR state = %(state)s)
+        ORDER BY created_at DESC, id DESC
+        LIMIT %(limit)s
+        """
+    ).format(ns=ns)
+
+    # What the schedule trigger reads: when this pipeline was last asked for,
+    # by any trigger. A pipeline that an event already ran does not also need
+    # its safety net to run it.
+    get_last_queued_at = sql.SQL(
+        """
+        SELECT MAX(created_at) AS last_created_at FROM {ns}.run_queue
+        WHERE pipeline = %(pipeline)s
+        """
+    ).format(ns=ns)
+
+    # The queue holds work, not history: a finished row is a completed
+    # instruction and the record of what happened is in `run`.
+    prune_done_queue_rows = sql.SQL(
+        """
+        DELETE FROM {ns}.run_queue
+        WHERE state IN ('done', 'dead') AND finished_at < %(before)s
+        """
+    ).format(ns=ns)
+
     return Statements(
         insert_token_hours=insert_token_hours,
         insert_token_hours_template=_TOKEN_HOUR_TEMPLATE,
@@ -810,4 +963,14 @@ def statements_for(schema: str) -> Statements:
         get_recent_agent_runs=get_recent_agent_runs,
         get_run_log=get_run_log,
         get_run_log_children=get_run_log_children,
+        get_finished_runs_since=get_finished_runs_since,
+        enqueue_run=enqueue_run,
+        claim_queued_run=claim_queued_run,
+        complete_queued_run=complete_queued_run,
+        release_queued_run=release_queued_run,
+        reap_expired_leases=reap_expired_leases,
+        renew_lease=renew_lease,
+        get_queue=get_queue,
+        get_last_queued_at=get_last_queued_at,
+        prune_done_queue_rows=prune_done_queue_rows,
     )

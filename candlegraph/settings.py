@@ -242,6 +242,30 @@ class Settings(BaseSettings):
     # of day it fires does not matter.
     fetch_news_interval: int = Field(default=0, ge=0)
 
+    # --- Pipelines: the dispatcher and its queue ----------------------------
+    # Seconds between dispatcher ticks in `candlegraph agents`; 0 disables
+    # events entirely and pipelines only run when someone asks. A tick is one
+    # small query when there is nothing to do, and the job is "quiet" — it
+    # records a run only when it dispatched something — so this can be
+    # frequent without filling the ledger.
+    event_poll_interval: int = Field(default=60, ge=0)
+    # How far back each tick reads finished runs. This window *is* the
+    # catch-up: a dispatcher that was down for less than this finds what it
+    # missed, because the queue's dedup key makes re-reading free. Longer
+    # costs one slightly larger query; shorter risks losing an event across a
+    # long restart, which is what a pipeline's `schedule` trigger is for.
+    event_lookback_minutes: int = Field(default=60, ge=1)
+    # How long a claimed queue row is held before another dispatcher may take
+    # it. Must comfortably exceed a pipeline's run time, or a slow run is
+    # reclaimed while it is still going.
+    queue_lease_seconds: int = Field(default=900, ge=30)
+    # Claims after which a queue row is `dead` rather than retried. A run that
+    # keeps killing its dispatcher must not take every one of them in turn.
+    queue_max_claims: int = Field(default=5, ge=1)
+    # How long finished queue rows are kept. They are instructions, not
+    # history; the history is in `run`.
+    queue_retention_days: int = Field(default=7, ge=1)
+
     # --- Pipelines ---------------------------------------------------------
     # Where `candlegraph run <name>` looks for a spec it was given by name
     # rather than by path. Specs are reviewed code that ships in the image,

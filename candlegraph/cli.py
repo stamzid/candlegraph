@@ -354,6 +354,19 @@ def _parser() -> argparse.ArgumentParser:
         help="validate every spec and exit; nothing runs, nothing is written. This is what CI runs",
     )
 
+    queue = sub.add_parser(
+        "queue",
+        help="the pipeline work queue: what a trigger asked for, and what became of it",
+        description="Every pipeline run starts as a row here. This is where to look when a "
+        "pipeline did not run: a row that is still `queued` is waiting for the dispatcher, "
+        "one that is `dead` needs a person, and no row at all means no trigger matched.",
+    )
+    queue.add_argument("--limit", type=int, default=20)
+    queue.add_argument("--pipeline", default=None, help="only this pipeline")
+    queue.add_argument(
+        "--state", default=None, choices=["queued", "claimed", "done", "dead"], help="only this state"
+    )
+
     agent_runs = sub.add_parser("agent-runs", help="show recent agent runs from the agent ledger")
     agent_runs.add_argument("--limit", type=int, default=10)
     agent_runs.add_argument("--agent", default=None, help="only this agent")
@@ -566,8 +579,10 @@ def _run(settings: Settings, args: argparse.Namespace) -> int:
     ``0`` otherwise. CI uses ``--check``, which can only return 0 or 2.
     """
     from candlegraph.harness.pipelines import (
+        PipelineCycleError,
         PipelineError,
         PipelineSpec,
+        check_cycles,
         load_pipeline,
         resolve_spec,
         run_pipeline,
@@ -587,6 +602,13 @@ def _run(settings: Settings, args: argparse.Namespace) -> int:
             refused = True
     if refused:
         return 2
+    try:
+        # Only a set of specs can be checked for this, which is why CI runs
+        # `--check pipelines/*.yaml` and not one file at a time.
+        check_cycles(specs)
+    except PipelineCycleError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     if args.check:
         for spec in specs:
@@ -605,6 +627,36 @@ def _run(settings: Settings, args: argparse.Namespace) -> int:
         if run.outcome is Outcome.FAILED:
             exit_code = 1
     return exit_code
+
+
+def _queue(args: argparse.Namespace) -> int:
+    """``candlegraph queue``: the work a trigger asked for, newest first."""
+    from candlegraph.harness import queue as run_queue
+    from candlegraph.storage import get_db
+
+    rows = run_queue.recent(get_db(), limit=args.limit, pipeline=args.pipeline, state=args.state)
+    if not rows:
+        print("nothing in the queue")
+        return 0
+
+    width = max(len("pipeline"), *(len(str(row["pipeline"])) for row in rows)) + 2
+    print(
+        f"{'asked at':<21}{'pipeline':<{width}}{'trigger':<11}{'state':<9}{'try':>4}  {'dedup key':<22}run_id"
+    )
+    for row in rows:
+        run_id = str(row["run_id"])[:8] if row["run_id"] else "-"
+        print(
+            f"{row['created_at']:%Y-%m-%d %H:%M:%S}  {row['pipeline']:<{width}}"
+            f"{row['trigger']:<11}{row['state']:<9}{row['attempts']:>4}  "
+            f"{row['dedup_key']!s:<22}{run_id}"
+        )
+    dead = [row for row in rows if row["state"] == "dead"]
+    if dead:
+        print(
+            f"\n{len(dead)} dead row(s): claimed {args.limit and dead[0]['attempts']} times and "
+            "never finished. Each needs a person; the last error is in `last_error`."
+        )
+    return 0
 
 
 def _pipeline_step_printer() -> Any:
@@ -1681,6 +1733,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _jobs(settings)
         case "run":
             return _run(settings, args)
+        case "queue":
+            return _queue(args)
         case "ingest":
             return _ingest(settings, None, "manual", args.progress)
         case "backfill":

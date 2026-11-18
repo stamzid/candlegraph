@@ -134,6 +134,23 @@ class DatabaseManager:
             cursor.execute(query, params)
             return int(cursor.rowcount)
 
+    def execute_returning(
+        self, query: SqlQuery, params: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Run a write statement that ``RETURNING``s rows, and commit it.
+
+        Distinct from :meth:`fetch_all`, which **rolls back** — it is the read
+        helper, and a read that commits would hold locks for no reason. An
+        ``INSERT … ON CONFLICT DO NOTHING RETURNING *`` through the read path
+        looks like it worked and leaves nothing behind, which is how the queue
+        first failed to deduplicate anything at all.
+        """
+        with self.cursor(commit=True) as cursor:
+            cursor.execute(query, params)
+            if cursor.description is None:
+                return []
+            return [dict(row) for row in cursor.fetchall()]
+
     def upsert_many(
         self,
         query: SqlQuery,

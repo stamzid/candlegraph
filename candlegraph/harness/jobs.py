@@ -200,6 +200,12 @@ def _embed(ctx: JobContext) -> RunOutcome:
     return embed_job_body(ctx)
 
 
+def _dispatch(ctx: JobContext) -> RunOutcome:
+    from candlegraph.harness.events import dispatch_job_body
+
+    return dispatch_job_body(ctx)
+
+
 def run_ledger(settings: Settings, db: DatabaseManager, params: Mapping[str, Any]) -> RunHook:
     """The generic `run` table: for every job without a ledger of its own.
 
@@ -209,6 +215,18 @@ def run_ledger(settings: Settings, db: DatabaseManager, params: Mapping[str, Any
     from candlegraph.harness.hooks import RunLedgerHook
 
     return RunLedgerHook(db)
+
+
+def quiet_run_ledger(settings: Settings, db: DatabaseManager, params: Mapping[str, Any]) -> RunHook:
+    """The same table, but only for the ticks that did something.
+
+    For a job that runs every minute and usually finds nothing to do. See
+    :class:`~candlegraph.harness.hooks.QuietRunLedgerHook` for why this is an
+    exception to invariant 27 rather than a convenience.
+    """
+    from candlegraph.harness.hooks import QuietRunLedgerHook
+
+    return QuietRunLedgerHook(db)
 
 
 def _agent_outcome(report: AgentReport) -> RunOutcome:
@@ -307,6 +325,21 @@ JOBS: dict[str, Job] = {
             # The (asset, UTC day) cache makes the second run of a day free,
             # and documents upsert on url_hash. Proved by
             # test_running_fetch_news_twice_writes_the_same_state.
+            idempotent=True,
+        ),
+        Job(
+            name="dispatch",
+            run=_dispatch,
+            schedule=Every("event_poll_interval"),
+            role="agents",
+            # It starts pipelines, which write; it writes only the queue and
+            # its own row. The pipelines it starts declare their own surfaces.
+            writes=frozenset({"ledger"}),
+            description="Turn finished runs and elapsed schedules into pipeline runs",
+            # Quiet: a tick that found nothing is not a run anyone reads.
+            ledger=quiet_run_ledger,
+            # A tick is safe to repeat — that is the queue's dedup key's whole
+            # job. Proved by test_running_dispatch_twice_writes_the_same_state.
             idempotent=True,
         ),
         # --- the pipeline steps -----------------------------------------------

@@ -61,6 +61,14 @@ refused with the line to fix; `make check-pipelines` does that and runs nothing.
 declared idempotent can be a step, and no pipeline may write market data — ingestion stays
 the worker's.
 
+A pipeline can also **start by itself**. `hourly.yaml` watches ingest: when a poll
+succeeds, the dispatcher queues one hourly run **per bar hour** — ingest runs every five
+minutes, so twelve successful polls produce one pipeline run, not twelve. The run records
+`trigger=event` and points at the ingest run that caused it. Set `EVENT_POLL_INTERVAL=0`
+to turn that off and run pipelines only when asked. `make queue` is where to look when a
+pipeline did not run: a row still `queued` is waiting for the dispatcher, a `dead` one
+needs a person, and no row at all means no trigger matched.
+
 Two pipelines ship:
 
 | | Steps | Spends money? |
@@ -115,6 +123,7 @@ make runs                                # the ingest ledger
 make runs ARGS='--all'                   # every job (ingest, observer, janitor), with trigger and outcome
 make jobs                                # the registered jobs and their schedules
 make run ARGS='pipelines/hourly.yaml'    # run a pipeline; its steps become child runs
+make queue                               # what a trigger asked for, and what became of it
 make check-pipelines                     # validate every committed spec, running nothing
 make serve ARGS='--port auto'            # the API locally, on a free port if 8000 is the stack's
 ```

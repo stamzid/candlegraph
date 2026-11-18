@@ -256,6 +256,38 @@ hypertable: the closing `UPDATE` carries no time coordinate. Rows per
 year at one daily job are in the hundreds; at stage 2's hourly pipelines,
 tens of thousands. Revisit together with `ingest_run`, not before.
 
+## `run_queue` (stage 2, rollout step 5) — plain
+
+Recorded here before the migration was written. The queue holds **work that
+is waiting**, one row per pipeline run that a trigger asked for. It is the
+second table in this database that is deleted from on purpose, after the fill
+cache — and for the same kind of reason: a finished queue row is not history,
+it is a completed instruction. The history is in `run`.
+
+| Table | 1. Observation grain | 2. Time-ordered writes | 3. Range reads | 4. Unbounded growth | Placement |
+|---|---|---|---|---|---|
+| `run_queue` | **no**: a row is an intention, not a measurement | **no**: inserted once, then updated by `id` as it is claimed and completed | no: read by `state` and `available_at`, newest-last | **no**: pruned once done | **plain** |
+
+Three of the four fail, and the write pattern is decisive: a queue row is
+`UPDATE`d several times by its own id as it moves `queued → claimed → done`,
+which on a time-partitioned table would search every chunk — the same reason
+`ingest_run` is plain. Volume is small by construction: the dedup key bounds
+it to one row per pipeline per hour, so a few hundred rows a day.
+
+**No `run_event` table.** The design's §7.7 specifies a transactional outbox:
+a `run_event` row written in the same transaction as the ledger close, read
+by a dispatcher. It is not built, and the reason is worth recording here
+because it is a storage decision. The outbox pattern keeps an event and a
+state change consistent **across two stores** — Postgres and Kafka, say. Here
+the producer and the consumer are the same database, and `run_log` already
+records every finished run with its outcome and its time. A second row saying
+the same thing is one more thing to keep in sync, and the failure it protects
+against (the event written, the run not recorded) cannot happen when there is
+only one write. The dispatcher polls `run_log` over a lookback window; the
+queue's unique key makes re-reading the same window free. If a second consumer
+outside Postgres ever appears, the outbox comes back — and §10.2 already says
+what would bring it.
+
 ## How to apply this to a new table
 
 Ask the four questions in "The rule" before writing the migration, and record

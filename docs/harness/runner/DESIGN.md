@@ -331,9 +331,14 @@ class RunHook(Protocol):
     def finished(self, run: Run, outcome: RunOutcome) -> None: ...
 ```
 
-Today there are three: the log hook and the two ledger hooks. Stage 2
-can add an event-bus hook (for example, start the observer when ingest
-finishes) and a tracing hook without changing this design.
+Today there are four: the log hook and the three ledger hooks. Stage 2
+was expected to add an event-bus hook here; it did not, and the reason is
+worth keeping. A hook fires **inside the process that ran the job**, and
+ingest runs in the worker while pipelines run in the agents process — so
+the hook would have had to write somewhere the other process reads, which
+is the work queue. Going straight to the queue removes a hop and a
+failure mode. The seam is still the right one for step 6's tracing, which
+genuinely is per-process. See `../pipelines/DESIGN.md` §7.7.
 
 ### `run=` in the log
 
