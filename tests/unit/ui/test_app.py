@@ -48,6 +48,7 @@ PAGES = (
     "Simulation",
     "Forecast",
     "Agents",
+    "Pipelines",
     "News",
     "Data",
 )
@@ -853,3 +854,130 @@ def test_the_forecast_dashboard_offers_the_posterior() -> None:
     text = " ".join(m.value for m in app.markdown)
     assert "Parameter Uncertainty" in text
     assert not app.exception, [str(e) for e in app.exception]
+
+
+# --- the Pipelines page (rollout "the harness, visible", step 2) -------------
+
+PIPELINE_RUN = "aaaaaaaa-0000-0000-0000-000000000001"
+
+
+def pipeline_row() -> dict[str, Any]:
+    steps = ["validate", "refresh_aggregates", "analyse", "signal", "explain"]
+    started = datetime(2026, 11, 19, 9, 20, tzinfo=UTC)
+    return {
+        "run_id": PIPELINE_RUN,
+        "job": "hourly",
+        "trigger": "event",
+        "outcome": "partial",
+        "verdict": None,
+        "started_at": started,
+        "finished_at": started,
+        "duration_seconds": 8.2,
+        "parent_run_id": "1111111a-0000-0000-0000-000000000000",
+        "detail": {
+            "stages": [
+                {"name": step, "status": "ok", "started_at": None, "duration_seconds": 0.5} for step in steps
+            ],
+            "steps": [
+                {"id": step, "job": step, "status": "succeeded", "attempts": 1, "duration_seconds": 0.5}
+                for step in steps
+            ],
+        },
+    }
+
+
+def queue_entry(row_id: int, state: str, dedup_key: str) -> dict[str, Any]:
+    at = datetime(2026, 11, 19, 9, 20, tzinfo=UTC)
+    return {
+        "id": row_id,
+        "pipeline": "hourly",
+        "trigger": "event",
+        "state": state,
+        "attempts": 1,
+        "dedup_key": dedup_key,
+        "created_at": at,
+        "available_at": at,
+        "finished_at": None,
+        "run_id": None,
+        "last_error": "lease expired five times" if state == "dead" else None,
+    }
+
+
+def run_pipelines_page(db: FakeDatabase) -> AppTest:
+    app = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    app.run()
+    app.sidebar.radio[0].set_value("Pipelines").run()
+    return app
+
+
+def test_the_pipelines_page_draws_a_run_with_its_five_steps() -> None:
+    db = seeded_db()
+    db.reads["get_pipeline_runs"] = [pipeline_row()]
+
+    app = run_pipelines_page(db)
+
+    assert not app.exception, [str(e) for e in app.exception]
+    labels = [e.label for e in app.main.expander]
+    assert any("hourly" in label and "partial" in label and "event" in label for label in labels)
+    metric_labels = [m.label for m in app.main.metric]
+    for step in ("validate", "refresh_aggregates", "analyse", "signal", "explain"):
+        assert step in metric_labels
+
+
+def test_the_pipelines_page_shows_the_queue_with_its_dedup_key_and_a_dead_row() -> None:
+    db = seeded_db()
+    db.reads["get_queue"] = [
+        queue_entry(1, "done", "hour:2026-11-19T09"),
+        queue_entry(2, "dead", "every7200:249316"),
+    ]
+
+    app = run_pipelines_page(db)
+
+    assert not app.exception
+    queue = next(frame.value for frame in app.main.dataframe if "dedup_key" in frame.value.columns)
+    assert "hour:2026-11-19T09" in list(queue["dedup_key"])
+    assert "dead" in list(queue["state"])
+    dead = next(m for m in app.main.metric if m.label == "Dead rows")
+    assert dead.value == "1"
+
+
+def test_the_pipelines_page_has_no_buttons_because_it_is_read_only() -> None:
+    """Step 3 adds the first button that can start work, on its own, behind
+    the queue. Until then nothing on this page may act."""
+    db = seeded_db()
+    db.reads["get_pipeline_runs"] = [pipeline_row()]
+
+    app = run_pipelines_page(db)
+
+    assert not app.exception
+    assert list(app.main.button) == []
+    assert db.executed == [] and db.upserts == []
+
+
+def test_a_broken_spec_is_drawn_as_a_card_and_the_page_still_renders(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "good.yaml").write_text(
+        "name: good\nsteps:\n  - id: o\n    job: observer\n", encoding="utf-8"
+    )
+    (tmp_path / "broken.yaml").write_text("name: broken\nsteps:\n  - id: x\n    job: no_such_job\n")
+    monkeypatch.setenv("PIPELINES_DIR", str(tmp_path))
+    db = seeded_db()
+
+    app = run_pipelines_page(db)
+
+    assert not app.exception, [str(e) for e in app.exception]
+    errors = " ".join(str(e.value) for e in app.main.error)
+    assert "broken.yaml" in errors and "no_such_job" in errors
+    cards = [str(m.value) for m in app.main.markdown if str(m.value).startswith("**good** v1")]
+    assert cards, "the valid spec must still be drawn beside the broken one"
+
+
+def test_the_pipelines_page_says_when_the_dispatcher_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EVENT_POLL_INTERVAL", "0")
+    db = seeded_db()
+
+    app = run_pipelines_page(db)
+
+    assert not app.exception
+    assert any("dispatcher is off" in str(w.value) for w in app.main.warning)

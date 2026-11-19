@@ -39,7 +39,7 @@ flowchart LR
 | compute | `analytics/` — pure, no I/O but reads | done |
 | judge | `strategies/`, the backtester, the three simulators | done; more models are stage 4 |
 | explain | retrieval bounded by the bar, the citation validator | done |
-| operate | the harness: jobs, runs, pipelines, the queue, traces | **built, but terminal-only** — the current rollout puts it on screen |
+| operate | the harness: jobs, runs, pipelines, the queue, traces | **built; visible since step 2, not yet operable from the UI** — the Pipelines page shows runs, steps, queue and specs read-only; starting a run is step 3 |
 | answer | the analyst | proposed only |
 
 The two rules that make the line hold: **a number is computed, never
@@ -170,7 +170,7 @@ into a conversation.
 flowchart TB
   subgraph now["Today"]
     P1["person"] --> T1["CLI / UI / MCP"] --> Q1["read: candles, stats,<br/>backtest, explain"]
-    P1 --> T2["terminal only:<br/>run a pipeline, see the queue,<br/>change a budget or a model"]
+    P1 --> T2["terminal only:<br/>run a pipeline,<br/>change a budget or a model<br/>(seeing runs and the queue: the Pipelines page)"]
   end
   subgraph next["After this rollout"]
     P2["person"] --> UI2["Pipelines page"]

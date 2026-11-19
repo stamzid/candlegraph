@@ -1,6 +1,6 @@
 # Rollout: the harness, visible — operating candlegraph from the UI
 
-**Status:** current — planned 2026-11-19, not started. Eight steps.
+**Status:** current — planned 2026-11-19; steps 1 and 2 done, step 3 next. Eight steps.
 **Where it sits:** a follow-on to stage 2, not a new roadmap stage. It
 numbers nothing: the roadmap's next *stage* is still 3 (traditional
 markets), and this plan is what makes stage 2 usable by a person before
@@ -69,8 +69,8 @@ fixed.
 
 | # | Step | Size | Depends on | Status |
 |---|---|---|---|---|
-| 1 | Two corrections first: the Docker-less skip, and ports on loopback | S | — | todo |
-| 2 | The Pipelines page, read-only | M | 1 | todo |
+| 1 | Two corrections first: the Docker-less skip, and ports on loopback | S | — | done 2026-11-19 |
+| 2 | The Pipelines page, read-only | M | 1 | done 2026-11-19 |
 | 3 | Start a pipeline from the page (enqueue, never execute) | M | 2 | todo |
 | 4 | The `run` prune job | S | — | todo |
 | 5 | The budget manager | M | — | todo |
@@ -138,6 +138,42 @@ skipped); with Docker running, it passes with the tier executed;
 `docker compose ps` shows `127.0.0.1:8000->8000/tcp`; `make e2e` still
 passes.
 
+**Outcome.** Done 2026-11-19 (shared a session with step 2, at the
+user's request; 1 was finished and green before 2 started).
+
+- **The plan's diagnosis was half wrong.** The test *did* guard
+  `container.start()`; what escaped was the **constructor**.
+  `PostgresContainer(...)` builds a Docker client and pings the daemon
+  in `__init__`, and the test built it before its `try`. `conftest`
+  always built it inside, which is why only this one test failed. The fix
+  moves construction into the guard, with a comment saying why.
+- **Reproduced without stopping Docker.** Another project and another
+  session's stack were running on the daemon, so stopping it was not an
+  option. `DOCKER_HOST=unix:///nonexistent/docker.sock` fails in the
+  same place: 1 failed before the fix, **231 skipped, 0 failed** after.
+  `make check` that way: 1725 passed, 242 skipped. With Docker running:
+  **1956 passed**, 11 skipped (e2e only).
+- **`BIND_HOST`, not `HOST`.** `HOST` and `UI_HOST` are the in-container
+  listen addresses and must stay `0.0.0.0`, or Docker cannot forward a
+  published port to the server at all. Reusing the name would have
+  invited exactly that mistake, so the host-side address is a separate
+  setting and `.env.example`, the README and `run-stack` all say which is
+  which. It is a compose interpolation variable, not a `Settings` field:
+  the application never reads it.
+- **Five ports, not four.** The opt-in collector overlay publishes 4318,
+  and an open trace receiver is still an open port. It is bound the same
+  way. `OLLAMA_HOST_PORT` and `OTEL_HTTP_PORT` were missing from
+  `.env.example` and are now documented beside the others.
+- **Pinned by a test.** `test_every_published_port_binds_to_loopback_unless_told_otherwise`
+  reads both compose files; run against the previous `docker-compose.yaml`
+  it names all four unbound services. A second test checks the warning
+  is in `.env.example`.
+- **On a real stack** (`cg-elm-1795083268`): every published port shows
+  `127.0.0.1:…`; `/status` answers 200 on loopback and the connection is
+  **refused on the LAN address**; `make e2e` 11 passed.
+- Audit finding 8 is recorded as half closed: the exposure is gone, the
+  missing authentication is not.
+
 ---
 
 ## Step 2 — The Pipelines page, read-only
@@ -174,6 +210,67 @@ under 60 lines (the step 1 rule from stage 2).
 queue row with its dedup key, and a `dead` row when one exists; a
 deliberately broken spec shows as a card and the rest of the page still
 draws; `AppTest` covers the page; `make check` green.
+
+**Outcome.** Done 2026-11-19, in the same session as step 1 and after it
+was green.
+
+- **The page.** `Pipelines`, between Agents and News. A metric strip
+  (latest run and outcome, age, waiting, **dead**, dispatcher), warnings
+  for what stops pipelines quietly, one expander per run with the step
+  strip and a steps table, the queue, and a card per spec. The page
+  function is 10 lines over five panels; all the arithmetic is in
+  `viewmodels.py` (`build_pipelines_view`, `load_spec_cards`,
+  `describe_trigger`, `duration_text`, `age_text`). **No button, no
+  write** — a unit test asserts the fake recorded no writes, and an
+  `AppTest` asserts the page has no buttons at all.
+- **One new statement, against the plan's "reuse".** `get_pipeline_runs`
+  keeps the newest *N per pipeline* with a window function. One shared
+  `LIMIT` — reusing `get_run_log` — would let `hourly` (24 runs a day)
+  push `daily` (one) off the page within a day, so that it looked as
+  though it had never run. Still one query however many specs. An
+  integration test writes twelve `hourly` runs and one `daily` and checks
+  both survive the cap.
+- **The steps table reads `detail.steps`, not the child runs.** The
+  parent's record has the step id, attempts, error class and every
+  **skipped** step; a child run has none of those and a skipped step has
+  no child run at all. Child runs are used only while a run is still
+  going (its `detail` is written when it closes), and the page says the
+  table is live then.
+- **Owned versus caused.** `parent_run_id` means "owned by" for a step and
+  "caused by" for an event-triggered run, so a pipeline started by
+  another pipeline finishing would have shown as one of its steps. The
+  loader guarantees a pipeline name is never a job name, so a child named
+  like a pipeline is listed as *started next*. **Found, not fixed:**
+  `candlegraph runs` has the same latent mis-display — it would indent a
+  caused pipeline as a step. No committed spec triggers on another
+  pipeline, so it is invisible today; it is a CLI change and belongs
+  with step 3, which touches the same vocabulary.
+- **Dead rows cannot scroll away.** The queue is the newest 50 rows plus
+  every `dead` row, fetched separately and merged by id, because a dead
+  row is the one thing on the page that needs a person.
+- **Specs are loaded one file at a time.** `load_pipeline_dir` stops at
+  the first bad file — right for `--check`, wrong for a page. What only
+  the set can be wrong about (a shared name, a trigger loop) is checked
+  over the specs that loaded and shown as its own error.
+- **What the page does not show, on purpose.** Runs of a pipeline whose
+  spec no longer exists, and runs of a spec the loader refuses (its name
+  cannot be known without trusting the file it refused). The dispatcher
+  is a quiet job, so "newest recorded tick" is the newest tick that *did*
+  something, and the caption says so rather than implying it stopped.
+- **On a real stack** (`cg-elm-1795083268`, after ~40 minutes of real
+  ingest): rendered headlessly against its database — no exception, no
+  button; `hourly · PARTIAL`, the five-step strip, the cold-start
+  `failed` run beside it; the queue with `hour:2026-11-19T10` and
+  `every7200:…`; and, after seeding one dead row into that throwaway
+  database and pointing `PIPELINES_DIR` at the specs plus a broken one,
+  **Dead rows 1** and the card
+  `specs/broken.yaml:4: unknown job 'no_such_job'` with the three real
+  specs still drawn.
+- `make check` **1997 passed**, 11 skipped (e2e), integration ran;
+  without Docker the integration tier is 233 skipped, 0 failed.
+- Not done, and not claimed: caching. The page makes up to five database
+  reads per Streamlit rerun, plus reading the spec files — the Agents page
+  is no different; audit finding 14 stands.
 
 ---
 

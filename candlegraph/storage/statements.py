@@ -243,6 +243,7 @@ class Statements:
     get_recent_agent_runs: sql.Composed
     get_run_log: sql.Composed
     get_run_log_children: sql.Composed
+    get_pipeline_runs: sql.Composed
     # the pipeline work queue
     # continuous aggregates
     chart_query_daily: sql.Composed
@@ -781,6 +782,24 @@ def statements_for(schema: str) -> Statements:
         """
     ).format(ns=ns)
 
+    # The Pipelines dashboard: the newest runs of *each* named pipeline. A
+    # per-pipeline cap rather than one LIMIT, because `hourly` runs twenty-four
+    # times a day and `daily` once — under a shared limit the daily pipeline
+    # would fall off the page within a day and look as though it never ran.
+    # One query whatever the number of specs; `rank` is the window's, not data.
+    get_pipeline_runs = sql.SQL(
+        """
+        SELECT * FROM (
+            SELECT log.*,
+                   row_number() OVER (PARTITION BY log.job ORDER BY log.started_at DESC) AS rank
+            FROM {ns}.run_log AS log
+            WHERE log.job = ANY(%(jobs)s::text[])
+        ) AS ranked
+        WHERE ranked.rank <= %(per_pipeline)s
+        ORDER BY ranked.started_at DESC
+        """
+    ).format(ns=ns)
+
     # --- continuous aggregates (stage 2, step 6) ----------------------------
     # The same candles as `chart_query`, read from `token_daily` instead of
     # re-aggregating the hourly rows. Only valid when the requested interval
@@ -1034,6 +1053,7 @@ def statements_for(schema: str) -> Statements:
         get_recent_agent_runs=get_recent_agent_runs,
         get_run_log=get_run_log,
         get_run_log_children=get_run_log_children,
+        get_pipeline_runs=get_pipeline_runs,
         get_finished_runs_since=get_finished_runs_since,
         enqueue_run=enqueue_run,
         claim_queued_run=claim_queued_run,

@@ -18,13 +18,18 @@ import pytest
 from candlegraph.analytics.arima import ArimaConfig, ArimaForecast
 from candlegraph.analytics.portfolio import PortfolioConfig
 from candlegraph.analytics.risk import RiskConfig
+from candlegraph.harness.pipelines import EventTrigger, ScheduleTrigger, Trigger
+from candlegraph.harness.runs import Outcome
 from candlegraph.ingestion.quality import Gap
+from candlegraph.settings import REPO_ROOT
 from candlegraph.strategies import available
 from candlegraph.strategies.backtest import BacktestConfig
 from candlegraph.strategies.bollinger import BollingerConfig
 from candlegraph.ui.viewmodels import (
+    PIPELINE_RUNS_PER_PIPELINE,
     Preferences,
     ViewError,
+    age_text,
     available_symbols,
     build_agents_view,
     build_forecast,
@@ -32,6 +37,7 @@ from candlegraph.ui.viewmodels import (
     build_method_scores,
     build_news_view,
     build_pair_view,
+    build_pipelines_view,
     build_portfolio_view,
     build_quality_view,
     build_risk_view,
@@ -43,11 +49,14 @@ from candlegraph.ui.viewmodels import (
     default_index,
     default_max_weight,
     default_portfolio_symbols,
+    describe_trigger,
+    duration_text,
     fill_overlay,
     forecast_frame,
     format_metric,
     gap_lane_segments,
     load_prices,
+    load_spec_cards,
     longest_gaps,
     method_catalogue,
     observed_gaps,
@@ -1579,3 +1588,354 @@ def test_a_window_with_no_history_is_a_readable_refusal() -> None:
 
 
 # --- the look-ahead, drawn ---------------------------------------------------
+
+
+# --- pipelines dashboard (rollout "the harness, visible", step 2) --------------
+
+NOW = datetime(2026, 11, 19, 12, 0, tzinfo=UTC)
+HOURLY_STEPS = ["validate", "refresh_aggregates", "analyse", "signal", "explain"]
+
+
+def pipeline_run_row(
+    run_id: str = "aaaaaaaa-0000-0000-0000-000000000001",
+    job: str = "hourly",
+    trigger: str = "event",
+    outcome: str = "partial",
+    parent: str | None = "1111111a-0000-0000-0000-000000000000",
+    closed: bool = True,
+) -> dict[str, Any]:
+    """A `run_log` row for a pipeline run, shaped as the executor writes it."""
+    statuses = ["partial", "succeeded", "succeeded", "succeeded", "skipped"]
+    detail = (
+        {
+            "pipeline": job,
+            "stages": [
+                {"name": step, "status": status, "started_at": None, "duration_seconds": 0.5}
+                for step, status in zip(HOURLY_STEPS, statuses, strict=True)
+            ],
+            "steps": [
+                {
+                    "id": step,
+                    "job": step,
+                    "status": status,
+                    "run_id": None,
+                    "duration_seconds": 0.5,
+                    "error": None,
+                    "counts": {},
+                    "attempts": 0 if status == "skipped" else 1,
+                    "error_class": None,
+                }
+                for step, status in zip(HOURLY_STEPS, statuses, strict=True)
+            ],
+        }
+        if closed
+        else {}
+    )
+    return {
+        "run_id": run_id,
+        "job": job,
+        "trigger": trigger,
+        "outcome": outcome if closed else "running",
+        "verdict": None,
+        "started_at": NOW - timedelta(minutes=30),
+        "finished_at": NOW - timedelta(minutes=29) if closed else None,
+        "duration_seconds": 8.2 if closed else None,
+        "parent_run_id": parent,
+        "detail": detail,
+    }
+
+
+def child_row(job: str, parent: str, outcome: str = "succeeded") -> dict[str, Any]:
+    return {
+        "run_id": f"c-{job}",
+        "job": job,
+        "trigger": "event",
+        "outcome": outcome,
+        "verdict": None,
+        "started_at": NOW - timedelta(minutes=30),
+        "finished_at": None,
+        "duration_seconds": 0.1,
+        "parent_run_id": parent,
+        "detail": {},
+    }
+
+
+def queue_row(row_id: int, state: str = "done", dedup_key: str = "hour:2026-11-19T11") -> dict[str, Any]:
+    return {
+        "id": row_id,
+        "pipeline": "hourly",
+        "version": 1,
+        "dedup_key": dedup_key,
+        "trigger": "event",
+        "cause_run_id": None,
+        "state": state,
+        "available_at": NOW - timedelta(hours=row_id),
+        "created_at": NOW - timedelta(hours=row_id),
+        "attempts": 1,
+        "last_error": "boom" if state == "dead" else None,
+        "claimed_by": None,
+        "lease_expires_at": None,
+        "run_id": None,
+        "finished_at": None,
+    }
+
+
+def committed_specs_settings(**overrides: Any) -> Any:
+    return make_settings(pipelines_dir=str(REPO_ROOT / "pipelines"), **overrides)
+
+
+def test_the_pipelines_view_reads_every_committed_spec() -> None:
+    view = build_pipelines_view(FakeDatabase(), committed_specs_settings(), now=NOW)
+
+    assert {card.name for card in view.specs} == {"daily", "example", "hourly"}
+    assert all(card.loaded for card in view.specs)
+    hourly = next(card for card in view.specs if card.name == "hourly")
+    assert list(hourly.steps["step"]) == HOURLY_STEPS
+    assert hourly.deadline == "15m"
+    assert hourly.starts_itself
+
+
+def test_a_spec_with_no_trigger_says_a_person_starts_it() -> None:
+    view = build_pipelines_view(FakeDatabase(), committed_specs_settings(), now=NOW)
+
+    daily = next(card for card in view.specs if card.name == "daily")
+    assert not daily.starts_itself
+
+
+def test_a_closed_run_shows_every_step_it_recorded_including_skipped_ones() -> None:
+    """The child rows have no step id and a skipped step has no row at all, so
+    the recorded `detail.steps` is the source of truth for a closed run."""
+    db = FakeDatabase(get_pipeline_runs=[pipeline_run_row()])
+
+    view = build_pipelines_view(db, committed_specs_settings(), now=NOW)
+
+    family = view.latest
+    assert family is not None and family.pipeline == "hourly"
+    assert list(family.steps["step"]) == HOURLY_STEPS
+    assert list(family.steps["status"])[-1] == "skipped"
+    assert not family.live
+    assert list(family.stages["stage"]) == HOURLY_STEPS
+
+
+def test_an_event_triggered_run_names_the_run_that_caused_it() -> None:
+    db = FakeDatabase(get_pipeline_runs=[pipeline_run_row(trigger="event", parent="1111111a-cause")])
+
+    family = build_pipelines_view(db, committed_specs_settings(), now=NOW).latest
+
+    assert family is not None and family.caused_by == "1111111a-cause"
+
+
+def test_a_manual_run_has_no_cause() -> None:
+    db = FakeDatabase(get_pipeline_runs=[pipeline_run_row(trigger="manual", parent=None)])
+
+    family = build_pipelines_view(db, committed_specs_settings(), now=NOW).latest
+
+    assert family is not None and family.caused_by is None
+
+
+def test_a_run_still_going_shows_its_step_runs_so_far() -> None:
+    parent = "aaaaaaaa-0000-0000-0000-000000000009"
+    db = FakeDatabase(
+        get_pipeline_runs=[pipeline_run_row(run_id=parent, closed=False)],
+        get_run_log_children=[
+            child_row("validate", parent),
+            child_row("refresh_aggregates", parent, "running"),
+        ],
+    )
+
+    family = build_pipelines_view(db, committed_specs_settings(), now=NOW).latest
+
+    assert family is not None and family.live
+    assert list(family.steps["job"]) == ["validate", "refresh_aggregates"]
+    assert family.stages.empty
+
+
+def test_a_pipeline_started_by_this_run_is_not_listed_as_one_of_its_steps() -> None:
+    """`parent_run_id` means "owned by" for a step and "caused by" for an
+    event-triggered run. A pipeline name never equals a job name (the loader
+    refuses it), so a child named like a pipeline was started, not owned."""
+    parent = "aaaaaaaa-0000-0000-0000-00000000000a"
+    db = FakeDatabase(
+        get_pipeline_runs=[pipeline_run_row(run_id=parent, closed=False)],
+        get_run_log_children=[child_row("validate", parent), child_row("daily", parent)],
+    )
+
+    family = build_pipelines_view(db, committed_specs_settings(), now=NOW).latest
+
+    assert family is not None
+    assert list(family.steps["job"]) == ["validate"]
+    assert family.started_next == ("daily",)
+
+
+def test_runs_are_asked_for_per_pipeline_so_a_frequent_one_cannot_crowd_out_a_rare_one() -> None:
+    db = FakeDatabase()
+
+    build_pipelines_view(db, committed_specs_settings(), now=NOW)
+
+    params = next(p for label, p in db.fetches if label == "get_pipeline_runs")
+    assert params == {"jobs": ["daily", "example", "hourly"], "per_pipeline": PIPELINE_RUNS_PER_PIPELINE}
+
+
+def test_no_children_are_fetched_when_no_pipeline_has_run() -> None:
+    db = FakeDatabase()
+
+    build_pipelines_view(db, committed_specs_settings(), now=NOW)
+
+    assert "get_run_log_children" not in [label for label, _ in db.fetches]
+
+
+def test_the_pipelines_view_writes_nothing() -> None:
+    """Step 2 is read-only by definition: no enqueue, no claim, no refresh."""
+    db = FakeDatabase(
+        get_pipeline_runs=[pipeline_run_row()],
+        get_queue=[queue_row(1)],
+        get_run_log=[{"job": "dispatch", "outcome": "succeeded", "started_at": NOW}],
+    )
+
+    build_pipelines_view(db, committed_specs_settings(), now=NOW)
+
+    assert db.executed == []
+    assert db.upserts == []
+
+
+def test_a_dead_queue_row_is_kept_even_when_older_than_the_newest_page() -> None:
+    """The dead-row query is separate so an old dead row cannot scroll away;
+    the two reads overlap, and a row must not appear twice."""
+    db = FakeDatabase(get_queue=[queue_row(1, "done"), queue_row(2, "queued"), queue_row(30, "dead")])
+
+    view = build_pipelines_view(db, committed_specs_settings(), now=NOW)
+
+    assert sorted(view.queue["id"]) == [1, 2, 30]
+    assert view.dead == 1
+    assert view.waiting == 1
+    assert list(view.queue["created_at"]) == sorted(view.queue["created_at"], reverse=True)
+
+
+def test_the_queue_keeps_its_dedup_key_on_screen() -> None:
+    db = FakeDatabase(get_queue=[queue_row(1, dedup_key="hour:2026-11-19T09")])
+
+    view = build_pipelines_view(db, committed_specs_settings(), now=NOW)
+
+    assert "dedup_key" in view.queue.columns
+    assert view.queue.iloc[0]["dedup_key"] == "hour:2026-11-19T09"
+
+
+def test_the_dispatcher_being_off_is_visible() -> None:
+    view = build_pipelines_view(FakeDatabase(), committed_specs_settings(event_poll_interval=0), now=NOW)
+
+    assert not view.dispatcher_enabled
+
+
+def test_the_newest_dispatch_run_is_read_from_the_ledger() -> None:
+    dispatch = {"job": "dispatch", "outcome": "succeeded", "started_at": NOW}
+    db = FakeDatabase(get_run_log=[dispatch])
+
+    view = build_pipelines_view(db, committed_specs_settings(), now=NOW)
+
+    assert view.last_dispatch == dispatch
+    assert ("get_run_log", {"job": "dispatch", "limit": 1}) in db.fetches
+
+
+def test_the_latest_runs_age_is_measured_from_now() -> None:
+    db = FakeDatabase(get_pipeline_runs=[pipeline_run_row()])
+
+    view = build_pipelines_view(db, committed_specs_settings(), now=NOW)
+
+    assert view.latest_age_seconds == 30 * 60
+
+
+GOOD_SPEC = """
+name: good
+version: 1
+steps:
+  - id: observe
+    job: observer
+"""
+
+
+def test_a_broken_spec_is_a_card_and_the_good_ones_still_load(tmp_path: Any) -> None:
+    """A page that dies because one YAML file is wrong is worse than the file."""
+    (tmp_path / "good.yaml").write_text(GOOD_SPEC, encoding="utf-8")
+    (tmp_path / "broken.yaml").write_text("name: broken\nsteps:\n  - id: x\n    job: no_such_job\n")
+
+    cards, specs, problems = load_spec_cards(tmp_path)
+
+    by_name = {card.name: card for card in cards}
+    assert by_name["good"].loaded
+    assert not by_name["broken"].loaded
+    assert any("no_such_job" in problem and ":4:" in problem for problem in by_name["broken"].problems)
+    assert [spec.name for spec in specs] == ["good"]
+    assert problems == ()
+
+
+def test_a_broken_spec_does_not_stop_the_view_being_built(tmp_path: Any) -> None:
+    (tmp_path / "broken.yaml").write_text("not: [valid", encoding="utf-8")
+
+    view = build_pipelines_view(FakeDatabase(), make_settings(pipelines_dir=str(tmp_path)), now=NOW)
+
+    assert [card.loaded for card in view.specs] == [False]
+    assert view.families == ()
+
+
+def test_two_specs_sharing_a_name_are_reported_across_the_set(tmp_path: Any) -> None:
+    (tmp_path / "a.yaml").write_text(GOOD_SPEC, encoding="utf-8")
+    (tmp_path / "b.yaml").write_text(GOOD_SPEC, encoding="utf-8")
+
+    _, _, problems = load_spec_cards(tmp_path)
+
+    assert problems and "good" in problems[0]
+
+
+def test_two_specs_that_would_trigger_each_other_are_reported(tmp_path: Any) -> None:
+    for name, other in (("ping", "pong"), ("pong", "ping")):
+        (tmp_path / f"{name}.yaml").write_text(
+            f"name: {name}\ntriggers:\n  - event: {{ job: {other} }}\nsteps:\n  - id: o\n    job: observer\n",
+            encoding="utf-8",
+        )
+
+    cards, _, problems = load_spec_cards(tmp_path)
+
+    assert all(card.loaded for card in cards)
+    assert len(problems) == 1
+
+
+def test_a_missing_pipelines_directory_is_said_rather_than_raised(tmp_path: Any) -> None:
+    cards, specs, problems = load_spec_cards(tmp_path / "nope")
+
+    assert cards == () and specs == ()
+    assert problems and "does not exist" in problems[0]
+
+
+@pytest.mark.parametrize(
+    ("seconds", "text"),
+    [(7200, "2h"), (900, "15m"), (45, "45s"), (90, "90s"), (None, "none")],
+)
+def test_a_duration_reads_as_a_spec_would_write_it(seconds: float | None, text: str) -> None:
+    assert duration_text(seconds) == text
+
+
+@pytest.mark.parametrize(
+    ("seconds", "text"),
+    [
+        (None, "never"),
+        (30, "just now"),
+        (300, "5m ago"),
+        (5400, "1h 30m ago"),
+        (7200, "2h ago"),
+        (3 * 86400, "3d ago"),
+    ],
+)
+def test_an_age_reads_to_the_minute(seconds: float | None, text: str) -> None:
+    assert age_text(seconds) == text
+
+
+def test_an_event_trigger_reads_as_a_sentence() -> None:
+    trigger = Trigger(event=EventTrigger(job="ingest", outcome=(Outcome.SUCCEEDED, Outcome.PARTIAL)))
+
+    assert describe_trigger(trigger) == "when `ingest` finishes succeeded or partial — at most once per hour"
+
+
+def test_a_schedule_trigger_says_it_stands_down_when_something_else_asked() -> None:
+    trigger = Trigger(schedule=ScheduleTrigger(every=7200))
+
+    assert describe_trigger(trigger).startswith("every 2h")

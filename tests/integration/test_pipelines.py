@@ -392,3 +392,68 @@ def test_the_queue_row_records_the_run_it_produced(events_db: DatabaseManager) -
     assert entry["state"] == "done"
     assert str(entry["run_id"]) == str(run["run_id"])
     assert entry["dedup_key"].startswith("hour:")
+
+
+# --- the Pipelines dashboard's reads (rollout "the harness, visible", step 2) --
+
+
+def recorded_run(db: DatabaseManager, job: str, started_at: datetime) -> str:
+    from candlegraph.harness.ledger import close_run, open_run
+
+    run_id = str(uuid.uuid4())
+    open_run(db, run_id, job, "scheduled", started_at)
+    close_run(
+        db,
+        run_id=run_id,
+        job=job,
+        trigger="scheduled",
+        outcome="succeeded",
+        started_at=started_at,
+        finished_at=started_at + timedelta(seconds=1),
+    )
+    return run_id
+
+
+def test_pipeline_runs_are_capped_per_pipeline_not_overall(pipeline_db: DatabaseManager) -> None:
+    """Under one shared LIMIT, twelve hourly runs would push the one daily run
+    off the page and it would look as though it had never run. The window
+    function keeps the newest N of *each*, and nothing that is not named."""
+    base = datetime(2026, 11, 19, tzinfo=UTC)
+    hourly = [recorded_run(pipeline_db, "hourly", base + timedelta(hours=h)) for h in range(12)]
+    daily = recorded_run(pipeline_db, "daily", base - timedelta(days=1))
+    recorded_run(pipeline_db, "fetch_news", base + timedelta(hours=20))
+
+    rows = pipeline_db.fetch_all(
+        pipeline_db.sql.get_pipeline_runs, {"jobs": ["daily", "hourly"], "per_pipeline": 10}
+    )
+
+    by_job: dict[str, list[str]] = {}
+    for row in rows:
+        by_job.setdefault(row["job"], []).append(str(row["run_id"]))
+    assert by_job["hourly"] == list(reversed(hourly))[:10], "the newest ten, newest first"
+    assert by_job["daily"] == [daily], "the rare pipeline is not crowded out"
+    assert "fetch_news" not in by_job
+    assert [row["started_at"] for row in rows] == sorted((row["started_at"] for row in rows), reverse=True)
+
+
+def test_the_pipelines_view_reads_a_real_run_and_its_steps(
+    pipeline_db: DatabaseManager, jobs: None, tmp_path: Any
+) -> None:
+    """The whole read path against real SQL: spec from disk, the run, its steps."""
+    from candlegraph.ui.viewmodels import build_pipelines_view
+
+    (tmp_path / "test_pipeline.yaml").write_text(
+        "name: test_pipeline\nsteps:\n  - id: first\n    job: step_ok\n  - id: second\n    job: step_ok\n",
+        encoding="utf-8",
+    )
+    spec = load_pipeline(tmp_path / "test_pipeline.yaml")
+    run = run_pipeline(spec, make_settings(), db=pipeline_db, trigger=UI)
+
+    view = build_pipelines_view(pipeline_db, make_settings(pipelines_dir=str(tmp_path)))
+
+    family = view.latest
+    assert family is not None and family.run_id == run.run_id
+    assert family.trigger == UI and family.outcome == "succeeded"
+    assert list(family.steps["step"]) == ["first", "second"]
+    assert list(family.stages["stage"]) == ["first", "second"]
+    assert not family.live

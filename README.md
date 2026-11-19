@@ -216,13 +216,19 @@ see [`.env.example`](.env.example) for the full list.
 | `JANITOR_OPEN_PR` / `JANITOR_BASE_BRANCH` | `false` / `main` | Push a branch and draft a PR when a fix changed files. |
 | `JANITOR_INTERVAL` | 0 | Seconds between janitor runs in `candlegraph agents`; the real schedule is a GitHub Actions cron. |
 | `INGEST_ENABLED` | `true` | `false` serves the API only. The compose stack sets this `false` for the API and runs the `worker` service instead. |
-| `HOST`, `PORT`, `LOG_LEVEL` | `0.0.0.0`, 8000, `INFO` | Server. |
+| `HOST`, `PORT`, `LOG_LEVEL` | `0.0.0.0`, 8000, `INFO` | Server. `HOST` is where it listens *inside* its container and must stay `0.0.0.0` under compose. |
+| `BIND_HOST` | `127.0.0.1` | Compose only: the **host** address every published port binds to. Loopback means only this machine reaches the stack. `0.0.0.0` exposes it to the network — and nothing in the stack authenticates a caller. |
 
 The database credentials in `.env.example` are throwaway defaults for the local Docker Postgres.
 Replace them anywhere else. `.env` is gitignored; never commit a real key.
 
 Running two checkouts at once? Compose uses the directory as its project name, so the stacks are
-already separate — just set `POSTGRES_HOST_PORT` and `APP_HOST_PORT` so the published ports differ.
+already separate — just set `POSTGRES_HOST_PORT`, `APP_HOST_PORT`, `UI_HOST_PORT` and `OLLAMA_HOST_PORT`
+so the published ports differ.
+
+The stack is reachable from **this machine only** by default: every published port binds to
+`127.0.0.1`. To open it to another machine set `BIND_HOST=0.0.0.0`, and remember that the API,
+the UI and the database then answer anyone on the network without asking who they are.
 
 ## API
 
@@ -612,6 +618,13 @@ dashboard opens with a metric strip, and every chart carries a title that says w
   agent ledger), the latest findings coloured by severity, ingest cadence, per-token coverage,
   the full run history, and a news-health strip (did the recent Tavily runs succeed, fail, or get
   refused by the budget).
+- **Pipelines** — the harness, on screen, **read-only**: the newest run of each pipeline with a
+  strip of its steps (a skipped step is shown, not hidden), where each run came from (`event`
+  runs name the ingest that caused them), the work queue with every row's dedup key — and every
+  `dead` row however old, since each needs a person — whether the dispatcher is running, and each
+  committed spec as the loader read it. A spec the loader refuses is drawn as a card with its
+  file and line, and the rest of the page still renders. Nothing on the page starts, queues or
+  refreshes anything; there is deliberately no button yet.
 - **News** — the metered Tavily pipeline in detail: credit runway for the month and the day,
   credit burn against the daily cap, call outcomes per day (ok / refused / rate-limited / error),
   the full `source_call` ledger, the freshest stored articles, and a **Fetch news** button behind

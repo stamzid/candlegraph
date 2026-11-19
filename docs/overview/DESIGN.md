@@ -48,7 +48,7 @@ flowchart LR
     W["worker<br/>ingest every 5 min"]
     A["agents<br/>observer · dispatcher<br/>pipelines · news"]
     API["candlegraph<br/>GraphQL API · migrations"]
-    UI["ui<br/>Streamlit, 12 dashboards"]
+    UI["ui<br/>Streamlit, 13 dashboards"]
     OL["ollama<br/>bge-m3 embeddings"]
     DB[("postgres<br/>TimescaleDB + pgvector")]
   end
@@ -151,12 +151,16 @@ test reads each declaration.
 
 ## Honest limits
 
-- **Laptop-grade, single box.** No authentication on the API or UI, ports
-  on every interface, no backups (audit findings 8 and 9). Fine locally;
-  required before anything is reachable from a network.
-- **Operated from a terminal.** The UI shows runs and can start an
-  observer run, a backfill or a news fetch, but not a pipeline, the
-  queue, or a schedule.
+- **Laptop-grade, single box.** No authentication on the API or UI and
+  no backups (audit findings 8 and 9). Ports bind to `127.0.0.1` by
+  default (since 2026-11-19), so only this machine can reach the stack;
+  `BIND_HOST=0.0.0.0` opens it, and real authentication is required
+  before anyone does.
+- **Operated from a terminal.** The UI shows runs, and since 2026-11-19
+  the Pipelines page shows every pipeline run, its steps, the queue and
+  the specs — read-only. It can start an observer run, a backfill or a
+  news fetch, but not yet a pipeline (rollout step 3), and it cannot
+  change a schedule, a budget or a model.
 - **`daily.yaml` has no trigger**, so new news is embedded only when
   someone runs it; and nothing prunes old `run` rows yet.
 - **Traces, not metrics.** Every run is a span; there is no metrics

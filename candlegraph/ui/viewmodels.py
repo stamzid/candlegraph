@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -75,6 +76,16 @@ from candlegraph.analytics.simulation import (
     SimulationError,
     simulate_paths,
 )
+from candlegraph.harness.pipelines import (
+    PipelineCycleError,
+    PipelineError,
+    PipelineSpec,
+    Trigger,
+    check_cycles,
+    load_pipeline,
+)
+from candlegraph.harness.queue import CLAIMED, DEAD, QUEUED
+from candlegraph.harness.queue import recent as queue_recent
 from candlegraph.harness.stages import StageHook, StageRecord, describe
 from candlegraph.ingestion.fills import (
     LINEAR,
@@ -1868,6 +1879,376 @@ def build_agents_view(db: DatabaseManager, limit: int = 30) -> AgentsView:
         news_calls=news_calls,
         stages=stages_frame(latest.get("detail") if latest else None),
         ingest_stages=_latest_stages(ingest_rows),
+    )
+
+
+# --- pipelines dashboard -------------------------------------------------------
+#
+# Read-only (rollout "the harness, visible", step 2). Nothing here enqueues,
+# claims, runs or refreshes anything: the page shows what the harness did and
+# what it was asked to do, and step 3 is where a button that asks arrives.
+
+PIPELINE_RUNS_PER_PIPELINE = 10
+"""Newest runs kept per pipeline. Per pipeline, not overall — see `get_pipeline_runs`."""
+QUEUE_ROWS = 50
+"""The newest queue rows. Dead rows are fetched separately so an old one stays visible."""
+
+_STEP_COLUMNS = ["step", "job", "status", "attempts", "seconds", "error_class", "error"]
+_QUEUE_COLUMNS = [
+    "id",
+    "pipeline",
+    "trigger",
+    "state",
+    "attempts",
+    "dedup_key",
+    "created_at",
+    "available_at",
+    "finished_at",
+    "run_id",
+    "last_error",
+]
+
+
+@dataclass(frozen=True)
+class SpecCard:
+    """One file in the pipelines directory, loaded or refused.
+
+    A refused spec is a card, never an exception: one broken YAML file must not
+    take the page down with it, and the page is where someone would go to find
+    out that it is broken.
+    """
+
+    path: str
+    name: str
+    loaded: bool
+    description: str = ""
+    version: int | None = None
+    triggers: tuple[str, ...] = ()
+    deadline: str = "none"
+    steps: pd.DataFrame = field(default_factory=pd.DataFrame)
+    problems: tuple[str, ...] = ()
+    """The loader's refusals, each with its file and line. Empty when it loaded."""
+
+    @property
+    def starts_itself(self) -> bool:
+        """Whether anything but a person starts this pipeline."""
+        return bool(self.triggers)
+
+
+@dataclass(frozen=True)
+class PipelineFamily:
+    """One pipeline run and what became of each of its steps."""
+
+    pipeline: str
+    run_id: str
+    trigger: str | None
+    outcome: str
+    started_at: datetime | None
+    duration_seconds: float | None
+    caused_by: str | None
+    """The run that started this one, for an event trigger; ``None`` otherwise."""
+    stages: pd.DataFrame
+    """One stage per step, for the strip. Empty while the run is still going."""
+    steps: pd.DataFrame
+    """Per step: id, job, status (``skipped`` included), attempts, seconds, error."""
+    live: bool
+    """True when ``steps`` came from the child runs because the run has not closed."""
+    started_next: tuple[str, ...] = ()
+    """Pipelines this run's finishing started, by event — not steps of this one."""
+
+
+@dataclass
+class PipelinesView:
+    """Everything the Pipelines dashboard shows. Read-only."""
+
+    specs: tuple[SpecCard, ...]
+    families: tuple[PipelineFamily, ...]
+    queue: pd.DataFrame
+    last_dispatch: dict[str, Any] | None
+    """The newest dispatcher run on record — the newest tick that *did* something."""
+    dispatcher_interval: int
+    """``EVENT_POLL_INTERVAL``; ``0`` means nothing claims the queue."""
+    cross_spec_problems: tuple[str, ...]
+    """What only the set of specs can be wrong about: a trigger loop, a shared name."""
+    now: datetime
+
+    @property
+    def dispatcher_enabled(self) -> bool:
+        return self.dispatcher_interval > 0
+
+    @property
+    def latest(self) -> PipelineFamily | None:
+        return self.families[0] if self.families else None
+
+    @property
+    def latest_age_seconds(self) -> float | None:
+        latest = self.latest
+        if latest is None or latest.started_at is None:
+            return None
+        return max(0.0, (self.now - latest.started_at).total_seconds())
+
+    @property
+    def waiting(self) -> int:
+        """Rows a trigger asked for that have not finished: queued or claimed."""
+        if self.queue.empty:
+            return 0
+        return int(self.queue["state"].isin([QUEUED, CLAIMED]).sum())
+
+    @property
+    def dead(self) -> int:
+        """Rows that ran out of attempts. Each one needs a person."""
+        if self.queue.empty:
+            return 0
+        return int((self.queue["state"] == DEAD).sum())
+
+    def runs_of(self, pipeline: str) -> tuple[PipelineFamily, ...]:
+        return tuple(family for family in self.families if family.pipeline == pipeline)
+
+
+def duration_text(seconds: float | None) -> str:
+    """``7200`` → ``2h``; the unit a spec would have been written in."""
+    if seconds is None:
+        return "none"
+    whole = int(seconds)
+    if whole == seconds and whole % 3600 == 0 and whole:
+        return f"{whole // 3600}h"
+    if whole == seconds and whole % 60 == 0 and whole:
+        return f"{whole // 60}m"
+    return f"{seconds:g}s"
+
+
+def age_text(seconds: float | None) -> str:
+    """``5400`` → ``1h 30m ago``: how long since a run started, to the minute."""
+    if seconds is None:
+        return "never"
+    minutes = int(seconds // 60)
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 48:
+        return f"{hours}h {minutes}m ago" if minutes else f"{hours}h ago"
+    return f"{hours // 24}d ago"
+
+
+def describe_trigger(trigger: Trigger) -> str:
+    """A trigger as a sentence, so a reader need not know the YAML."""
+    if trigger.event is not None:
+        event = trigger.event
+        outcomes = " or ".join(outcome.value for outcome in event.outcome)
+        cadence = "every time" if event.once_per == "run" else f"at most once per {event.once_per}"
+        return f"when `{event.job}` finishes {outcomes} — {cadence}"
+    if trigger.schedule is not None:
+        return f"every {duration_text(trigger.schedule.every)}, unless something asked for it more recently"
+    return "unknown trigger"  # pragma: no cover - Trigger requires exactly one
+
+
+def _spec_steps(spec: PipelineSpec) -> pd.DataFrame:
+    rows = [
+        {
+            "step": step.id,
+            "job": step.job,
+            "on_failure": step.on_failure,
+            "on_partial": step.on_partial,
+            "timeout": duration_text(step.timeout if step.timeout is not None else spec.defaults.timeout),
+            "params": describe(step.params) if step.params else "—",
+            "model_role": step.model_role or "—",
+        }
+        for step in spec.steps
+    ]
+    return pd.DataFrame(rows)
+
+
+def load_spec_cards(
+    directory: Path,
+) -> tuple[tuple[SpecCard, ...], tuple[PipelineSpec, ...], tuple[str, ...]]:
+    """Every spec file in ``directory``: the cards, the specs that loaded, and cross-spec problems.
+
+    Each file is loaded **on its own**, which is the one thing this does that
+    ``load_pipeline_dir`` does not: that function stops at the first bad file,
+    which is right for ``--check`` in CI and wrong for a page, where one broken
+    spec would hide every good one.
+    """
+    if not directory.is_dir():
+        return (), (), (f"the pipelines directory {directory} does not exist",)
+
+    cards: list[SpecCard] = []
+    specs: list[PipelineSpec] = []
+    for path in sorted(p for p in directory.glob("*.yaml") if p.is_file()):
+        shown = f"{directory.name}/{path.name}"
+        try:
+            spec = load_pipeline(path)
+        except PipelineError as exc:
+            cards.append(
+                SpecCard(
+                    path=shown,
+                    name=path.stem,
+                    loaded=False,
+                    problems=tuple(problem.render(Path(shown)) for problem in exc.problems),
+                )
+            )
+            continue
+        specs.append(spec)
+        cards.append(
+            SpecCard(
+                path=shown,
+                name=spec.name,
+                loaded=True,
+                description=spec.description,
+                version=spec.version,
+                triggers=tuple(describe_trigger(t) for t in spec.triggers),
+                deadline=duration_text(spec.deadline),
+                steps=_spec_steps(spec),
+            )
+        )
+
+    problems: list[str] = []
+    names = [spec.name for spec in specs]
+    shared = sorted({name for name in names if names.count(name) > 1})
+    if shared:
+        problems.append(f"two specs share the name(s) {', '.join(shared)}; a name is a pipeline's identity")
+    else:
+        try:
+            check_cycles(specs)
+        except PipelineCycleError as exc:
+            problems.append(str(exc))
+    return tuple(cards), tuple(specs), tuple(problems)
+
+
+def _recorded_steps(detail: Any) -> pd.DataFrame:
+    """``detail.steps`` of a closed pipeline run: every step, skipped ones included."""
+    raw = detail.get("steps") if isinstance(detail, dict) else None
+    if not raw:
+        return pd.DataFrame(columns=_STEP_COLUMNS)
+    rows = [
+        {
+            "step": item.get("id"),
+            "job": item.get("job"),
+            "status": item.get("status"),
+            "attempts": item.get("attempts"),
+            "seconds": item.get("duration_seconds"),
+            "error_class": item.get("error_class") or "—",
+            "error": item.get("error") or "—",
+        }
+        for item in raw
+    ]
+    return pd.DataFrame(rows, columns=_STEP_COLUMNS)
+
+
+def _live_steps(children: list[dict[str, Any]]) -> pd.DataFrame:
+    """The step runs of a pipeline still going, from the ledger: one row per attempt.
+
+    A step that has not started has no row yet, and the step id is not on the
+    child run — so this is the honest partial picture, not the recorded one.
+    """
+    rows = [
+        {
+            "step": "—",
+            "job": child.get("job"),
+            "status": child.get("outcome"),
+            "attempts": None,
+            "seconds": child.get("duration_seconds"),
+            "error_class": "—",
+            "error": "—",
+        }
+        for child in children
+    ]
+    return pd.DataFrame(rows, columns=_STEP_COLUMNS)
+
+
+def _families(
+    rows: list[dict[str, Any]], children: list[dict[str, Any]], pipeline_names: set[str]
+) -> tuple[PipelineFamily, ...]:
+    by_parent: dict[str, list[dict[str, Any]]] = {}
+    for child in children:
+        by_parent.setdefault(str(child.get("parent_run_id")), []).append(child)
+
+    families = []
+    for row in rows:
+        run_id = str(row["run_id"])
+        kids = by_parent.get(run_id, [])
+        # `parent_run_id` means "owned by" for a step and "caused by" for an
+        # event-triggered run. A pipeline can never share a registered job's
+        # name (the loader refuses it), so a child named like a pipeline was
+        # *started by* this run finishing — it is not one of its steps.
+        step_kids = [k for k in kids if str(k.get("job")) not in pipeline_names]
+        started_next = tuple(sorted({str(k["job"]) for k in kids if str(k.get("job")) in pipeline_names}))
+        recorded = _recorded_steps(row.get("detail"))
+        live = recorded.empty and bool(step_kids)
+        families.append(
+            PipelineFamily(
+                pipeline=str(row["job"]),
+                run_id=run_id,
+                trigger=row.get("trigger"),
+                outcome=str(row.get("outcome")),
+                started_at=row.get("started_at"),
+                duration_seconds=_float_or_none(row.get("duration_seconds")),
+                caused_by=str(row["parent_run_id"])
+                if row.get("trigger") == "event" and row.get("parent_run_id")
+                else None,
+                stages=stages_frame(row.get("detail")),
+                steps=_live_steps(step_kids) if live else recorded,
+                live=live,
+                started_next=started_next,
+            )
+        )
+    return tuple(families)
+
+
+def _float_or_none(value: Any) -> float | None:
+    return None if value is None else float(value)
+
+
+def _queue_frame(db: DatabaseManager) -> pd.DataFrame:
+    """The newest rows, plus every dead one even if it is older than those.
+
+    A dead row is the one row on this page that needs a person, so it must not
+    scroll off because the dispatcher has been busy since.
+    """
+    rows = queue_recent(db, limit=QUEUE_ROWS)
+    seen = {row["id"] for row in rows}
+    rows += [row for row in queue_recent(db, limit=QUEUE_ROWS, state=DEAD) if row["id"] not in seen]
+    if not rows:
+        return pd.DataFrame(columns=_QUEUE_COLUMNS)
+    frame = pd.DataFrame(rows)
+    frame = frame[[c for c in _QUEUE_COLUMNS if c in frame.columns]]
+    return frame.sort_values("created_at", ascending=False).reset_index(drop=True)
+
+
+def build_pipelines_view(
+    db: DatabaseManager, settings: Settings, now: datetime | None = None
+) -> PipelinesView:
+    """Everything the Pipelines dashboard shows: specs, runs, queue, dispatcher.
+
+    No writes. At most five database reads — the pipeline runs and their
+    children from ``run_log``, the dispatcher's newest run, and the queue
+    twice (newest rows, then every dead row) — plus the spec files on disk.
+    """
+    cards, specs, cross = load_spec_cards(settings.pipelines_path)
+    names = {spec.name for spec in specs}
+
+    rows: list[dict[str, Any]] = []
+    children: list[dict[str, Any]] = []
+    if names:
+        rows = db.fetch_all(
+            db.sql.get_pipeline_runs,
+            {"jobs": sorted(names), "per_pipeline": PIPELINE_RUNS_PER_PIPELINE},
+        )
+    if rows:
+        children = db.fetch_all(
+            db.sql.get_run_log_children, {"parents": [str(row["run_id"]) for row in rows]}
+        )
+
+    dispatch_rows = db.fetch_all(db.sql.get_run_log, {"job": "dispatch", "limit": 1})
+    return PipelinesView(
+        specs=cards,
+        families=_families(rows, children, names),
+        queue=_queue_frame(db),
+        last_dispatch=dispatch_rows[0] if dispatch_rows else None,
+        dispatcher_interval=settings.event_poll_interval,
+        cross_spec_problems=cross,
+        now=now or datetime.now(tz=UTC),
     )
 
 

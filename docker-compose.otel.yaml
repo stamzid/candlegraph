@@ -21,7 +21,7 @@ services:
     ports:
       # OTLP over HTTP. gRPC (4317) is not exposed: the exporter this ships
       # with speaks HTTP, and one open port is enough.
-      - "${OTEL_HTTP_PORT:-4318}:4318"
+      - "${BIND_HOST:-127.0.0.1}:${OTEL_HTTP_PORT:-4318}:4318"
     healthcheck:
       test: ["CMD", "/otelcol-contrib", "--help"]
       interval: 3m

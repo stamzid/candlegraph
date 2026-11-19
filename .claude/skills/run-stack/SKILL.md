@@ -69,6 +69,12 @@ expected and documented; the next ingest starts a real run. Exactly one
 `dispatch` row per tick that did something is right — a quiet tick
 writes no row at all (invariant 27's one exception).
 
+The **Pipelines** dashboard (`http://localhost:8501`, or your
+`UI_HOST_PORT`) shows the same thing without a terminal: the run, a strip
+of its five steps, its queue row and dedup key, and any `dead` row. It is
+read-only — if it shows a spec as refused, that spec never runs, and
+`make check-pipelines` gives the same message.
+
 To see the same runs as traces, start the stack with the collector
 overlay instead: `make otel-up`, then `make otel-logs`.
 
@@ -122,7 +128,8 @@ so a volume at an unknown revision fails the same way afterwards.
 
 | Symptom | Cause and fix |
 |---|---|
-| Port already allocated | Another worktree's stack is up. Set `POSTGRES_HOST_PORT` / `APP_HOST_PORT` in `.env`, or `make down` in the other checkout. |
+| Port already allocated | Another worktree's stack is up. Set `POSTGRES_HOST_PORT` / `APP_HOST_PORT` / `UI_HOST_PORT` / `OLLAMA_HOST_PORT` in `.env`, or `make down` in the other checkout. |
+| Stack works on this machine but another machine cannot reach it | Intended: every published port binds to `127.0.0.1` (`BIND_HOST`). `BIND_HOST=0.0.0.0` opens it — and exposes an unauthenticated API, UI and database to the network. Do not set `HOST` instead: that is the in-container listen address and must stay `0.0.0.0`. |
 | `auth error: malformed API key` in the logs | `GRAPH_API_KEY` is empty or wrong in `.env`. Get one at <https://thegraph.com/studio/apikeys/>. |
 | `/status` returns 503 | Postgres is unreachable. `docker compose ps` and `docker compose logs postgres`. The 503 *is* in `make logs` even though healthy probes are not. |
 | `make logs` shows no `GET /status` lines | Expected. Healthy probes are filtered; see `docs/incidents/2026-10-29-health-probe-cadence/`. |

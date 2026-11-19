@@ -71,7 +71,7 @@ services:
       TZ: UTC
       PGTZ: UTC
     ports:
-      - "${POSTGRES_HOST_PORT:-5432}:5432"
+      - "${BIND_HOST:-127.0.0.1}:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       # The -ha image keeps PGDATA under /home/postgres, not /var/lib/postgresql.
       # Mounting the old path would leave the data directory on the container
@@ -113,7 +113,7 @@ services:
       # The one container that applies migrations.
       RUN_MIGRATIONS: "true"
     ports:
-      - "${APP_HOST_PORT:-8000}:8000"
+      - "${BIND_HOST:-127.0.0.1}:${APP_HOST_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/status', timeout=5).status == 200 else 1)\""]
       interval: 180s
@@ -139,7 +139,7 @@ services:
       candlegraph:
         condition: service_healthy
     ports:
-      - "${UI_HOST_PORT:-8501}:8501"
+      - "${BIND_HOST:-127.0.0.1}:${UI_HOST_PORT:-8501}:8501"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5).status == 200 else 1)\""]
       interval: 180s
@@ -199,7 +199,7 @@ services:
       # Keep the model resident between batches instead of reloading it.
       OLLAMA_KEEP_ALIVE: "24h"
     ports:
-      - "${OLLAMA_HOST_PORT:-11434}:11434"
+      - "${BIND_HOST:-127.0.0.1}:${OLLAMA_HOST_PORT:-11434}:11434"
     volumes:
       - ollama:/root/.ollama
     healthcheck:

@@ -314,12 +314,18 @@ def test_a_server_that_does_not_preload_timescaledb_is_refused_before_any_ddl() 
     # empty tmpfs. What remains is a data directory initialised with no
     # TimescaleDB involvement, served by the TimescaleDB binary: the shape of
     # every volume that predates the move to this image.
-    container = (
-        PostgresContainer(POSTGRES_IMAGE, driver=None)
-        .with_command(["postgres", "-c", "shared_preload_libraries="])
-        .with_tmpfs_mount("/docker-entrypoint-initdb.d")
-    )
+    #
+    # Built inside the try, not before it: the constructor already opens a
+    # Docker client and pings the daemon, so with Docker stopped it raises
+    # before `start()` is reached. Building it outside the guard made this the
+    # one integration test that failed rather than skipped without Docker
+    # (seen 2026-11-19). `conftest.postgres_dsn` has always done it this way.
     try:
+        container = (
+            PostgresContainer(POSTGRES_IMAGE, driver=None)
+            .with_command(["postgres", "-c", "shared_preload_libraries="])
+            .with_tmpfs_mount("/docker-entrypoint-initdb.d")
+        )
         container.start()
     except Exception as exc:  # pragma: no cover - depends on the host
         pytest.skip(f"no Docker for a second throwaway Postgres: {exc}")

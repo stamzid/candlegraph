@@ -149,3 +149,41 @@ def test_the_embedding_service_is_in_the_default_stack_pinned_and_healthy_only_o
     assert "ollama show" in " ".join(ollama["healthcheck"]["test"])
     assert "ollama pull" in " ".join(ollama["command"])
     assert "ollama:/root/.ollama" in ollama["volumes"], "model weights must survive a recreate"
+
+
+def _published_ports(path: Path) -> dict[str, list[str]]:
+    with path.open(encoding="utf-8") as handle:
+        services = yaml.safe_load(handle)["services"]
+    return {
+        name: [str(port) for port in svc.get("ports", [])]
+        for name, svc in services.items()
+        if svc.get("ports")
+    }
+
+
+@pytest.mark.parametrize("filename", ["docker-compose.yaml", "docker-compose.otel.yaml"])
+def test_every_published_port_binds_to_loopback_unless_told_otherwise(filename: str) -> None:
+    """Nothing in the stack authenticates a caller, and a bare `"8000:8000"`
+    publishes on every interface — so a laptop on shared Wi-Fi served an
+    open UI, API and database (audit finding 8). Loopback is the default;
+    `BIND_HOST=0.0.0.0` is the deliberate, documented way out. This matters
+    more once the UI can start runs (rollout "the harness, visible", step 3)."""
+    ports = _published_ports(REPO_ROOT / filename)
+
+    assert ports, f"{filename} publishes nothing; the test is reading the wrong file"
+    unbound = {
+        name: mapping
+        for name, mappings in ports.items()
+        for mapping in mappings
+        if not mapping.startswith("${BIND_HOST:-127.0.0.1}:")
+    }
+    assert unbound == {}, f"published without a host address, so on every interface: {unbound}"
+
+
+def test_the_bind_host_is_documented_with_its_warning() -> None:
+    """A setting that can expose an unauthenticated stack must say so where
+    people copy their `.env` from, and must not be confused with `HOST`."""
+    example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert "BIND_HOST=127.0.0.1" in example
+    assert "UNAUTHENTICATED" in example

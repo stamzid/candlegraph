@@ -47,6 +47,7 @@ from candlegraph.ui.viewmodels import (
     MAX_WEIGHT_STEP,
     Preferences,
     ViewError,
+    age_text,
     available_symbols,
     build_agents_view,
     build_execution_view,
@@ -56,6 +57,7 @@ from candlegraph.ui.viewmodels import (
     build_method_scores,
     build_news_view,
     build_pair_view,
+    build_pipelines_view,
     build_portfolio_view,
     build_posterior_forecast,
     build_quality_view,
@@ -97,6 +99,7 @@ PAGES = (
     "Simulation",
     "Forecast",
     "Agents",
+    "Pipelines",
     "News",
     "Data",
 )
@@ -108,6 +111,19 @@ SEVERITY_COLORS = {
     "warning": "#ffab00",
     "critical": "#ff5252",
     "error": "#ff5252",
+}
+# Run outcomes and queue states share one palette with the severities, so
+# green, amber and red mean the same thing on every page.
+OUTCOME_COLORS = {
+    "succeeded": "#00c853",
+    "done": "#00c853",
+    "partial": "#ffab00",
+    "failed": "#ff5252",
+    "dead": "#ff5252",
+    "running": "#2962ff",
+    "queued": "#2962ff",
+    "claimed": "#2962ff",
+    "skipped": "#90a4ae",
 }
 
 
@@ -2143,6 +2159,162 @@ def _agents_page(db: DatabaseManager, settings: Settings) -> None:
 # --- NEWS (Tavily) --------------------------------------------------------------
 
 
+# --- pipelines (read-only) -----------------------------------------------------
+#
+# Rollout "the harness, visible", step 2. Nothing on this page writes, enqueues
+# or refreshes: there is deliberately no button. Step 3 adds "Run now", and it
+# will ask the queue for a run rather than perform one (invariant 28).
+
+
+def _coloured(frame: pd.DataFrame, column: str) -> Any:
+    """A frame with one column coloured by run outcome or queue state."""
+    return frame.style.map(
+        lambda v: f"color: {OUTCOME_COLORS.get(str(v), '#90a4ae')}; font-weight: bold",
+        subset=[column],
+    )
+
+
+def _pipelines_metrics(view: Any) -> None:
+    """The newest run, how long ago, and what the queue is holding."""
+    latest = view.latest
+    cols = st.columns(5)
+    cols[0].metric(
+        "Latest pipeline run",
+        f"{latest.pipeline} · {latest.outcome.upper()}" if latest else "—",
+        help="The newest run of any pipeline. Partial: it finished, but not every step did everything.",
+    )
+    cols[1].metric("Started", age_text(view.latest_age_seconds))
+    cols[2].metric(
+        "Waiting in the queue",
+        f"{view.waiting}",
+        help="Queued or claimed: asked for by a trigger and not yet finished.",
+    )
+    cols[3].metric(
+        "Dead rows",
+        f"{view.dead}",
+        delta=f"-{view.dead}" if view.dead else None,
+        delta_color="inverse",
+        help="Ran out of attempts. Each one needs a person to read its last_error.",
+    )
+    cols[4].metric(
+        "Dispatcher",
+        f"every {view.dispatcher_interval}s" if view.dispatcher_enabled else "OFF",
+        help="EVENT_POLL_INTERVAL. The dispatcher is what turns a queued row into a run.",
+    )
+
+
+def _pipelines_warnings(view: Any) -> None:
+    """The things that stop pipelines quietly, said out loud."""
+    if not view.dispatcher_enabled:
+        st.warning(
+            "The dispatcher is off (`EVENT_POLL_INTERVAL=0`). No trigger will start a pipeline, "
+            "and anything queued stays queued. `make run` still runs one by hand."
+        )
+    for problem in view.cross_spec_problems:
+        st.error(f"Across the specs: {problem}")
+    broken = [card for card in view.specs if not card.loaded]
+    if broken:
+        st.error(
+            f"{len(broken)} spec(s) refused by the loader, so they never run: "
+            f"{', '.join(card.path for card in broken)}. The reasons are under Specs below."
+        )
+    last = view.last_dispatch
+    if last is not None:
+        st.caption(
+            f"Dispatcher's newest recorded tick: {last['started_at']:%Y-%m-%d %H:%M} UTC, "
+            f"{last['outcome']}. It records a tick only when it did something, so a quiet "
+            "dispatcher is not a stopped one."
+        )
+
+
+def _pipeline_family(family: Any) -> None:
+    """One run: where it came from, its strip, and every step's record."""
+    started = f"{family.started_at:%Y-%m-%d %H:%M}" if family.started_at else "—"
+    seconds = f"{family.duration_seconds:.1f}s" if family.duration_seconds is not None else "running"
+    label = f"{started} · {family.pipeline} · {family.outcome} · {family.trigger or '-'} · {seconds}"
+    with st.expander(label):
+        why = [f"run `{family.run_id[:8]}`"]
+        if family.caused_by:
+            why.append(f"started by run `{family.caused_by[:8]}` finishing")
+        if family.started_next:
+            why.append(f"its finishing started: {', '.join(family.started_next)}")
+        st.caption(" · ".join(why))
+        _stage_strip(
+            family.stages,
+            "Steps, in order",
+            "One stage per step, as the pipeline recorded it when it closed.",
+            "Still running — the strip is written when the run closes. The table below is live.",
+        )
+        if family.live:
+            st.caption("From the step runs so far: a step that has not started has no row yet.")
+        if family.steps.empty:
+            st.info("No step records.")
+        else:
+            st.dataframe(_coloured(family.steps, "status"), width="stretch", hide_index=True)
+
+
+def _pipelines_runs(view: Any) -> None:
+    """Recent runs of each pipeline, newest first, one expander per run."""
+    _title(
+        "Runs — newest first, per pipeline",
+        "A run's steps are its child runs. Partial means it finished, but some step did not do everything.",
+    )
+    if not view.families:
+        st.info(
+            "No pipeline has run yet. A successful ingest starts `hourly`; "
+            "`make run ARGS='hourly'` runs it now."
+        )
+        return
+    for card in view.specs:
+        runs = view.runs_of(card.name) if card.loaded else ()
+        if runs:
+            st.markdown(f"**{card.name}**")
+            for family in runs:
+                _pipeline_family(family)
+
+
+def _pipelines_queue(view: Any) -> None:
+    """What triggers asked for. Dead rows are always included, however old."""
+    _title(
+        "Queue — what a trigger asked for, and what became of it",
+        "One row per requested run. The dedup key is why twelve ingests in an hour start one pipeline.",
+    )
+    if view.queue.empty:
+        st.info("Nothing has been queued yet.")
+    else:
+        st.dataframe(_coloured(view.queue, "state"), width="stretch", hide_index=True)
+
+
+def _pipelines_specs(view: Any) -> None:
+    """Each committed spec as the loader read it, or the loader's refusal."""
+    _title("Specs — the committed pipelines, as the loader read them")
+    for card in view.specs:
+        if not card.loaded:
+            reasons = "\n".join(f"- {problem}" for problem in card.problems)
+            st.error(f"**{card.path}** — refused by the loader, so it never runs:\n\n{reasons}")
+            continue
+        with st.container(border=True):
+            st.markdown(f"**{card.name}** v{card.version} · `{card.path}` · deadline {card.deadline}")
+            if card.description:
+                st.caption(card.description)
+            if card.starts_itself:
+                st.markdown("Starts itself " + "; ".join(card.triggers) + ".")
+            else:
+                st.markdown("No trigger: it runs only when a person asks.")
+            st.dataframe(card.steps, width="stretch", hide_index=True)
+
+
+def _pipelines_page(db: DatabaseManager, settings: Settings) -> None:
+    st.subheader("Pipelines — what ran, what is queued, and what each step did")
+    st.caption("Read-only. Nothing on this page starts, queues or refreshes anything.")
+    view = build_pipelines_view(db, settings)
+    _pipelines_metrics(view)
+    _pipelines_warnings(view)
+    _pipelines_runs(view)
+    _pipelines_queue(view)
+    _pipelines_specs(view)
+
+
 def _news_metrics(view: Any) -> None:
     """Budget, corpus size, and the newest call's outcome."""
     last = view.last_call
@@ -2468,6 +2640,8 @@ def main() -> None:
                 _forecast_page(db, ctx)
             case "Agents":
                 _agents_page(db, settings)
+            case "Pipelines":
+                _pipelines_page(db, settings)
             case "News":
                 _news_page(db, settings, ctx)
             case "Data":
