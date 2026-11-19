@@ -178,10 +178,11 @@ alembic/versions/    Migrations. The schema name comes from settings.
 config/tokens.yaml   The tokens this deployment tracks, with their knowledge-layer aliases.
 pipelines/*.yaml     Pipeline specs: reviewed definitions that ship in the image. `make check-pipelines` validates them.
 docs/<area>/<topic>/DESIGN.md   Design documents. Why, not how; `docs/README.md` indexes them.
+  overview/          The whole stack on one page: purpose, processes, an hour end to end, who writes what. Start here.
   roadmap/           Delivered stages, next stages, and each exit criterion.
   storage/           TimescaleDB adoption, which tables are hypertables, and how pgvector coexists.
   analytics/         The statistics and models with their equations; risk management and the rate seam.
-  rollout/ROLLOUT.md The one current rollout plan: ordered steps and a progress table. Finished ones are in rollout/archive/.
+  rollout/ROLLOUT.md The one current rollout plan, or a note that there is none. Finished ones are in rollout/archive/.
   agents/            The agent framework, the observer, and the janitor.
   knowledge/         Stage 1, delivered: schema, vector store, embeddings, Tavily, MCP; sources and ragflow are surveys.
   incidents/<date>-<slug>/POSTMORTEM.md   What went down, why, and what changed so it cannot again.
@@ -365,6 +366,16 @@ Each of these has a test. Breaking one should break the build, not production.
     over a lookback window, so the window is also the catch-up after a
     restart. A set of specs that would trigger each other in a loop is
     refused at load time. See `docs/harness/pipelines/DESIGN.md` §7.
+29. **A pipeline spec is refused whole before anything runs.** The loader
+    checks every rule at once and names the file and line of each
+    problem: unknown keys and jobs, params against the job's own model, a
+    step that writes `market_data`, a job not proven idempotent, a
+    deadline shorter than its steps, a trigger loop. A spec that fails one
+    rule runs no step at all — never the valid prefix. The executor
+    validates params again, so a spec built in Python cannot skip it.
+    `make check-pipelines` runs the loader over every committed spec and
+    `test_every_committed_spec_is_valid` does the same in CI. See
+    `docs/harness/pipelines/DESIGN.md` §5.2.
 
 ## Definition of done
 
@@ -412,27 +423,22 @@ unfalsifiable.
 | Descriptive statistics, deeper (stage 0) | Pairwise comparison over aligned bars; the descriptive display audited and completed (Quality dashboard, gap map, gap shading); the `FillPolicy` seam where every policy declares whether it is causal and `load_symbol_series` refuses the ones that are not; three gap estimators cached in `token_hours_fill` and scored against held-out hours; the `active` flag trimming the poll to five tokens. | `candlegraph compare WETH WBTC` over aligned bars; `FillPolicy` with a no-look-ahead test; the stack ingests exactly the five active tokens |
 | Simulation and strategy evaluation (stage 6) | The backtester made legible; Monte Carlo over four path generators with an empirical p-value; the discrete-event engine reconciling exactly with the vectorised backtester; MCMC posteriors with R-hat and ESS gating every surface. | `candlegraph simulate WETH --paths 1000` prints a distribution and a p-value; a zero-latency event run matches the backtester exactly; `forecast --posterior` is wider on a short window, with R-hat |
 | Harness pre-work | One runner under the worker, the agents process and the API's ingest: the `Job` registry, `run_job`, one scheduler and process loop; ledger rows opened before and closed after every run with `trigger`, `outcome` and `parent_run_id`; the generic `run` ledger and the `run_log` view; stages for ingest; the scheduled news fetch. | `grep -rn BackgroundScheduler candlegraph/` finds one module; `candlegraph jobs` lists four jobs; `make runs ARGS='--job observer'` shows trigger and outcome |
+| Harness (stage 2) | YAML pipeline specs validated whole before running; the plain-loop executor with a child run per step, retries for transient errors and a deadline; six step jobs (`validate`, `refresh_aggregates`, `analyse`, `signal`, `explain`, `embed`) and `pipelines/hourly.yaml` / `daily.yaml`; the `run_queue` with leases and the dispatcher, so a successful ingest starts the hourly pipeline once per bar hour; an OpenTelemetry span per run; the `token_daily` continuous aggregate behind the candle API; the dashboard pages split into panels. | `candlegraph run pipelines/hourly.yaml` runs validate → analyse → signal (and explain) as one run with child runs in `run_log`, as one trace in `make otel-up`; one ingest produces exactly one `hourly` run with trigger `event` |
 | Knowledge graph and signaller | The eight corpus tables on pgvector, assets and aliases, the document pipeline, embeddings (`bge-m3` via the `ollama` service), Tavily under a budget with the `source_call` ledger, hybrid retrieval with the no-look-ahead bound, `signals --explain` with its citation validator on three surfaces, the observer's four knowledge findings, and the read-only MCP server. | `candlegraph signals WETH --strategy bollinger --explain` prints a rationale citing a retrieved document with a URL and a timestamp, stored with the signal, with no LLM key configured |
 
 ### In progress
 
-**Stage 2, the harness** — planned 2026-11-15; steps 1–6 of 7 done, only
-the closeout left. The plan is `docs/rollout/ROLLOUT.md`: the dashboard pages are
-split, the pipelines design is written and reviewed, the spec, loader,
-`candlegraph run`, the five step jobs and `pipelines/hourly.yaml` are
-built with retries and a deadline (2026-11-17), and since 2026-11-18 a
-successful ingest **starts** the hourly pipeline (the work queue, the
-dispatcher and event triggers), every run is an OpenTelemetry span, and
-`token_daily` serves the candle API. Still ahead: the closeout (step 7),
-and three things deferred with reasons — the per-step model picker,
-step-level resume of an interrupted pipeline, and metrics with the circuit
-breaker that reads them. The
-pre-work it builds on is archived at
-`docs/rollout/archive/2026-11-11-harness-prework.md`. Two designs wait
-beside it: the chat-model seam (`docs/harness/models/`) and the Tavily
-budget manager (`docs/knowledge/budget-manager/`). The
-analyst (`docs/harness/analyst/`) and its research loop
-(`docs/harness/research-loop/`) are proposed designs, not work in progress.
+Nothing. Stage 2 closed on 2026-11-19; its plan is archived at
+`docs/rollout/archive/2026-11-15-stage-2-harness.md`, and
+`docs/rollout/ROLLOUT.md` carries the one gate not yet run (the release
+check against a real stack) and the recommended next plan: the harness
+operated from the UI — a Pipelines page, the `run` prune job, the
+budget manager (`docs/knowledge/budget-manager/`) before `daily.yaml`
+gets a schedule, then the chat-model seam (`docs/harness/models/`).
+Deferred from stage 2, each with its reason in the pipelines design §15:
+step-level resume, metrics with the circuit breaker that reads them, and
+hard step timeouts. The analyst (`docs/harness/analyst/`) and its
+research loop (`docs/harness/research-loop/`) are proposed designs.
 
 ### Next
 
@@ -457,13 +463,16 @@ analyst (`docs/harness/analyst/`) and its research loop
    surface. Paper trading only. The five documents in `docs/knowledge/`
    describe what was built; the step-by-step plan it followed is archived
    at `docs/rollout/archive/2026-11-06-stage-1-knowledge-graph.md`.
-2. **Harness.** YAML pipeline specs, an event bus, OpenTelemetry metrics,
-   and the continuous aggregates deferred from the TimescaleDB migration.
-   *Exit:* one `candlegraph run pipelines/hourly.yaml` executes
-   validate → analyse → signal as one orchestrated, traced run. A
-   pipeline **reacts to** ingest and never runs it — the loader refuses a
-   step that writes market data (invariant 21), and the hourly pipeline
-   is started by a successful ingest once events land.
+2. ~~**Harness.**~~ *Delivered 2026-11-19.* YAML pipeline specs, the
+   work queue and dispatcher in place of an event bus (the ledger is the
+   event log), OpenTelemetry traces, and the `token_daily` continuous
+   aggregate. *Exit, met:* one `candlegraph run pipelines/hourly.yaml`
+   executes validate → analyse → signal as one orchestrated, traced run,
+   recorded in the ledger. A pipeline **reacts to** ingest and never runs
+   it — the loader refuses a step that writes market data (invariant 21) —
+   and a successful ingest starts the hourly pipeline. Metrics were
+   deferred: a span already carries what they would. The plan is archived
+   at `docs/rollout/archive/2026-11-15-stage-2-harness.md`.
 3. **Traditional markets.** NASDAQ and NYSE equities alongside crypto: a
    second ingestion adapter and an `instrument` supertype above `token`.
    Note that invariant 19 inverts here — a missing hour inside a trading

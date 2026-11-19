@@ -19,6 +19,8 @@ reconstructing the steps:
 - `run-agents` — run the observer and the janitor, read their reports, and
   tell a real finding from an expected one.
 - `add-agent` — add a new LangGraph graph that follows the framework.
+- `add-pipeline` — add a pipeline spec, or a job that can be a step in
+  one, without breaking the loader's rules.
 - `release-check` — the full pre-merge gate.
 - `extend-knowledge-graph` — stage 1, built: how to add a source, an
   entity, a retriever, or an MCP tool without reversing a decision.
@@ -26,6 +28,9 @@ reconstructing the steps:
 `docs/` holds the design documents, arranged the same way — one directory per
 topic, with a `DESIGN.md` inside and a flowchart in most of them:
 
+- `docs/overview/` — the whole stack on one page: what it is for, the
+  processes, an hour from ingest to a cited signal, who writes what. Read
+  this first if you are new to the repository.
 - `docs/roadmap/` — delivered stages, next stages, exit criteria. Read this
   before proposing new work; the order is reasoned, not arbitrary.
 - `docs/storage/timescaledb/`, `docs/storage/table-placement/` — read before
@@ -41,11 +46,12 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   one. When the user refers to "the rollout", "the plan", or "step N",
   this is the document: find the step, read its "Read first" pointers, do
   it, and update the progress table in the same change. One at a time;
-  finished ones are archived under `docs/rollout/archive/`. Four are
-  archived (stages 1, 0 and 6, and the harness pre-work). **The current
-  rollout is stage 2, the harness** (planned 2026-11-15, not started):
-  step 1 splits the dashboard pages, step 2 writes the pipelines design
-  before any pipeline code.
+  finished ones are archived under `docs/rollout/archive/`. Five are
+  archived (stages 1, 0, 6 and 2, and the harness pre-work). **There is
+  no current rollout** (stage 2 closed 2026-11-19): `ROLLOUT.md` carries
+  one unrun gate — the release check against a real stack — and the
+  recommended next plan, the harness operated from the UI. Do not start
+  it until the user agrees to it.
 - `docs/incidents/` — post-mortems. Read the two from October 2026 before
   changing the database image, a migration id, or a compose health check.
 

@@ -1,12 +1,14 @@
 # TimescaleDB: adoption, migration, and what we deliberately did not turn on
 
-**Status:** implemented — 2026-10-25; preflight added and image moved to `-ha` 2026-10-29
+**Status:** implemented — 2026-10-25; preflight added and image moved to `-ha` 2026-10-29;
+the `token_daily` continuous aggregate added 2026-11-18 (stage 2), serving the candle API.
+Still off, on purpose: compression and retention policies, and any weekly aggregate
 **Area:** `docker-compose.yaml`, `.github/workflows/ci.yml`,
 `tests/integration/conftest.py`, `alembic/versions/`, `candlegraph/storage/statements.py`
 **Companions:** [`../table-placement/DESIGN.md`](../table-placement/DESIGN.md) —
 which tables are hypertables and why; this document is the *how*.
 [`../pgvector-coexistence/DESIGN.md`](../pgvector-coexistence/DESIGN.md) —
-how pgvector will share the instance in stage 1 (proposed).
+how pgvector shares the instance (implemented in stage 1).
 
 ## What was there before
 

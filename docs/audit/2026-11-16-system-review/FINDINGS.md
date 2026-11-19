@@ -1,7 +1,10 @@
 # System review, 2026-11-16
 
-**Status:** complete. Seven findings fixed in the same pass; ten open
-with a recommendation each.
+**Status:** complete. Seven findings fixed in the same pass; nine open
+(8–16) with a recommendation each. At the stage 2 closeout (2026-11-19)
+all nine are still open; 13 and 15 are touched but not closed — the
+dispatcher prunes `run_queue` but nothing prunes `run`, and `embed` is a
+step of `daily.yaml`, which has no trigger yet.
 **Scope:** the whole repository, read with production in mind — a single
 VM running compose, which is the deployment target settled in
 [`../../harness/pipelines/DESIGN.md`](../../harness/pipelines/DESIGN.md) §16.

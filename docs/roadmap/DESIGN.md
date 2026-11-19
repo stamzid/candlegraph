@@ -1,6 +1,6 @@
 # Roadmap
 
-**Status:** living document — last revised 2026-11-15 (harness pre-work delivered)
+**Status:** living document — last revised 2026-11-19 (stage 2, the harness, delivered)
 **Scope:** what candlegraph is, what has been built, and what comes next.
 
 `AGENTS.md` carries a condensed copy of the stage list; this is the
@@ -11,8 +11,9 @@ feeling — because "the agent layer is done" is otherwise unfalsifiable.
 ## Where this stands
 
 candlegraph is a market-data service with an analytics layer, an agent
-layer and a knowledge layer on top. Six pieces of work are delivered and in
-the test suite:
+layer, a knowledge layer and a harness on top. Nine pieces of work are
+delivered and in the test suite ([`../overview/DESIGN.md`](../overview/DESIGN.md)
+describes how they fit together on one page):
 
 | Delivered | What it added | Proven by |
 |---|---|---|
@@ -23,16 +24,14 @@ the test suite:
 | **Time-series storage** | The three series tables are TimescaleDB hypertables chunked on `period_start_unix`; the state and ledger tables deliberately are not. | `make test-integration` (`test_timescale.py`) |
 | **Knowledge graph and signaller** (stage 1, 2026-11-06) | The eight corpus tables on pgvector, assets and aliases from `tokens.yaml`, the document pipeline, local embeddings, Tavily under a budget with the `source_call` ledger, hybrid retrieval bounded by `published_at <= bar`, `signals --explain` with its citation validator on the CLI, GraphQL and the UI, four observer findings, and the read-only MCP server. | `candlegraph signals WETH --strategy bollinger --explain`, with no LLM key; `make mcp` |
 
-No stage is open. Stages 0 and 6 both closed on 2026-11-10:
+| **Descriptive statistics, deeper** (stage 0, 2026-11-10) | Pairwise comparison over aligned bars, the Quality dashboard and gap map, three gap estimators behind `FillPolicy` in their own cache table, and the `active` flag — the stack polls exactly WBTC, WETH, BNB, GNO and SHIB while the file lists every token whose history is stored. | `candlegraph compare WETH WBTC`; the no-look-ahead `FillPolicy` test |
+| **Simulation and strategy evaluation** (stage 6, 2026-11-10) | Monte Carlo over four path generators with an empirical p-value, a discrete-event engine reconciling exactly with the backtester, MCMC posteriors gated on R-hat and ESS. | `candlegraph simulate WETH --paths 1000`; `forecast --posterior` |
+| **Harness** (stage 2, 2026-11-19; pre-work 2026-11-15) | One runner and one ledger shape for every job; YAML pipelines validated whole before running; the work queue and dispatcher, so a successful ingest starts the hourly pipeline once per bar hour; a trace per run; the `token_daily` continuous aggregate. | `candlegraph run pipelines/hourly.yaml`; `make runs ARGS='--job hourly'` shows trigger `event` |
 
-| Recently delivered | What closed it |
-|---|---|
-| **0. Descriptive statistics, deeper** | The `active` flag in `config/tokens.yaml` — the stack now polls exactly WBTC, WETH, BNB, GNO and SHIB while the file still lists every token whose history is stored. |
-| **6. Simulation and strategy evaluation** | MCMC posteriors, gated on R-hat and effective sample size, completing the three simulators. |
-
-[`../rollout/ROLLOUT.md`](../rollout/ROLLOUT.md) is the plan for the next
-stage, **2, the harness** (planned 2026-11-15, not started): the
-dashboard split first, then the pipelines design, then the build.
+No stage is open. [`../rollout/ROLLOUT.md`](../rollout/ROLLOUT.md) says so,
+carries the one closeout gate not yet run, and recommends the next plan:
+**the harness operated from the UI** (a Pipelines page, credit budgets, a
+model picker) before stage 3 widens the data.
 
 Stage 6 was built out of numeric order, which is normal here — stage 1
 was delivered while stage 0 was paused. The numbers are identities, not a
@@ -61,7 +60,7 @@ flowchart TB
     KG --> MCP["mcp<br/>read-only tools"]
   end
 
-  subgraph next["Next"]
+  subgraph next["Stages"]
     direction TB
     DS["0 · Descriptive statistics, deeper<br/>active tokens · gap policy"]
     SIM["6 · Simulation<br/>Monte Carlo · discrete event · MCMC"]
@@ -83,17 +82,17 @@ flowchart TB
 
   classDef done fill:#e8f5e9,stroke:#2e7d32
   classDef todo fill:#e3f2fd,stroke:#1565c0
-  class G,ING,DB,AN,ST,API,UI,AG,KG,MCP done
-  class DS,H,TM,MS,MA todo
+  class G,ING,DB,AN,ST,API,UI,AG,KG,MCP,DS,SIM,H done
+  class TM,MS,MA todo
 ```
 
 The ordering is not arbitrary. The knowledge graph was taken before stage
 0 finished because it was the last piece of the *original* design and
 because the harness in stage 2 is much more useful once there is a second
 kind of pipeline to orchestrate than when there is only ingestion. Stage 0
-is next: it deepens the descriptive layer that already exists and settles
+came next: it deepened the descriptive layer that already exists and settles
 the gap-handling policy that stages 3 and 4 will inherit, which is cheaper
-to decide now than to retrofit under a set of models. Everything from
+to decide early than to retrofit under a set of models. Everything from
 stage 3 on widens the system rather than deepening it, and each of those
 stages is cheaper once the harness exists to run it.
 
@@ -342,7 +341,7 @@ carrying forward:
 
 ---
 
-## 2. Harness
+## 2. Harness — **delivered 2026-11-19**
 
 **Goal.** One orchestrated run instead of five commands and a scheduler
 per concern.
@@ -402,6 +401,34 @@ data, and invariant 21 checkable at load time rather than hoped for
 step is refused. The hourly pipeline is started *by* a successful ingest
 once event triggers land, which is the same chain with the writer left
 where it belongs.
+
+**Delivered (2026-11-19).** Exit criterion met: `candlegraph run
+pipelines/hourly.yaml` runs validate → analyse → signal (and
+`refresh_aggregates` and `explain`) as one parent run with a child run
+per step, recorded in `run_log`, and as one trace with a span per step
+under `make otel-up`. Since 2026-11-18 a successful ingest starts it, once
+per bar hour. The plan and each step's outcome are archived at
+[`../rollout/archive/2026-11-15-stage-2-harness.md`](../rollout/archive/2026-11-15-stage-2-harness.md).
+What the build changed from "What it adds" above, each argued in
+[`../harness/pipelines/DESIGN.md`](../harness/pipelines/DESIGN.md):
+
+- **No event bus.** A `run_queue` table with leases and a dispatcher
+  that reads `run_log` — the ledger is the event log, and its lookback
+  window is the catch-up after a restart. There is no outbox either: both
+  sides of the event are already in the one Postgres.
+- **Traces, not metrics.** A span carries the duration, outcome and
+  counts a metrics table would; a metrics backend is a separate decision,
+  and the circuit breaker that would read it waits with it.
+- **A daily aggregate only, serving the candle API.** Measured first: the
+  candle query was never slow (64 ms → 9.8 ms over a decade of hours); the
+  slow query (the Market dashboard's 610 ms five-year hourly read) is one
+  an aggregate cannot serve without changing the chart. Weekly was not
+  built; nothing reads it.
+
+Not built, with reasons in the pipelines design §15: the per-step model
+picker, step-level resume, metrics and the circuit breaker, hard
+timeouts, and the `run` retention job. `pipelines/daily.yaml` ships
+without a trigger, because it spends credits.
 
 ---
 
@@ -545,7 +572,9 @@ discrete-event run reproduces the vectorised backtester to tolerance and
 reports what one bar of latency costs *(met 2026-11-09 — the agreement is
 exact, not merely within tolerance)*; and `candlegraph forecast WETH
 --posterior` prints an interval wider than the point-estimate one, with
-R-hat reported and a refusal if the chain has not converged *(remaining)*.
+R-hat reported and a refusal if the chain has not converged *(met
+2026-11-10 — wider on short windows, converging to the point interval as
+the sample grows)*.
 
 ---
 

@@ -29,6 +29,9 @@ SQLAlchemy/Alembic, APScheduler, LangGraph, uv, Docker.
 
 ## How it works
 
+[`docs/overview/DESIGN.md`](docs/overview/DESIGN.md) is the same story on one page, with
+diagrams: what each process may write, and an hour's life from ingest to a cited signal.
+
 The stack is five processes: PostgreSQL, the **API**, a separate **ingest worker**, the
 **Streamlit UI**, and the **agents**.
 
@@ -82,6 +85,12 @@ failure — a thin token legitimately has missing hours. A step that fails with 
 error (the network blinked, Postgres restarted) is retried with jittered backoff, and each
 attempt is its own row in `run_log`; a step that fails because of a bad parameter is not,
 because another attempt would spend the deadline to fail the same way.
+
+Every run is also an OpenTelemetry span, and a pipeline is one trace with a span per step.
+Without the SDK the spans cost nothing and go nowhere; `make otel-up` starts the stack with a
+collector that prints them (`make otel-logs`). Daily candles come from `token_daily`, a
+continuous aggregate the hourly pipeline refreshes, so the API's answer for any whole-day
+interval reads one row per day rather than re-bucketing every hour.
 
 Ingestion runs in its own process so a long backfill cannot compete with query traffic, and
 so an unreachable subgraph degrades the data rather than the service — the API comes up and
@@ -741,7 +750,7 @@ so check the skip count before reading a green run as proof.
 
 ## Status and what comes next
 
-Seven pieces of work are delivered and covered by the test suite:
+Nine pieces of work are delivered and covered by the test suite:
 
 - **Stabilisation** — a clean clone that builds, lints, type-checks and comes up.
 - **Data model and ingestion** — hourly token and pool data, idempotent upserts,
@@ -751,28 +760,24 @@ Seven pieces of work are delivered and covered by the test suite:
 - **Agent layer** — the run observer and the CI janitor, with their ledger and
   report sinks.
 - **Time-series storage** — the series tables as TimescaleDB hypertables.
-- **Knowledge graph and signaller** — the corpus on pgvector, local embeddings,
-  Tavily under a credit budget, hybrid retrieval that never looks past the bar,
-  `signals --explain` with its citation validator, and the read-only MCP server.
-- **Harness pre-work** — one runner for every scheduled job, ledger rows written
-  before and after every run, and one view (`run_log`) over all of them.
+- **Knowledge graph and signaller** (stage 1) — the corpus on pgvector, local
+  embeddings, Tavily under a credit budget, hybrid retrieval that never looks past
+  the bar, `signals --explain` with its citation validator, and the read-only MCP server.
+- **Descriptive statistics, deeper** (stage 0) — pairwise comparison over aligned
+  bars, the Quality dashboard and gap map, three gap estimators kept out of the market
+  tables, and the five-token active universe.
+- **Simulation and strategy evaluation** (stage 6) — Monte Carlo with an empirical
+  p-value, a discrete-event engine that reconciles exactly with the backtester, and
+  MCMC posteriors gated on R-hat.
+- **Harness** (stage 2, with its pre-work) — one runner and one ledger shape for every
+  job; YAML pipelines validated before they run; a work queue and dispatcher so a
+  successful ingest starts the hourly pipeline once per bar hour; a trace per run; and
+  the `token_daily` continuous aggregate.
 
-Next, in order:
+Next: the harness **operated from the UI** — a Pipelines page, credit budgets and
+schedules a person can change, and a model picker — proposed in
+[`docs/rollout/ROLLOUT.md`](docs/rollout/ROLLOUT.md). Then, in roadmap order:
 
-0. **Descriptive statistics, deeper** — pairwise comparison between any two
-   tokens (delivered: `candlegraph compare`), a five-token active universe
-   for the test run (WBTC, WETH, BNB, and the gap-prone GNO and SHIB), and
-   a recorded policy for filling ingestion gaps on thin tokens —
-   interpolation for display only, a causal estimator for anything a
-   strategy consumes, nothing written to the database.
-1. ~~**Knowledge graph and signaller**~~ — *delivered 2026-11-06*. Assets,
-   sources and documents in Postgres with pgvector, Tavily for web search,
-   and news attached to prices, so a signal can cite *why*. Paper trading
-   only. RAGFlow was evaluated as a second retrieval backend and declined
-   for now (`docs/knowledge/ragflow/DESIGN.md`). See `docs/knowledge/` and
-   the archived plan under `docs/rollout/archive/`.
-2. **Harness** — YAML pipeline specs, an event bus, OpenTelemetry, and the
-   continuous aggregates deferred from the TimescaleDB migration.
 3. **Traditional markets** — NASDAQ and NYSE equities alongside crypto, which
    means an `instrument` supertype and calendar-aware coverage.
 4. **Models and strategies** — momentum, GARCH and friends, with walk-forward

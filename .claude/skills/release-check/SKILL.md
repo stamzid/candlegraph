@@ -37,6 +37,20 @@ docker compose exec -T worker python -m candlegraph report --strict
 `make e2e` reporting `skipped` means `CANDLEGRAPH_E2E_URL` was unset — the
 target sets it, so a skip means the stack is not up.
 
+The harness is part of the gate. Every committed spec validates, and the
+hourly pipeline really runs, both by hand and because ingest finished:
+
+```sh
+make check-pipelines                     # every spec in pipelines/, running nothing
+make run ARGS='hourly'                   # outcome succeeded or partial; never failed on a stack with data
+make runs ARGS='--job hourly'            # a trigger=manual run AND a trigger=event one, steps under each
+make queue                               # nothing `dead`; a dead row needs reading, not deleting
+```
+
+`partial` from `hourly` is normal when GNO or SHIB is under coverage
+(`validate` grades that `partial`, not `failed`). A `failed` `validate`
+on a stack with rows is a real failure.
+
 `report --strict` fails on two different things; read which one:
 
 - **`MISSING (no rows at all)`** is a real failure for an **active** token
@@ -55,8 +69,11 @@ From `AGENTS.md`, confirm each one explicitly rather than assuming:
 - [ ] Schema changes ship with a migration that has a working `downgrade`.
 - [ ] New configuration is in `.env.example`, with a comment.
 - [ ] `make sdl` run if the GraphQL schema changed (a test enforces this).
+- [ ] `make check-pipelines` passes if a spec or a step job changed.
 - [ ] `AGENTS.md` updated if a command, invariant, or layout entry changed.
 - [ ] `README.md` updated if user-facing behaviour changed.
+- [ ] Every **Status** line under `docs/` still tells the truth, including
+      `docs/overview/DESIGN.md` if a process or a writer changed.
 
 ## 4. Nothing secret is staged
 

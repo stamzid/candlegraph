@@ -1,16 +1,20 @@
 # Pipelines: running several jobs as one reliable unit
 
-**Status:** partly implemented — 2026-11-18. Rollout steps 3, 4 and 5
-built the spec, the loader, the executor, the five step jobs, the hourly
-and daily pipelines, the work queue and the dispatcher: §5 in full, §6.1
-end to end, §6.2 to §6.6, §7.1 to §7.4 except resume, the cooperative
-half of §7.5, and §7.7 **without the outbox** — the ledger is the event
-log, and the section says why. **Not built:** resume (§7.4) and circuit
-breakers (§7.6), both moved on with reasons in §15; the model picker
-(§9); metrics and traces (§8.3); the enforced half of §7.5. Nothing in
-§8.2 is deployed. **Code:** `candlegraph/harness/pipelines.py`,
+**Status:** implemented — 2026-11-19, stage 2 closed. Rollout steps 3–6
+built the spec, the loader, the executor, the six step jobs, the hourly
+and daily pipelines, the work queue, the dispatcher and one trace per
+run: §5 in full, §6.1 end to end, §6.2 to §6.6, §7.1 to §7.4 except
+resume, the cooperative half of §7.5, §7.7 **without the outbox** — the
+ledger is the event log, and the section says why — and the traces of
+§8.3. **Not built**, each with its reason in §15: resume (§7.4), circuit
+breakers (§7.6), metrics (§8.3), the enforced half of §7.5, the model
+picker (§9), and the `run` retention job (§16, answer 5). Nothing in
+§8.2 is deployed. `pipelines/daily.yaml` ships without a trigger: it
+spends credits, and the budget manager should come first. The plan is
+archived at [`../../rollout/archive/2026-11-15-stage-2-harness.md`](../../rollout/archive/2026-11-15-stage-2-harness.md).
+**Code:** `candlegraph/harness/pipelines.py`,
 `events.py`, `queue.py`, `steps.py`, `params.py`, `errors.py`,
-`pipelines/`, `candlegraph run`, `candlegraph queue`.
+`tracing.py`, `pipelines/`, `candlegraph run`, `candlegraph queue`.
 **Builds on:** [`../runner/DESIGN.md`](../runner/DESIGN.md) — jobs,
 `run_job`, the three ledgers, `parent_run_id`. All of it stays.
 **Related:** [`../models/DESIGN.md`](../models/DESIGN.md) (how a step gets
@@ -760,14 +764,15 @@ logic (~400 lines). The test suite covers it with a fake clock and
 
 ## 15. Rollout
 
-Maps onto `docs/rollout/ROLLOUT.md` steps 3–6:
+Maps onto steps 3–6 of the stage 2 rollout, archived at
+[`../../rollout/archive/2026-11-15-stage-2-harness.md`](../../rollout/archive/2026-11-15-stage-2-harness.md):
 
 | Step | Delivers from this document |
 |---|---|
 | 3 | spec + loader + `run --check` (§5); plain-loop executor; one example pipeline; `idempotent` on `Job` — **done 2026-11-17** |
 | 4 | `validate`, `analyse`, `signal`, `embed` and `explain` jobs; `pipelines/hourly.yaml` and `daily.yaml`; retries and the cooperative half of timeouts (§6.5, §7.5) — **done 2026-11-17**. The model picker moved out; see below |
 | 5 | queue + claim + lease (§7.2–7.4); dispatcher + event triggers (§7.7, built without the outbox); cross-pipeline loop refusal — **done 2026-11-18**. Resume and the circuit breaker moved; see below |
-| 6 | OpenTelemetry metrics and traces (§8.3); production deployment notes (§8.2) |
+| 6 | OpenTelemetry traces (§8.3) and the `token_daily` continuous aggregate — **done 2026-11-18**. Metrics, and the circuit breaker that reads them, moved; production deployment notes (§8.2) were not written — §16 answer 4 already reduced them to one VM |
 
 **The queue moved from step 3 to step 5** (decided 2026-11-17). It was
 written into step 3 above because §7 reads as one piece, but a durable

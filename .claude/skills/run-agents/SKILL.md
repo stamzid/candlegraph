@@ -28,7 +28,8 @@ make agent-runs                                # every report, newest first
 make agent-runs ARGS="--agent observer --show" # the newest report in full
 make runs ARGS='--job observer'                # each run's trigger (scheduled/manual/ui/mcp) and outcome;
                                                # includes runs still in progress (outcome `running`)
-make runs ARGS='--all'                         # every job together: ingest, agents, fetch_news
+make runs ARGS='--all'                         # every job together: ingest, agents, fetch_news, pipelines
+                                               # (a pipeline's steps are indented under it)
 make logs-agents                               # scheduled runs as they happen; each line ends run=<id>
 ```
 

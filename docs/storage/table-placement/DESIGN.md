@@ -5,7 +5,9 @@ recorded 2026-10-30 (revision `f399ca0770a0`, all plain); `token_hours_fill`
 recorded and implemented 2026-11-07 (revision `f116af87c3a2`, plain), and
 extended 2026-11-08 with `sigma_log` (`f513c5d75c55`) without changing its
 placement; the generic `run` ledger recorded and implemented 2026-11-14
-(revision `43a899e29e3a`, plain)
+(revision `43a899e29e3a`, plain); `run_queue` (plain) and the `token_daily`
+continuous aggregate (a view, no placement of its own) recorded and
+implemented in stage 2, 2026-11-18
 **Area:** `alembic/versions/`, `candlegraph/storage/statements.py`
 **Companion:** [`../timescaledb/DESIGN.md`](../timescaledb/DESIGN.md) — why we
 adopted the extension at all, and how the migration works.
@@ -235,9 +237,10 @@ A separate table avoids both:
   becoming consumable by a strategy by accident — the read path filters on
   method, and `load_symbol_series` never reads this table at all.
 
-## The generic `run` ledger (harness pre-work, rollout step 3) — plain, proposed
+## The generic `run` ledger (harness pre-work, rollout step 3) — plain
 
-Recorded here before the migration is written, as the rule requires. The
+Recorded here before the migration was written, as the rule requires
+(implemented 2026-11-14, revision `43a899e29e3a`). The
 harness design (`docs/harness/runner/DESIGN.md`) keeps `ingest_run` and
 `agent_run` as the detailed ledgers of the jobs that have one, and adds a
 generic `run` table for jobs that do not — the first is the scheduled

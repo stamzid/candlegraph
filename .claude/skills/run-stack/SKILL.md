@@ -44,13 +44,33 @@ See what the processes are running and on which interval:
 make jobs
 ```
 
-Four rows: `ingest` (role `worker`, `DATA_POLL_INTERVAL`), `observer` and
-`janitor` (role `agents`; the janitor is `0`, disabled, because the
-container has no git checkout), and `fetch_news` (role `agents`,
-`FETCH_NEWS_INTERVAL`, `0` by default because it spends search credits).
-A job shown as disabled is not an error. After a minute,
-`make runs ARGS='--all'` should show an `ingest` and an `observer` row,
-both with trigger `scheduled`.
+Eleven rows. Five are scheduled: `ingest` (role `worker`,
+`DATA_POLL_INTERVAL`), `observer` and `janitor` (role `agents`; the
+janitor is `0`, disabled, because the container has no git checkout),
+`fetch_news` (`FETCH_NEWS_INTERVAL`, `0` by default because it spends
+search credits) and `dispatch` (`EVENT_POLL_INTERVAL`, every minute).
+The other six — `validate`, `analyse`, `signal`, `explain`,
+`refresh_aggregates`, `embed` — say **pipeline step only**: they run when
+a pipeline orders them, never on a clock. A job shown as disabled is not
+an error, and neither is a step-only one.
+
+After a minute, `make runs ARGS='--all'` should show an `ingest` and an
+`observer` row, both with trigger `scheduled`. Within a minute of the
+first successful ingest, the dispatcher starts the hourly pipeline:
+
+```sh
+make runs ARGS='--job hourly'   # one run, trigger `event`, its steps indented under it
+make queue                      # its queue row, `done`
+```
+
+On a brand-new volume the first `hourly` run may **fail at `validate`**
+because the safety-net schedule fired before any data existed. That is
+expected and documented; the next ingest starts a real run. Exactly one
+`dispatch` row per tick that did something is right — a quiet tick
+writes no row at all (invariant 27's one exception).
+
+To see the same runs as traces, start the stack with the collector
+overlay instead: `make otel-up`, then `make otel-logs`.
 
 Confirm the storage layer came up as intended — three hypertables, and the
 ledger and state tables left plain:

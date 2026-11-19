@@ -6,13 +6,16 @@ ledger rows opened before and closed after every run, the `run_log` view
 over three ledgers, stages for ingest, the scheduled news fetch, and
 invariant 27 in `AGENTS.md`. The plan is archived at
 [`../../rollout/archive/2026-11-11-harness-prework.md`](../../rollout/archive/2026-11-11-harness-prework.md).
-**Not built:** the Agents dashboard does not draw an ingest run's stage
-strip (the data is in `ingest_run.detail.stages`); nothing embeds on a
-schedule (`make embed` is manual; the observer reports the backlog);
-an agent row is written only when the run's sinks include `ledger`, not
-always (the reason is under "Who writes the ledger rows").
-This is groundwork for stage 2 (the harness), not stage 2 itself: no
-pipeline specs, no event broker, no OpenTelemetry.
+**Not built here:** an agent row is written only when the run's sinks
+include `ledger`, not always (the reason is under "Who writes the ledger
+rows"). Two items once listed here were closed by stage 2: the Agents
+dashboard draws an ingest run's stage strip (2026-11-15), and `embed` is
+a step of `pipelines/daily.yaml` — which has no trigger yet, so embedding
+still happens only when someone runs it.
+This document is the groundwork; stage 2 built pipelines, the queue and
+tracing on top of it without changing it — see
+[`../pipelines/DESIGN.md`](../pipelines/DESIGN.md). The registry now
+holds eleven jobs, not four.
 **Code:** `candlegraph/harness/`, plus its callers in `cli.py`,
 `api/app.py`, `ui/viewmodels.py` and `mcp/tools.py`.
 **Related:** [`../../agents/framework/DESIGN.md`](../../agents/framework/DESIGN.md)

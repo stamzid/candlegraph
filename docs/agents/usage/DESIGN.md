@@ -1,8 +1,8 @@
 # How the agents are used: who runs them, through what, and what they write
 
-**Status:** living — updated 2026-11-13 after harness rollout step 2. It
-describes the code as it is now. Update it when step 3 adds a third
-scheduled job.
+**Status:** living — updated 2026-11-19 at the stage 2 closeout (the
+observer as a pipeline step). It describes the code as it is now. Update
+it when an agent gains a new entry point.
 **Area:** `candlegraph/agents/`, `candlegraph/harness/`, `candlegraph/cli.py`,
 `candlegraph/ui/viewmodels.py`, `candlegraph/mcp/tools.py`,
 `.github/workflows/janitor.yml`, the `agents` compose service.
@@ -55,6 +55,7 @@ flowchart LR
 | CLI, locally / CI | `make janitor ARGS="--open-pr --strict"`; `janitor.yml` calls the same command | `manual` | as above | as above |
 | UI | Agents dashboard button | `ui` | `ledger` always, so the run lands in the history the page reads | the report, rendered with its stage strip |
 | MCP | `observe` tool (declared as a writer in `TOOLS`) | `mcp` | `AGENT_REPORT_SINKS` | the report payload, redacted |
+| Pipeline step | the `observer` job named in a spec (`pipelines/example.yaml`); `make run ARGS='example'` | the **pipeline's** trigger, with `parent_run_id` = the pipeline run | `AGENT_REPORT_SINKS`; the child row exists only when they include `ledger` (a test pins it) | the step's outcome feeds the pipeline's; nothing is printed on its own |
 
 ## How a run is recorded (since step 2)
 
