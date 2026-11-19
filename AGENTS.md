@@ -183,6 +183,7 @@ docs/<area>/<topic>/DESIGN.md   Design documents. Why, not how; `docs/README.md`
   storage/           TimescaleDB adoption, which tables are hypertables, and how pgvector coexists.
   analytics/         The statistics and models with their equations; risk management and the rate seam.
   rollout/ROLLOUT.md The one current rollout plan, or a note that there is none. Finished ones are in rollout/archive/.
+  rollout/overview/ How the stages come together: the spine, the architecture, the data flows, what each stage attached to.
   agents/            The agent framework, the observer, and the janitor.
   knowledge/         Stage 1, delivered: schema, vector store, embeddings, Tavily, MCP; sources and ragflow are surveys.
   incidents/<date>-<slug>/POSTMORTEM.md   What went down, why, and what changed so it cannot again.
@@ -428,14 +429,20 @@ unfalsifiable.
 
 ### In progress
 
-Nothing. Stage 2 closed on 2026-11-19; its plan is archived at
-`docs/rollout/archive/2026-11-15-stage-2-harness.md`, and
-`docs/rollout/ROLLOUT.md` carries the one gate not yet run (the release
-check against a real stack) and the recommended next plan: the harness
-operated from the UI — a Pipelines page, the `run` prune job, the
-budget manager (`docs/knowledge/budget-manager/`) before `daily.yaml`
-gets a schedule, then the chat-model seam (`docs/harness/models/`).
-Deferred from stage 2, each with its reason in the pipelines design §15:
+**The harness, visible** — planned 2026-11-19, not started, a follow-on to
+stage 2 rather than a new stage. The plan is `docs/rollout/ROLLOUT.md`:
+ports on loopback and a test that skips without Docker; a read-only
+Pipelines dashboard page; a **Run now** button that *enqueues* (invariant
+28 — the UI asks for a run, it never performs one); the `run` prune job
+(§16 answer 5); the budget manager before `daily.yaml` is given a
+schedule; and the chat-model seam with the per-step model picker.
+`docs/rollout/overview/DESIGN.md` draws how the stages fit together.
+
+Stage 2 closed on 2026-11-19 — plan archived at
+`docs/rollout/archive/2026-11-15-stage-2-harness.md`, closeout gate
+discharged against a real stack (1953 tests, e2e 11/11 with no skips,
+one ingest producing exactly one event-triggered `hourly` run).
+Deferred from it, each with its reason in the pipelines design §15:
 step-level resume, metrics with the circuit breaker that reads them, and
 hard step timeouts. The analyst (`docs/harness/analyst/`) and its
 research loop (`docs/harness/research-loop/`) are proposed designs.

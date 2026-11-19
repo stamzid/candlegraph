@@ -171,8 +171,13 @@ The aim is **the harness in the UI**: a person sees what ran and why,
 starts what is allowed, and changes what a person is meant to change —
 a pipeline, a schedule, a credit budget, the model a step uses — without
 a terminal, with every action still a recorded run behind a confirmation.
-Stage 2 built the parts that page reads; the next plan
-([`../rollout/ROLLOUT.md`](../rollout/ROLLOUT.md)) puts them on screen.
+Stage 2 built the parts that page reads; the current plan,
+[`../rollout/ROLLOUT.md`](../rollout/ROLLOUT.md), puts them on screen in
+eight steps, and a UI click will **ask** for a run (a `run_queue` row with
+`trigger=ui`) rather than perform one, so the single writer, the lease
+and the ledger all keep working.
+[`../rollout/overview/DESIGN.md`](../rollout/overview/DESIGN.md) draws
+how the stages, this plan and the ones after it fit together.
 
 Past that, the **analyst** ([`../harness/analyst/DESIGN.md`](../harness/analyst/DESIGN.md))
 answers questions in conversation — "is my WETH rule still working, net of

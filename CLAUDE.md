@@ -47,11 +47,12 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   this is the document: find the step, read its "Read first" pointers, do
   it, and update the progress table in the same change. One at a time;
   finished ones are archived under `docs/rollout/archive/`. Five are
-  archived (stages 1, 0, 6 and 2, and the harness pre-work). **There is
-  no current rollout** (stage 2 closed 2026-11-19): `ROLLOUT.md` carries
-  one unrun gate — the release check against a real stack — and the
-  recommended next plan, the harness operated from the UI. Do not start
-  it until the user agrees to it.
+  archived (stages 1, 0, 6 and 2, and the harness pre-work). **The
+  current rollout is "the harness, visible"** (planned 2026-11-19, not
+  started): eight steps putting stage 2's harness on screen. Stage 2's
+  closeout gate is discharged — its output is recorded at the top of the
+  plan. `docs/rollout/overview/DESIGN.md` draws how the stages fit
+  together and is the fastest way to see what a new stage attaches to.
 - `docs/incidents/` — post-mortems. Read the two from October 2026 before
   changing the database image, a migration id, or a compose health check.
 

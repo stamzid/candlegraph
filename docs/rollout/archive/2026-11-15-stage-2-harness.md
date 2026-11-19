@@ -1,9 +1,10 @@
 # Rollout: stage 2, the harness — and what comes just before it
 
 **Status:** archived — planned 2026-11-15, closed 2026-11-19. All seven
-steps done; one gate of step 7 (the release check against a real stack)
-was not run in the closing session and is carried by
-[`../ROLLOUT.md`](../ROLLOUT.md) — see step 7's Outcome.
+steps done. The one gate step 7 could not run (the release check against
+a real stack, with Docker stopped that day) was **discharged the same
+day** in the following session; its output is recorded at the top of
+[`../ROLLOUT.md`](../ROLLOUT.md).
 **Designs it follows:** [`../../harness/runner/DESIGN.md`](../../harness/runner/DESIGN.md)
 (built), and [`../../harness/pipelines/DESIGN.md`](../../harness/pipelines/DESIGN.md)
 (written in step 2, built in steps 3–6).
@@ -658,8 +659,8 @@ session was documentation only):
    nothing prunes `run`. At one hourly pipeline — a parent and five step rows an hour — that
    is ~50k rows a year — not urgent, and audit finding 13 already lists it.
 
-**Not done: the release check against a real stack.** Docker was not
-running in the closing session, so the stack half of `release-check`
+**The release check against a real stack: deferred, then done.** Docker
+was not running in the closing session, so the stack half of `release-check`
 (`make up`, `make e2e`, `report --strict`, a real hourly pipeline fired
 by ingest) did not run. `make check` was run: format, lint and mypy
 clean; 1722 passed, 241 skipped (the integration and e2e tiers), and
@@ -667,8 +668,17 @@ clean; 1722 passed, 241 skipped (the integration and e2e tiers), and
 `test_timescale.py::test_a_server_that_does_not_preload_timescaledb_is_refused_before_any_ddl`,
 which starts its own container and, unlike the rest of the tier, raises
 rather than skips when Docker is down. That is a test-harness gap, not a
-regression (no code changed in this step), and it is recorded in
-[`../ROLLOUT.md`](../ROLLOUT.md) beside the stack run. Steps 5 and 6 each verified the pipeline on a real stack, and
+regression (no code changed in this step).
+
+**Discharged 2026-11-19**, in the next session, against a real stack:
+`make check` 1953 passed / 11 skipped (e2e) / 0 failed with the
+integration tier running; `/status` ok and fresh; `make e2e` 11 passed
+with no skips; `report --strict` flagging only GNO at 65.9% (expected);
+all three specs valid; and the exit criterion observed live — one ingest
+produced exactly one `hourly` run with trigger `event` and five child
+steps, and a second ingest in the same bar hour produced none. The full
+table is at the top of [`../ROLLOUT.md`](../ROLLOUT.md). The
+Docker-less skip is step 1 of that plan. Steps 5 and 6 each verified the pipeline on a real stack, and
 this step changed no code, so the risk is small — but "small" is not
 "verified". [`../ROLLOUT.md`](../ROLLOUT.md) carries it as the first
 thing to do.

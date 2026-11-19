@@ -28,10 +28,16 @@ describes how they fit together on one page):
 | **Simulation and strategy evaluation** (stage 6, 2026-11-10) | Monte Carlo over four path generators with an empirical p-value, a discrete-event engine reconciling exactly with the backtester, MCMC posteriors gated on R-hat and ESS. | `candlegraph simulate WETH --paths 1000`; `forecast --posterior` |
 | **Harness** (stage 2, 2026-11-19; pre-work 2026-11-15) | One runner and one ledger shape for every job; YAML pipelines validated whole before running; the work queue and dispatcher, so a successful ingest starts the hourly pipeline once per bar hour; a trace per run; the `token_daily` continuous aggregate. | `candlegraph run pipelines/hourly.yaml`; `make runs ARGS='--job hourly'` shows trigger `event` |
 
-No stage is open. [`../rollout/ROLLOUT.md`](../rollout/ROLLOUT.md) says so,
-carries the one closeout gate not yet run, and recommends the next plan:
-**the harness operated from the UI** (a Pipelines page, credit budgets, a
-model picker) before stage 3 widens the data.
+No roadmap *stage* is open. The current plan,
+[`../rollout/ROLLOUT.md`](../rollout/ROLLOUT.md), is a follow-on to stage
+2 rather than a new stage: **the harness, visible** — a Pipelines page, a
+UI-triggered run that enqueues, the `run` prune job, credit budgets, a
+schedule for the daily pipeline and a per-step model picker. It numbers
+nothing; the next stage is still 3. Stage 2's closeout gate was
+discharged against a real stack on 2026-11-19 and its output is recorded
+there. [`../rollout/overview/DESIGN.md`](../rollout/overview/DESIGN.md)
+draws how the delivered stages, the current plan and the stages ahead fit
+together.
 
 Stage 6 was built out of numeric order, which is normal here — stage 1
 was delivered while stage 0 was paused. The numbers are identities, not a
