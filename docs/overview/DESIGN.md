@@ -73,7 +73,7 @@ flowchart LR
 | `ollama` | the local embedding model | — | 11434 |
 
 The worker and the agents are the same program started with two
-selections of one job registry (`make jobs` lists all eleven jobs, their
+selections of one job registry (`make jobs` lists all twelve jobs, their
 schedule and what each writes).
 
 ## An hour, end to end
@@ -162,7 +162,9 @@ test reads each declaration.
   (`trigger=ui`) for the dispatcher to perform. It cannot yet change a
   schedule, a budget or a model.
 - **`daily.yaml` has no trigger**, so new news is embedded only when
-  someone runs it; and nothing prunes old `run` rows yet.
+  someone runs it. (Old `run` history is pruned after 30 days since
+  2026-11-20; `ingest_run` and `agent_run` grow without bound, on purpose —
+  the observer reads them.)
 - **Traces, not metrics.** Every run is a span; there is no metrics
   backend, and therefore no circuit breaker. Step timeouts are
   cooperative.

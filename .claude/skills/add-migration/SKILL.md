@@ -76,10 +76,22 @@ so a new table means updating that test too.
 
 ## 3. Apply and verify
 
+Try a draft on a **throwaway** stack, never your default one. The default
+stack's volume is the long-lived one, and a draft applied to it and then
+renamed is how a volume became unstartable on 2026-10-28 and 2026-11-19
+(`docs/incidents/2026-11-20-stack-would-not-start-again/`). `make up`
+refuses the default stack while `alembic/versions` has uncommitted changes,
+so the throwaway is also the path of least resistance:
+
 ```sh
-make up                       # the entrypoint runs `alembic upgrade head`
+COMPOSE_PROJECT_NAME=cg-$(basename "$PWD")-$(date +%s) POSTGRES_HOST_PORT=5433 \
+  APP_HOST_PORT=8001 UI_HOST_PORT=8502 OLLAMA_HOST_PORT=11435 make up   # entrypoint runs `alembic upgrade head`
 make test-integration         # applies the chain to a throwaway TimescaleDB
+# ...then `make down` with the same COMPOSE_PROJECT_NAME, once the revision id is final.
 ```
+
+Your default stack picks the revision up after it is committed, with a plain
+`make up` (or `make up FORCE=1` once the id is final but not yet committed).
 
 The throwaway database is `timescale/timescaledb-ha:pg17.11-ts2.31.0`, pinned in
 `tests/integration/conftest.py` to match compose and CI. A migration that

@@ -249,6 +249,44 @@ def test_a_run_never_deletes_anything(registry: TokenRegistry, frozen_now: datet
     assert db.executed == []
 
 
+def _sql_text(part: object) -> str:
+    """A psycopg2 ``Composed`` as the SQL it would send, schema names quoted.
+
+    Rendered from the parts rather than from ``repr``: ``repr`` switches to
+    double quotes whenever a fragment contains a single quote, which is any
+    ``WHERE state = 'done'``.
+    """
+    from psycopg2 import sql
+
+    if isinstance(part, sql.Composed):
+        return "".join(_sql_text(p) for p in part.seq)
+    if isinstance(part, sql.SQL):
+        return part.string
+    if isinstance(part, sql.Identifier):
+        return ".".join(f'"{name}"' for name in part.strings)
+    if isinstance(part, sql.Literal):
+        return repr(part.wrapped)
+    return str(part)
+
+
+def _delete_targets() -> dict[str, set[str]]:
+    """Every table each statement deletes from or truncates, by statement name."""
+    import re
+
+    from candlegraph.storage import statements_for
+
+    statements = statements_for("candlegraph")
+    pattern = re.compile(r'(?:DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+"[^"]+"\.(\w+)', re.IGNORECASE)
+    targets: dict[str, set[str]] = {}
+    for name in vars(statements):
+        if name.startswith("_"):
+            continue
+        found = set(pattern.findall(_sql_text(getattr(statements, name))))
+        if found:
+            targets[name] = found
+    return targets
+
+
 def test_no_statement_can_delete_hourly_rows() -> None:
     """Belt and braces: nothing in the statement set can prune stored history.
 
@@ -264,28 +302,43 @@ def test_no_statement_can_delete_hourly_rows() -> None:
     clause and must still pass — it reads that table to decide what to
     remove from the cache — which is exactly the distinction a substring
     check cannot make.
-    """
-    import re
 
+    **Blind spot fixed 2026-11-20.** The targets used to be found with a
+    regex over ``repr(statement)``, which expected each SQL fragment in
+    single quotes. Python's ``repr`` uses double quotes whenever the fragment
+    itself contains a ``'`` — so any DELETE with a quoted literal in its
+    WHERE was invisible, `prune_done_queue_rows` included, and so would a
+    `DELETE FROM token_hours_data WHERE x = 'y'` have been. The targets are
+    now read from the composed parts.
+
+    The allowed targets are the two things that are work or derived, never
+    observations (invariant 4): the fill cache, and the run ledgers' own
+    housekeeping — `run_queue` rows once done, and generic `run` history past
+    `RUN_RETENTION_DAYS` (pipelines design §16, answer 5).
+    """
     from candlegraph.storage import statements_for
 
     statements = statements_for("candlegraph")
 
     assert not hasattr(statements, "delete_older_data")
 
-    deletable = set()
-    for name in vars(statements):
-        if name.startswith("_"):
-            continue
-        rendered = str(getattr(statements, name))
-        # `DELETE FROM `, then the schema Identifier, then `.<table>`.
-        deletable.update(re.findall(r"DELETE FROM '\),\s*Identifier\('[^']+'\),\s*SQL\('\.(\w+)", rendered))
+    deletable = set().union(*_delete_targets().values())
 
-    assert deletable <= {"token_hours_fill"}, (
-        f"only the derived-fill cache may be deleted from; found {sorted(deletable)}"
+    assert deletable <= {"token_hours_fill", "run_queue", "run"}, (
+        f"only the fill cache and the run housekeeping may be deleted from; found {sorted(deletable)}"
     )
-    # And the rule it protects: the series tables are never a delete target.
-    assert deletable.isdisjoint({"token_hours_data", "pool_hours_data", "signal", "ingest_run"})
+    # And the rule it protects: observations, and the two detailed ledgers the
+    # observer's drift rules read, are never a delete target.
+    assert deletable.isdisjoint(
+        {"token_hours_data", "pool_hours_data", "signal", "ingest_run", "agent_run", "token", "pool"}
+    )
+
+
+def test_the_delete_check_sees_a_delete_whose_where_has_a_quoted_literal() -> None:
+    """The case the old regex missed: `prune_done_queue_rows` filters on
+    `state IN ('done', 'dead')`. If the check cannot see this one, it cannot
+    see a forbidden one written the same way."""
+    assert _delete_targets()["prune_done_queue_rows"] == {"run_queue"}
 
 
 def test_an_empty_run_is_still_a_success(registry: TokenRegistry, frozen_now: datetime) -> None:

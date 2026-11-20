@@ -7,6 +7,10 @@ SHELL := /bin/bash
 
 UV ?= uv
 COMPOSE ?= docker compose
+# Refuses up/down/reset on a Compose project whose containers another checkout
+# started (docs/incidents/2026-11-20-stack-would-not-start-again/). FORCE=1
+# overrides it, on purpose and out loud.
+GUARD = FORCE=$(FORCE) scripts/stack-guard.sh
 E2E_URL ?= http://localhost:$${APP_HOST_PORT:-8000}
 
 .PHONY: help install lock fmt fmt-check lint typecheck test test-unit test-integration \
@@ -15,7 +19,7 @@ E2E_URL ?= http://localhost:$${APP_HOST_PORT:-8000}
         up-knowledge logs-ollama embed reembed fetch-news search link-mentions explain mcp \
         fill fill-status fill-evaluate stats compare signals backtest strategies portfolio \
         forecast forecast-posterior risk simulate simulate-execution jobs serve run check-pipelines \
-        queue aggregates otel-up otel-logs
+        queue aggregates otel-up otel-logs stacks
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -55,18 +59,22 @@ cov: ## Run the suite with a coverage report
 check: fmt-check lint typecheck test ## Everything CI runs
 
 up: ## Build and start the stack (including the ollama embedder; first start pulls the model), waiting until healthy
+	@$(GUARD) up
 	@$(COMPOSE) up -d --build --wait || { \
 		echo; echo "--- the stack did not become healthy; last lines of the API container: ---"; \
 		$(COMPOSE) logs --no-color --tail=40 candlegraph; \
 		echo "--- and of the ollama embedder (a first start pulls ~1.2 GB; a slow link may need another 'make up'): ---"; \
 		$(COMPOSE) logs --no-color --tail=20 ollama; \
-		echo "--- if the log names a migration or volume problem, 'make reset' rebuilds the volume ---"; \
+		echo "--- if the log names a migration or volume problem, 'make reset' rebuilds the volume;"; \
+		echo "    'make stacks' shows whether another checkout has been using this project ---"; \
 		exit 1; }
 
-down: ## Stop the stack and delete its volume
+down: ## Stop the stack and delete its volume (refused if another checkout's stack holds this project name)
+	@$(GUARD) down
 	$(COMPOSE) down -v --remove-orphans
 
 reset: ## Rebuild from nothing: stop, delete the volume and this project's image, start again
+	@$(GUARD) reset
 	$(COMPOSE) down -v --remove-orphans --rmi local
 	$(MAKE) up
 
@@ -93,6 +101,9 @@ mcp: ## Serve the read-only tools over MCP on stdio, against the stack's databas
 	DB_HOST=$${DB_HOST:-localhost} DB_PORT=$${POSTGRES_HOST_PORT:-5432} \
 		OLLAMA_URL=$${OLLAMA_URL:-http://localhost:$${OLLAMA_HOST_PORT:-11434}} \
 		$(UV) run --extra mcp python -m candlegraph mcp $(ARGS)
+
+stacks: ## Every candlegraph stack on this Docker daemon, and the checkout each one belongs to
+	@scripts/stack-guard.sh list
 
 ps: ## Show the stack's status
 	$(COMPOSE) ps
@@ -206,6 +217,7 @@ aggregates: ## Refresh the token_daily continuous aggregate, or show what it hol
 	$(COMPOSE) exec agents python -m candlegraph aggregates $(ARGS)
 
 otel-up: ## The stack plus an OpenTelemetry collector, with tracing turned on
+	@$(GUARD) up
 	$(COMPOSE) -f docker-compose.yaml -f docker-compose.otel.yaml up -d --build --wait
 
 otel-logs: ## The spans, as the collector received them

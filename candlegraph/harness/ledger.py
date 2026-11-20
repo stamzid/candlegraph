@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from candlegraph.storage import DatabaseManager
@@ -78,3 +78,16 @@ def close_run(
 def recent_runs(db: DatabaseManager, limit: int = 10, job: str | None = None) -> list[dict[str, Any]]:
     """The newest rows, optionally for one job."""
     return db.fetch_all(db.sql.get_recent_generic_runs, {"limit": limit, "job": job})
+
+
+def prune_runs(db: DatabaseManager, *, older_than_days: int, now: datetime | None = None) -> int:
+    """Delete finished run families that started more than ``older_than_days`` ago.
+
+    A family — a root run and its steps — goes in one statement or not at
+    all, and one with any member still ``running`` is kept whole. Only the
+    generic ``run`` table is touched; ``ingest_run`` and ``agent_run`` are
+    the detailed ledgers the observer reads and are never pruned. Returns the
+    number of rows deleted. Raises on failure, like every write (invariant 3).
+    """
+    moment = now or datetime.now(tz=UTC)
+    return db.execute(db.sql.prune_runs, {"before": moment - timedelta(days=older_than_days)})

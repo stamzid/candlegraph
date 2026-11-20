@@ -621,7 +621,8 @@ dashboard opens with a metric strip, and every chart carries a title that says w
 - **Pipelines** — the harness, on screen: the newest run of each pipeline with a
   strip of its steps (a skipped step is shown, not hidden), where each run came from (`event`
   runs name the ingest that caused them), the work queue with every row's dedup key — and every
-  `dead` row however old, since each needs a person — whether the dispatcher is running, and each
+  `dead` row still held (each needs a person; the dispatcher deletes them with the done rows after
+  `QUEUE_RETENTION_DAYS`) — whether the dispatcher is running, and each
   committed spec as the loader read it. A spec the loader refuses is drawn as a card with its
   file and line, and the rest of the page still renders. Each spec has a **Run now** button that
   *asks* for a run rather than performing one: it adds a queue row with trigger `ui`, the

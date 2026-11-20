@@ -1,6 +1,6 @@
 # Rollout: the harness, visible — operating candlegraph from the UI
 
-**Status:** current — planned 2026-11-19; steps 1–3 done, step 4 next. Eight steps.
+**Status:** current — planned 2026-11-19; steps 1–4 done, step 5 next. Eight steps.
 **Where it sits:** a follow-on to stage 2, not a new roadmap stage. It
 numbers nothing: the roadmap's next *stage* is still 3 (traditional
 markets), and this plan is what makes stage 2 usable by a person before
@@ -72,7 +72,7 @@ fixed.
 | 1 | Two corrections first: the Docker-less skip, and ports on loopback | S | — | done 2026-11-19 |
 | 2 | The Pipelines page, read-only | M | 1 | done 2026-11-19 |
 | 3 | Start a pipeline from the page (enqueue, never execute) | M | 2 | done 2026-11-19 |
-| 4 | The `run` prune job | S | — | todo |
+| 4 | The `run` prune job | S | — | done 2026-11-20 (with an unplanned start-up guard first) |
 | 5 | The budget manager | M | — | todo |
 | 6 | Give `daily.yaml` a schedule | S | 5 | todo |
 | 7 | The chat-model seam and the per-step model picker | L | 2 | todo |
@@ -403,6 +403,74 @@ valid, and there is a test that reads the view after a prune.
 **Done when.** `make jobs` lists `prune`; an integration test shows a row
 older than the retention deleted, a recent one kept, a `running` one
 kept, and `run_log` still queryable; `make check` green.
+
+**Before it: the stack would not start in `elm` — fixed first, at the
+user's request.** The elm worktree's default `make up` failed with the
+preflight's "stamped at revision … which does not exist in this
+checkout" and ran only under an invented project name. Write-up:
+[`../incidents/2026-11-20-stack-would-not-start-again/POSTMORTEM.md`](../incidents/2026-11-20-stack-would-not-start-again/POSTMORTEM.md).
+In short: the third volume a checkout could not start; all branches were
+at one commit, so not divergence; the two proven earlier cases were
+draft revisions renamed before commit; this one's revision was not
+recoverable (elm was rebuilt while it was being read). Two preventions,
+both in `scripts/stack-guard.sh`, run first by `up`, `down`, `reset` and
+`otel-up`: **refuse a project whose containers another checkout started**
+(verified against the live elm stack from oak — `up` and `down` both
+refused, elm untouched), and **refuse `up` on the default stack while
+`alembic/versions` has uncommitted changes**. `make stacks` lists who owns
+what. Labelling volumes in the compose file was tried on a throwaway
+project and rejected: Compose v5 then stalls on every existing volume,
+waiting to be told whether to recreate it.
+
+**Outcome.** Done 2026-11-20.
+
+- **`prune`**: scheduled daily (`PRUNE_INTERVAL`, a new setting — the
+  plan named only `RUN_RETENTION_DAYS`, but every scheduled job reads an
+  interval, and `0` is how a deployment turns it off), role `agents`,
+  writes `ledger`, records its own run. Not declared idempotent, so no
+  pipeline can include it.
+- **It deletes families, in one statement.** A root is a finished `run`
+  row older than the cutoff whose parent is not a `run` row (an
+  event-triggered pipeline points at an `ingest_run`); it goes with all
+  its children whatever their age; a family with any member `running` is
+  kept whole. `ingest_run` and `agent_run` are never named — an observer
+  step of a pruned pipeline stays in the observer's history.
+- **A real gap found in invariant 4's test, and fixed.** It read delete
+  targets with a regex over `repr(statement)`, which expected single
+  quotes; Python's `repr` switches to double quotes when the SQL holds a
+  `'`. So any DELETE with a quoted literal was invisible —
+  `prune_done_queue_rows` was, and **a `DELETE FROM token_hours_data WHERE
+  symbol = 'GNO'` would have passed** (demonstrated). It now reads the
+  composed parts, sees all three deleting statements, and allows exactly
+  the fill cache, `run_queue` and `run`.
+- Tests: 15 unit (the job, its counts, the delete targets, the registry
+  pins) and 9 integration against real SQL — old deleted, recent kept,
+  `running` kept, a family with a step past the cutoff deleted whole, a
+  family with a running step kept whole, an event-triggered pipeline
+  pruned while its `ingest_run` stays, an `agent_run` step kept,
+  `run_log` intact, a second prune deleting nothing, the job's own row
+  surviving. Plus 33 for the guard. `make check` **2081 passed**, 11
+  skipped (e2e); without Docker, 244 skipped and the guard's 33 pass.
+- **On a real stack** (`cg-oak-1795159426`): `prune` ran at start-up
+  (`deleted 0`); after seeding 40-day-old history and restarting the
+  agents container, the scheduled run recorded `{"deleted": 4,
+  "retention_days": 30}` — a lone old run and a pipeline with its two
+  steps — and kept the family with a `running` step and the recent run.
+- **Corrected while here:** step 2's README line said dead queue rows
+  stay visible "however old"; the dispatcher deletes dead rows with done
+  ones after `QUEUE_RETENTION_DAYS`. The docs now say so.
+
+**Found, not fixed:**
+
+| | |
+|---|---|
+| Dead queue rows are deleted after `QUEUE_RETENTION_DAYS` (7) | A row that "needs a person" disappears in a week whether or not anyone looked. Pre-existing (stage 2); worth keeping dead rows until acknowledged |
+| A family stuck `running` is never pruned | Correct to keep, but nothing ever closes it: the queue has a reaper for leases, the ledgers have none for a process that died mid-run |
+| No `candlegraph prune [--dry-run]` | The only way to prune on demand is restarting the agents container. And `RUN_RETENTION_DAYS=1` is accepted and would delete almost everything at the next run |
+| A pipeline started by another pipeline is pruned with its cause, as if it were a step; its own steps wait for the next day | The same owned-versus-caused ambiguity as step 2's display bug; latent, no spec triggers on another pipeline |
+| The guard runs only through `make` | A raw `docker compose up` from the wrong checkout is not checked |
+| The draft check sees uncommitted files only | A draft committed and then amended or rebased under a new id is not caught |
+| A volume whose containers are gone has no recorded owner | Declined in the post-mortem, with the reason; `make stacks` lists such volumes as unattributable |
 
 ---
 

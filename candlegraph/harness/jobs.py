@@ -213,6 +213,20 @@ def _dispatch(ctx: JobContext) -> RunOutcome:
     return dispatch_job_body(ctx)
 
 
+def _prune(ctx: JobContext) -> RunOutcome:
+    """Delete generic run history past ``RUN_RETENTION_DAYS``; whole families only.
+
+    Its own row is ``running`` while it works, so it can never delete itself.
+    A run that deleted nothing still succeeded: that is the normal day once
+    history is inside the window.
+    """
+    from candlegraph.harness.ledger import prune_runs
+
+    days = ctx.settings.run_retention_days
+    deleted = prune_runs(ctx.db, older_than_days=days, now=ctx.now)
+    return RunOutcome(outcome=Outcome.SUCCEEDED, counts={"deleted": deleted, "retention_days": days})
+
+
 def run_ledger(settings: Settings, db: DatabaseManager, params: Mapping[str, Any]) -> RunHook:
     """The generic `run` table: for every job without a ledger of its own.
 
@@ -348,6 +362,20 @@ JOBS: dict[str, Job] = {
             # A tick is safe to repeat — that is the queue's dedup key's whole
             # job. Proved by test_running_dispatch_twice_writes_the_same_state.
             idempotent=True,
+        ),
+        Job(
+            name="prune",
+            run=_prune,
+            schedule=Every("prune_interval"),
+            role="agents",
+            # `ledger` and nothing else: it deletes from the generic `run`
+            # ledger, and records itself there. Never market data, never
+            # `ingest_run` or `agent_run`.
+            writes=frozenset({"ledger"}),
+            description="Delete finished run history older than RUN_RETENTION_DAYS, whole families only",
+            ledger=run_ledger,
+            # Not a pipeline step, so not declared idempotent: the flag fails
+            # closed, and a housekeeping job has no business inside a pipeline.
         ),
         # --- the pipeline steps -----------------------------------------------
         # None is scheduled on its own clock: a pipeline is what orders them,

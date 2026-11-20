@@ -69,7 +69,11 @@ def test_nothing_enabled_is_a_warning_not_a_crash(
             # Every interval the agents process hosts, off: the compose
             # service can legitimately be configured to run nothing.
             make_settings(
-                observer_interval=0, janitor_interval=0, fetch_news_interval=0, event_poll_interval=0
+                observer_interval=0,
+                janitor_interval=0,
+                fetch_news_interval=0,
+                event_poll_interval=0,
+                prune_interval=0,
             ),
             select(role="agents"),
             stop=_stopped(),
@@ -93,5 +97,6 @@ def test_the_agents_banner_names_every_hosted_job_and_its_interval() -> None:
     assert "janitor every 0s" in line
     assert "fetch_news every 86400s" in line
     assert "dispatch every 60s" in line
+    assert "prune every 86400s" in line
     # The lead is the jobs that will actually fire.
-    assert line.startswith("Agents starting: observer, fetch_news, dispatch (")
+    assert line.startswith("Agents starting: observer, fetch_news, dispatch, prune (")

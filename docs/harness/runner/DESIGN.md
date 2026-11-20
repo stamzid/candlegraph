@@ -15,7 +15,7 @@ still happens only when someone runs it.
 This document is the groundwork; stage 2 built pipelines, the queue and
 tracing on top of it without changing it — see
 [`../pipelines/DESIGN.md`](../pipelines/DESIGN.md). The registry now
-holds eleven jobs, not four.
+holds twelve jobs, not four (`prune` was the twelfth, 2026-11-20).
 **Code:** `candlegraph/harness/`, plus its callers in `cli.py`,
 `api/app.py`, `ui/viewmodels.py` and `mcp/tools.py`.
 **Related:** [`../../agents/framework/DESIGN.md`](../../agents/framework/DESIGN.md)

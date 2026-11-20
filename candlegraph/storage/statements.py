@@ -237,6 +237,7 @@ class Statements:
     insert_agent_run: sql.Composed
     open_run: sql.Composed
     close_run: sql.Composed
+    prune_runs: sql.Composed
     get_recent_generic_runs: sql.Composed
     open_agent_run: sql.Composed
     close_agent_run: sql.Composed
@@ -705,6 +706,39 @@ def statements_for(schema: str) -> Statements:
         """
     ).format(ns=ns)
 
+    # The `prune` job (rollout "the harness, visible", step 4; pipelines §16,
+    # answer 5). Deletes whole *families*, never single rows, so the Pipelines
+    # page can never draw a run with holes in it:
+    #
+    #   * a root is a finished `run` row older than the cutoff whose parent is
+    #     not itself a `run` row — an event-triggered pipeline points at the
+    #     ingest that caused it, which lives in `ingest_run` and is untouched;
+    #   * a root goes together with its children (its steps, every attempt),
+    #     whatever their own age — a step can start minutes after the cutoff;
+    #   * a family with any member still `running` is left whole. A process
+    #     that died mid-run leaves such a family for ever; it is a stuck row
+    #     for a person to read, not something to delete unseen.
+    #
+    # One statement, so a family is never half deleted. Runs are not
+    # observations (invariant 4); `ingest_run` and `agent_run` are never named.
+    prune_runs = sql.SQL(
+        """
+        WITH roots AS (
+            SELECT r.run_id FROM {ns}.run AS r
+            WHERE r.started_at < %(before)s
+              AND r.outcome <> 'running'
+              AND NOT EXISTS (SELECT 1 FROM {ns}.run AS p WHERE p.run_id = r.parent_run_id)
+              AND NOT EXISTS (
+                  SELECT 1 FROM {ns}.run AS c
+                  WHERE c.parent_run_id = r.run_id AND c.outcome = 'running'
+              )
+        )
+        DELETE FROM {ns}.run AS doomed
+        WHERE doomed.run_id IN (SELECT run_id FROM roots)
+           OR doomed.parent_run_id IN (SELECT run_id FROM roots)
+        """
+    ).format(ns=ns)
+
     get_recent_generic_runs = sql.SQL(
         """
         SELECT * FROM {ns}.run
@@ -1047,6 +1081,7 @@ def statements_for(schema: str) -> Statements:
         insert_agent_run=insert_agent_run,
         open_run=open_run,
         close_run=close_run,
+        prune_runs=prune_runs,
         get_recent_generic_runs=get_recent_generic_runs,
         open_agent_run=open_agent_run,
         close_agent_run=close_agent_run,

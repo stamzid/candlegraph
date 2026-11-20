@@ -49,7 +49,7 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   finished ones are archived under `docs/rollout/archive/`. Five are
   archived (stages 1, 0, 6 and 2, and the harness pre-work). **The
   current rollout is "the harness, visible"** (planned 2026-11-19; steps
-  1–3 done, step 4 next): eight steps putting stage 2's harness on
+  1–4 done, step 5 — the budget manager — next): eight steps putting stage 2's harness on
   screen. *Run now* on the Pipelines page enqueues and never executes:
   keep it that way — the UI process must not call `run_pipeline` or take
   the pipeline advisory lock. Stage 2's
@@ -133,11 +133,18 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   `OLLAMA_HOST_PORT` — a second stack fails on Ollama's 11434 even when
   the first two are unique.
 - Two worktrees whose directories share a basename also share a Compose
-  project, and therefore a database volume. The symptom is `alembic` failing
-  with `Can't locate revision identified by <hash>` — a revision from the
-  *other* branch. `make down` would delete their data, so do not reach for it
-  reflexively: run your own stack under an explicit
-  `COMPOSE_PROJECT_NAME=<something-unique>` with distinct host ports instead.
+  project, and therefore a database volume — and so does a project name
+  reused from another session. The symptom is `alembic` failing with `Can't
+  locate revision identified by <hash>`. `make up`, `make down`, `make reset`
+  and `make otel-up` now **refuse** a project whose containers another
+  checkout started (`scripts/stack-guard.sh`), and `make stacks` shows every
+  stack and whose it is. Do not reach for `FORCE=1` to get past it: run your
+  own stack under an explicit `COMPOSE_PROJECT_NAME=<something-unique>` with
+  distinct host ports. See `docs/incidents/2026-11-20-stack-would-not-start-again/`.
+- A draft migration never goes on the default stack. `make up` refuses the
+  default stack while `alembic/versions` has uncommitted changes, because a
+  draft applied there and renamed before commit is what made a volume
+  unstartable twice; use a throwaway `COMPOSE_PROJECT_NAME`.
 - When the stack will not come up, `make up` prints the API container's log
   and the fix is almost always `make reset` for *your* project. Never
   `docker system prune` or delete volumes by hand to fix a candlegraph

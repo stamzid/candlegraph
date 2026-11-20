@@ -2285,7 +2285,7 @@ def _pipelines_runs(view: Any) -> None:
 
 
 def _pipelines_queue(view: Any) -> None:
-    """What triggers asked for. Dead rows are always included, however old."""
+    """What triggers asked for, with every dead row the queue still holds."""
     _title(
         "Queue — what a trigger asked for, and what became of it",
         "One row per requested run. The dedup key is why twelve ingests in an hour start one pipeline.",

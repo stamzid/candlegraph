@@ -44,11 +44,14 @@ See what the processes are running and on which interval:
 make jobs
 ```
 
-Eleven rows. Five are scheduled: `ingest` (role `worker`,
+Twelve rows. Six are scheduled: `ingest` (role `worker`,
 `DATA_POLL_INTERVAL`), `observer` and `janitor` (role `agents`; the
 janitor is `0`, disabled, because the container has no git checkout),
 `fetch_news` (`FETCH_NEWS_INTERVAL`, `0` by default because it spends
-search credits) and `dispatch` (`EVENT_POLL_INTERVAL`, every minute).
+search credits), `dispatch` (`EVENT_POLL_INTERVAL`, every minute) and
+`prune` (`PRUNE_INTERVAL`, daily; it deletes `run` history older than
+`RUN_RETENTION_DAYS` a whole pipeline family at a time, and a `prune` row
+with `deleted 0` is the normal day).
 The other six — `validate`, `analyse`, `signal`, `explain`,
 `refresh_aggregates`, `embed` — say **pipeline step only**: they run when
 a pipeline orders them, never on a clock. A job shown as disabled is not
@@ -134,6 +137,8 @@ so a volume at an unknown revision fails the same way afterwards.
 
 | Symptom | Cause and fix |
 |---|---|
+| `Refusing to 'up' Compose project '<name>': its containers belong to another checkout` | The guard working: that project name is another checkout's, and continuing would run your migrations against its database (or, for `down`, delete it). Run your own: the message prints a `COMPOSE_PROJECT_NAME=…` command that will not collide. `make stacks` shows who owns what. `FORCE=1` only if that checkout is gone. |
+| `Refusing to 'up' this checkout's default stack: alembic/versions has uncommitted changes` | Try the draft on the throwaway stack the message prints; once the revision id is final, `make up FORCE=1` or commit it. See the `add-migration` skill. |
 | Port already allocated | Another worktree's stack is up. Set `POSTGRES_HOST_PORT` / `APP_HOST_PORT` / `UI_HOST_PORT` / `OLLAMA_HOST_PORT` in `.env`, or `make down` in the other checkout. |
 | Stack works on this machine but another machine cannot reach it | Intended: every published port binds to `127.0.0.1` (`BIND_HOST`). `BIND_HOST=0.0.0.0` opens it — and exposes an unauthenticated API, UI and database to the network. Do not set `HOST` instead: that is the in-container listen address and must stay `0.0.0.0`. |
 | `auth error: malformed API key` in the logs | `GRAPH_API_KEY` is empty or wrong in `.env`. Get one at <https://thegraph.com/studio/apikeys/>. |

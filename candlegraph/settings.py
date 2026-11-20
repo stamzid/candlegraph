@@ -281,6 +281,15 @@ class Settings(BaseSettings):
     # How long finished queue rows are kept. They are instructions, not
     # history; the history is in `run`.
     queue_retention_days: int = Field(default=7, ge=1)
+    # How long the generic `run` ledger keeps a run — pipeline runs, their
+    # steps, `fetch_news`, `dispatch` — before the `prune` job deletes it
+    # (pipelines design §16, answer 5). Runs, not observations: invariant 4
+    # does not cover them. `ingest_run` and `agent_run` are never pruned; the
+    # observer's drift rules read them.
+    run_retention_days: int = Field(default=30, ge=1)
+    # Seconds between `prune` runs in `candlegraph agents`; daily by default,
+    # 0 disables it and `run` grows without bound again.
+    prune_interval: int = Field(default=86400, ge=0)
 
     # --- Pipelines ---------------------------------------------------------
     # Where `candlegraph run <name>` looks for a spec it was given by name

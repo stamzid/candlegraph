@@ -259,6 +259,18 @@ hypertable: the closing `UPDATE` carries no time coordinate. Rows per
 year at one daily job are in the hundreds; at stage 2's hourly pipelines,
 tens of thousands. Revisit together with `ingest_run`, not before.
 
+**Retention, 2026-11-20.** The daily `prune` job now deletes `run` rows
+older than `RUN_RETENTION_DAYS` (30), a whole pipeline family at a time,
+which bounds the table at roughly 5,000 rows (about 170 a day: the hourly
+pipeline's parent and five steps, plus `dispatch` and `fetch_news`). The
+placement stands, and boundedness settles the "revisit" above for `run`.
+The prune filters on `started_at` and joins `parent_run_id`, and neither
+is indexed for it — the only index is `(job, started_at)`, which a
+cutoff-only filter cannot lead with — so it is one sequential scan of a
+few thousand rows a day. Deliberately no migration: an index on
+`parent_run_id` earns its place only if the retention is raised by an
+order of magnitude.
+
 ## `run_queue` (stage 2, rollout step 5) — plain
 
 Recorded here before the migration was written. The queue holds **work that

@@ -2270,7 +2270,9 @@ def _queue_frame(db: DatabaseManager) -> pd.DataFrame:
     """The newest rows, plus every dead one even if it is older than those.
 
     A dead row is the one row on this page that needs a person, so it must not
-    scroll off because the dispatcher has been busy since.
+    scroll off because the dispatcher has been busy since. It does still go
+    after ``QUEUE_RETENTION_DAYS``: the dispatcher prunes dead rows with the
+    done ones, so "however old" holds only within that window.
     """
     rows = queue_recent(db, limit=QUEUE_ROWS)
     seen = {row["id"] for row in rows}

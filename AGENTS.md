@@ -28,6 +28,7 @@ a target, and never let CI run something that is not one either.
 | Coverage report | `make cov` |
 | Run the stack | `make up`, then `make logs` / `make logs-worker`, `make down` |
 | Start over from a bad volume | `make reset` (drops the volume and this project's image, then `make up`) |
+| Every candlegraph stack on this Docker daemon, and the checkout each belongs to | `make stacks` — `up`/`down`/`reset`/`otel-up` refuse a project another checkout's containers hold, and `up` refuses the default stack while `alembic/versions` has uncommitted changes (`FORCE=1` overrides, deliberately) |
 | One ingest pass | `make ingest` (`candlegraph ingest [--progress]` prints the four stages) |
 | Backfill 90 days | `make backfill days=90` |
 | Data-quality report | `make report` (`candlegraph report [--json]`) |
@@ -146,7 +147,7 @@ candlegraph/
       base.py          Source Protocol: search(query, window) -> RawDocuments. Never writes, never decides.
       tavily.py        The metered client: bounded news search, backoff on 5xx, 429/432 never retried.
   harness/             The runner: one way to schedule, run and record a job (invariant 27).
-    jobs.py            Job, JobContext, the JOBS registry (ingest, observer, janitor, fetch_news, dispatch, and the six pipeline steps), select(role | names).
+    jobs.py            Job, JobContext, the JOBS registry (ingest, observer, janitor, fetch_news, dispatch, prune, and the six pipeline steps), select(role | names).
                        `idempotent` and `params` both fail closed: only a job proved safe to re-run can be a pipeline step.
     runs.py            Run, Outcome, RunOutcome, run_job — every run passes through it; never raises.
     pipelines.py       The YAML spec, the loader (whole file refused, with the line) and the executor.
@@ -158,7 +159,7 @@ candlegraph/
     queue.py           The `run_queue` table: enqueue (deduplicated), claim with a lease, complete, reap, prune.
     tracing.py         One span per run, one event per stage. Always on and free: no SDK means no-op spans.
     hooks.py           RunHook, the log hook and the three ledger hooks that write every ingest_run/agent_run/run row.
-    ledger.py          The generic `run` table: open_run / close_run, for jobs with no ledger of their own.
+    ledger.py          The generic `run` table: open_run / close_run, for jobs with no ledger of their own; prune_runs deletes whole families past the retention.
     stages.py          StageRecord, staged() for graph nodes, timed_stage() for plain code. agents/stages.py re-exports it.
     scheduler.py       The one BackgroundScheduler builder: immediate first firing, max_instances=1, coalesce.
     process.py         run_process: signals, start, shutdown(wait), close db. `worker` and `agents` are selections.
@@ -175,6 +176,7 @@ candlegraph/
     logging_utils.py   Logger setup.
     ports.py           Is a TCP port free to bind; `serve --port` uses it.
 alembic/versions/    Migrations. The schema name comes from settings.
+scripts/stack-guard.sh  Run first by the stack targets: refuses another checkout's stack, and a draft migration on the default one.
 config/tokens.yaml   The tokens this deployment tracks, with their knowledge-layer aliases.
 pipelines/*.yaml     Pipeline specs: reviewed definitions that ship in the image. `make check-pipelines` validates them.
 docs/<area>/<topic>/DESIGN.md   Design documents. Why, not how; `docs/README.md` indexes them.
@@ -203,9 +205,9 @@ schema.graphql       Generated. `make sdl`; a test fails if it is stale.
 | `pool_hours_data` | one row per pool per hour | `(pool_id, period_start_unix)` | **hypertable** |
 | `ingest_run` | one row per ingest run | `run_id` | plain |
 | `signal` | one row per strategy, symbol and bar | `(strategy, symbol, period_start_unix)` | **hypertable** |
-| `token_hours_fill` | one row per **missing** token-hour, per estimator | `(token_id, period_start_unix, method)` | plain — a cache, and one of the two tables that are deleted from |
+| `token_hours_fill` | one row per **missing** token-hour, per estimator | `(token_id, period_start_unix, method)` | plain — a cache, and one of the three tables that are deleted from (with `run_queue` and `run`) |
 | `agent_run` | one row per agent graph run; written when it starts (`outcome = running`) and when it ends | `run_id` | plain |
-| `run` | one row per run of a job with no ledger of its own (`fetch_news`; stage 2 pipelines); counts and errors as JSONB | `run_id` | plain |
+| `run` | one row per run of a job with no ledger of its own (`fetch_news`; stage 2 pipelines); counts and errors as JSONB | `run_id` | plain — kept `RUN_RETENTION_DAYS` (30), then deleted a whole family at a time by the daily `prune` job; a family with a member still `running` is kept |
 | `run_log` | a **view** over `ingest_run`, `agent_run` and `run` with the same columns: `job`, `trigger`, `outcome`, `verdict` | — | view |
 | `run_queue` | one row per pipeline run a trigger asked for; `UNIQUE (pipeline, dedup_key)` is what makes "exactly once" true | `(pipeline, dedup_key)` | plain — work, not history, and deleted from once done |
 | `token_daily` | one row per token per day, summarising `token_hours_data` | `(token_id, day)` | **continuous aggregate** — a view the database maintains, refreshed by the `refresh_aggregates` job |
@@ -253,9 +255,13 @@ Each of these has a test. Breaking one should break the build, not production.
    and backtesting phases; `LOOKBACK_DAYS` only bounds the first fetch for a
    token with no rows yet. This is a rule about *observations*: the derived
    fill cache (`token_hours_fill`) is deleted from on purpose, because an
-   estimate superseded by a real row is wrong rather than stale. No statement
-   may name a series table as a delete target, and a test reads the targets
-   rather than grepping for the word.
+   estimate superseded by a real row is wrong rather than stale; so is the
+   run housekeeping — `run_queue` rows once done, and generic `run` history
+   past `RUN_RETENTION_DAYS` (the `prune` job). Runs are not observations.
+   No statement may name a series table, `ingest_run` or `agent_run` as a
+   delete target, and a test reads the targets from the composed SQL rather
+   than grepping for the word (it once read them from `repr`, and missed any
+   DELETE whose WHERE held a quoted literal).
 5. **Candle times are bucket boundaries**, computed from the interval — never
    `MIN(timestamp)` of the rows present, which shifts when an hour is missing.
 6. **Buckets with no data produce no candle.** Gaps are absent, not zero-filled.
@@ -430,10 +436,10 @@ unfalsifiable.
 ### In progress
 
 **The harness, visible** — planned 2026-11-19, a follow-on to stage 2
-rather than a new stage; **steps 1–3 done 2026-11-19** (ports bind to
-loopback via `BIND_HOST`, the Docker-less skip, the Pipelines page, and
-its *Run now*, which queues a `trigger=ui` row and never runs anything
-itself). The plan is `docs/rollout/ROLLOUT.md`:
+rather than a new stage; **steps 1–4 done** (2026-11-19/20: ports bind to
+loopback via `BIND_HOST`, the Docker-less skip, the Pipelines page, its
+*Run now*, which queues a `trigger=ui` row and never runs anything itself,
+and the `prune` job). The plan is `docs/rollout/ROLLOUT.md`:
 ports on loopback and a test that skips without Docker; a read-only
 Pipelines dashboard page; a **Run now** button that *enqueues* (invariant
 28 — the UI asks for a run, it never performs one); the `run` prune job

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ def test_the_registered_jobs_are_the_ones_the_docs_name() -> None:
         "janitor",
         "fetch_news",
         "dispatch",
+        "prune",
         # Pipeline steps: no clock, ordered by a spec.
         "validate",
         "analyse",
@@ -79,6 +81,7 @@ def test_selection_by_role_and_by_name() -> None:
         "janitor",
         "fetch_news",
         "dispatch",
+        "prune",
     ]
     assert [job.name for job in select(names=["janitor"])] == ["janitor"]
     with pytest.raises(ValueError, match="unknown job"):
@@ -191,3 +194,56 @@ def test_running_the_observer_twice_writes_the_same_state() -> None:
     assert first.result is not None and second.result is not None
     assert first.result.verdict == second.result.verdict
     assert first.result.counts == second.result.counts
+
+
+# --- prune (rollout "the harness, visible", step 4) -----------------------------
+
+
+def test_prune_runs_daily_in_the_agents_process_and_writes_only_the_ledger() -> None:
+    job = JOBS["prune"]
+
+    assert job.role == "agents" and job.writes == frozenset({"ledger"})
+    assert job.interval_setting == "prune_interval"
+    assert make_settings().prune_interval == 86400
+    assert make_settings().run_retention_days == 30
+
+
+def test_prune_is_not_a_pipeline_step() -> None:
+    """Housekeeping inside a pipeline would delete the history the pipeline is
+    writing; the idempotence flag fails closed, so the loader refuses it."""
+    assert JOBS["prune"].idempotent is False
+
+
+def test_prune_asks_for_everything_older_than_the_retention_and_counts_it() -> None:
+    from candlegraph.harness.runs import Outcome, run_job
+    from tests.conftest import FakeDatabase
+
+    db = FakeDatabase()
+    db.delete_rowcount = 7
+    now = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+
+    run = run_job(
+        JOBS["prune"], make_settings(run_retention_days=30), trigger="manual", db=db, clock=lambda: now
+    )
+
+    assert run.outcome is Outcome.SUCCEEDED
+    assert run.result is not None and run.result.counts == {"deleted": 7, "retention_days": 30}
+    [params] = [p for label, p in db.executed if label == "prune_runs"]
+    assert params == {"before": now - timedelta(days=30)}
+
+
+def test_a_prune_that_finds_nothing_old_enough_still_succeeded() -> None:
+    from candlegraph.harness.runs import Outcome, run_job
+    from tests.conftest import FakeDatabase
+
+    run = run_job(JOBS["prune"], make_settings(), trigger="manual", db=FakeDatabase())
+
+    assert run.outcome is Outcome.SUCCEEDED
+    assert run.result is not None and run.result.counts["deleted"] == 0
+
+
+def test_prune_never_names_a_detailed_ledger() -> None:
+    """`ingest_run` and `agent_run` are what the observer's drift rules read."""
+    from tests.unit.ingestion.test_runner import _delete_targets
+
+    assert _delete_targets()["prune_runs"] == {"run"}

@@ -8,7 +8,8 @@ resume, the cooperative half of §7.5, §7.7 **without the outbox** — the
 ledger is the event log, and the section says why — and the traces of
 §8.3. **Not built**, each with its reason in §15: resume (§7.4), circuit
 breakers (§7.6), metrics (§8.3), the enforced half of §7.5, the model
-picker (§9), and the `run` retention job (§16, answer 5). Nothing in
+picker (§9). The `run` retention job (§16, answer 5) is **built** since
+2026-11-20 ("the harness, visible", step 4: the `prune` job). Nothing in
 §8.2 is deployed. `pipelines/daily.yaml` ships without a trigger: it
 spends credits, and the budget manager should come first. **Since
 2026-11-19** the Pipelines dashboard page draws runs, steps, the queue

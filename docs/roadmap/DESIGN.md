@@ -433,7 +433,8 @@ What the build changed from "What it adds" above, each argued in
 
 Not built, with reasons in the pipelines design §15: the per-step model
 picker, step-level resume, metrics and the circuit breaker, hard
-timeouts, and the `run` retention job. `pipelines/daily.yaml` ships
+timeouts, and the `run` retention job (since built, 2026-11-20, in the
+follow-on plan). `pipelines/daily.yaml` ships
 without a trigger, because it spends credits.
 
 ---

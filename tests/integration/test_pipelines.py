@@ -516,3 +516,154 @@ def test_the_dispatcher_runs_a_ui_request_with_trigger_ui(
     assert row["state"] == "done" and row["run_id"] is not None
     [run] = run_log(queue_db, "test_pipeline")
     assert run["trigger"] == UI and str(run["run_id"]) == str(row["run_id"])
+
+
+# --- prune (rollout "the harness, visible", step 4) -------------------------
+
+NOW_PRUNE = datetime(2026, 11, 20, 12, 0, tzinfo=UTC)
+OLD = NOW_PRUNE - timedelta(days=40)
+RECENT = NOW_PRUNE - timedelta(days=2)
+
+
+def ledger_row(
+    db: DatabaseManager,
+    job: str,
+    started_at: datetime,
+    *,
+    outcome: str = "succeeded",
+    parent: str | None = None,
+    trigger: str = "scheduled",
+) -> str:
+    """A generic `run` row; left `running` when that is the outcome asked for."""
+    from candlegraph.harness.ledger import close_run, open_run
+
+    run_id = str(uuid.uuid4())
+    open_run(db, run_id, job, trigger, started_at, parent_run_id=parent)
+    if outcome != "running":
+        close_run(
+            db,
+            run_id=run_id,
+            job=job,
+            trigger=trigger,
+            outcome=outcome,
+            started_at=started_at,
+            finished_at=started_at + timedelta(seconds=5),
+            parent_run_id=parent,
+        )
+    return run_id
+
+
+def run_ids(db: DatabaseManager) -> set[str]:
+    return {str(row["run_id"]) for row in db.fetch_all(f'SELECT run_id FROM "{db.schema}".run')}
+
+
+def prune(db: DatabaseManager) -> int:
+    from candlegraph.harness.ledger import prune_runs
+
+    return prune_runs(db, older_than_days=30, now=NOW_PRUNE)
+
+
+def test_an_old_finished_run_is_deleted_and_a_recent_one_kept(pipeline_db: DatabaseManager) -> None:
+    old = ledger_row(pipeline_db, "fetch_news", OLD)
+    recent = ledger_row(pipeline_db, "fetch_news", RECENT)
+
+    assert prune(pipeline_db) == 1
+    assert run_ids(pipeline_db) == {recent}
+    assert old not in run_ids(pipeline_db)
+
+
+def test_a_run_still_running_is_never_deleted_however_old(pipeline_db: DatabaseManager) -> None:
+    """A process that died mid-run leaves this; it is for a person to read."""
+    stuck = ledger_row(pipeline_db, "fetch_news", OLD, outcome="running")
+
+    assert prune(pipeline_db) == 0
+    assert run_ids(pipeline_db) == {stuck}
+
+
+def test_a_pipeline_and_its_steps_go_together_even_a_step_newer_than_the_cutoff(
+    pipeline_db: DatabaseManager,
+) -> None:
+    """The cutoff is the family's start. A step that began after the cutoff
+    must not survive its parent, or the page draws a family with holes."""
+    cutoff = NOW_PRUNE - timedelta(days=30)
+    parent = ledger_row(pipeline_db, "hourly", cutoff - timedelta(minutes=1))
+    ledger_row(pipeline_db, "validate", cutoff - timedelta(seconds=30), parent=parent)
+    ledger_row(pipeline_db, "signal", cutoff + timedelta(minutes=2), parent=parent)
+
+    assert prune(pipeline_db) == 3
+    assert run_ids(pipeline_db) == set()
+
+
+def test_a_family_with_any_member_still_running_is_kept_whole(pipeline_db: DatabaseManager) -> None:
+    parent = ledger_row(pipeline_db, "hourly", OLD)
+    done = ledger_row(pipeline_db, "validate", OLD, parent=parent)
+    stuck = ledger_row(pipeline_db, "signal", OLD, parent=parent, outcome="running")
+
+    assert prune(pipeline_db) == 0
+    assert run_ids(pipeline_db) == {parent, done, stuck}
+
+
+def test_an_event_triggered_pipeline_is_pruned_and_the_ingest_that_caused_it_is_not(
+    pipeline_db: DatabaseManager,
+) -> None:
+    """Its parent is an `ingest_run` id — a cause, not an owner — so it is a
+    root here; the ingest row it points at is in a ledger prune never names."""
+    cause = ingest_run(pipeline_db, finished_at=OLD)
+    pipeline = ledger_row(pipeline_db, "hourly", OLD, parent=cause, trigger="event")
+    ledger_row(pipeline_db, "validate", OLD, parent=pipeline, trigger="event")
+
+    assert prune(pipeline_db) == 2
+    assert run_ids(pipeline_db) == set()
+    ingest = pipeline_db.fetch_all(
+        f'SELECT run_id FROM "{pipeline_db.schema}".ingest_run WHERE run_id = %(id)s', {"id": cause}
+    )
+    assert len(ingest) == 1
+
+
+def test_an_agent_step_of_a_pruned_pipeline_stays_in_the_agent_ledger(pipeline_db: DatabaseManager) -> None:
+    """`agent_run` is the observer's history and its drift rules read it."""
+    from candlegraph.agents.ledger import open_agent_run
+
+    parent = ledger_row(pipeline_db, "example", OLD)
+    observer = str(uuid.uuid4())
+    open_agent_run(pipeline_db, observer, "observer", "scheduled", OLD, parent_run_id=parent)
+
+    assert prune(pipeline_db) == 1
+    rows = pipeline_db.fetch_all(
+        f'SELECT run_id FROM "{pipeline_db.schema}".agent_run WHERE run_id = %(id)s', {"id": observer}
+    )
+    assert len(rows) == 1
+
+
+def test_run_log_still_reads_after_a_prune(pipeline_db: DatabaseManager) -> None:
+    """The view unions three tables; deleting from one must leave it whole."""
+    ledger_row(pipeline_db, "fetch_news", OLD)
+    recent = ledger_row(pipeline_db, "fetch_news", RECENT)
+    cause = ingest_run(pipeline_db, finished_at=OLD)
+
+    prune(pipeline_db)
+
+    rows = run_log(pipeline_db)
+    assert {str(row["run_id"]) for row in rows} >= {recent, cause}
+    assert all(row["job"] for row in rows)
+
+
+def test_pruning_twice_deletes_nothing_the_second_time(pipeline_db: DatabaseManager) -> None:
+    ledger_row(pipeline_db, "fetch_news", OLD)
+
+    assert prune(pipeline_db) == 1
+    assert prune(pipeline_db) == 0
+
+
+def test_the_prune_job_records_its_own_run_and_does_not_delete_it(pipeline_db: DatabaseManager) -> None:
+    """Its own row is `running` while the DELETE executes, so it cannot be a root."""
+    from candlegraph.harness.runs import Outcome, run_job
+
+    ledger_row(pipeline_db, "fetch_news", OLD)
+
+    run = run_job(JOBS["prune"], make_settings(run_retention_days=30), trigger="manual", db=pipeline_db)
+
+    assert run.outcome is Outcome.SUCCEEDED
+    assert run.result is not None and run.result.counts["deleted"] == 1
+    [row] = run_log(pipeline_db, "prune")
+    assert row["outcome"] == "succeeded" and str(row["run_id"]) == run.run_id
