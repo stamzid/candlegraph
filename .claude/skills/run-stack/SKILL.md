@@ -72,8 +72,14 @@ writes no row at all (invariant 27's one exception).
 The **Pipelines** dashboard (`http://localhost:8501`, or your
 `UI_HOST_PORT`) shows the same thing without a terminal: the run, a strip
 of its five steps, its queue row and dedup key, and any `dead` row. It is
-read-only — if it shows a spec as refused, that spec never runs, and
-`make check-pipelines` gives the same message.
+where to look first — if it shows a spec as refused, that spec never
+runs, and `make check-pipelines` gives the same message. Its **Run now**
+queues a `trigger=ui` row; the run appears within one dispatcher tick
+(`EVENT_POLL_INTERVAL`). If the row sits `queued` for several ticks the
+page says so — the `agents` service is down, so check `make ps` and
+`make logs-agents`. `daily`'s button states the credit cost first; do not
+confirm it on a stack whose `.env` holds a real `TAVILY_API_KEY` unless
+you mean to spend.
 
 To see the same runs as traces, start the stack with the collector
 overlay instead: `make otel-up`, then `make otel-logs`.

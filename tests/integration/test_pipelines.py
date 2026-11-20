@@ -457,3 +457,62 @@ def test_the_pipelines_view_reads_a_real_run_and_its_steps(
     assert list(family.steps["step"]) == ["first", "second"]
     assert list(family.stages["stage"]) == ["first", "second"]
     assert not family.live
+
+
+# --- Run now from the UI (rollout "the harness, visible", step 3) -------------
+
+
+def ui_settings(tmp_path: Any) -> Any:
+    (tmp_path / "test_pipeline.yaml").write_text(
+        "name: test_pipeline\nsteps:\n  - id: only\n    job: step_ok\n", encoding="utf-8"
+    )
+    return make_settings(pipelines_dir=str(tmp_path), event_poll_interval=60)
+
+
+@pytest.fixture
+def queue_db(pipeline_db: DatabaseManager) -> DatabaseManager:
+    pipeline_db.execute(f'TRUNCATE "{pipeline_db.schema}".run_queue')
+    return pipeline_db
+
+
+def test_a_double_click_is_one_queued_run_and_a_minute_later_is_two(
+    queue_db: DatabaseManager, jobs: None, tmp_path: Any
+) -> None:
+    """The real unique index is what makes the double-click harmless."""
+    from candlegraph.ui.viewmodels import request_pipeline_run
+
+    settings = ui_settings(tmp_path)
+    moment = datetime(2026, 11, 19, 12, 0, 5, tzinfo=UTC)
+
+    first = request_pipeline_run(queue_db, settings, "test_pipeline", now=moment)
+    second = request_pipeline_run(queue_db, settings, "test_pipeline", now=moment + timedelta(seconds=40))
+    later = request_pipeline_run(queue_db, settings, "test_pipeline", now=moment + timedelta(minutes=1))
+
+    assert first.queued and not second.queued and later.queued
+    rows = queue_db.fetch_all(queue_db.sql.get_queue, {"limit": 10, "pipeline": None, "state": None})
+    assert sorted(row["dedup_key"] for row in rows) == ["ui:2026-11-19T12:00", "ui:2026-11-19T12:01"]
+    assert {row["trigger"] for row in rows} == {UI}
+    assert {row["state"] for row in rows} == {"queued"}, "asking runs nothing"
+
+
+def test_the_dispatcher_runs_a_ui_request_with_trigger_ui(
+    queue_db: DatabaseManager, jobs: None, tmp_path: Any
+) -> None:
+    """Click → queue row → dispatcher tick → a run recorded as the UI's."""
+    from candlegraph.harness.events import dispatch_once
+    from candlegraph.ui.viewmodels import request_pipeline_run
+
+    settings = ui_settings(tmp_path)
+    moment = datetime.now(tz=UTC)
+    request = request_pipeline_run(queue_db, settings, "test_pipeline", now=moment)
+    assert request.entry is not None
+
+    summary = dispatch_once(queue_db, settings, now=moment + timedelta(seconds=1))
+
+    assert summary.claimed == 1 and summary.ran == ["test_pipeline=succeeded"]
+    [row] = queue_db.fetch_all(
+        queue_db.sql.get_queue, {"limit": 10, "pipeline": "test_pipeline", "state": None}
+    )
+    assert row["state"] == "done" and row["run_id"] is not None
+    [run] = run_log(queue_db, "test_pipeline")
+    assert run["trigger"] == UI and str(run["run_id"]) == str(row["run_id"])

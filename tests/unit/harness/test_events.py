@@ -31,6 +31,7 @@ from candlegraph.harness.pipelines import (
     event_dedup_key,
     manual_dedup_key,
     schedule_dedup_key,
+    ui_dedup_key,
 )
 from candlegraph.settings import REPO_ROOT
 from tests.conftest import FakeDatabase, make_settings
@@ -188,6 +189,24 @@ def test_a_schedule_key_is_the_interval_it_falls_in() -> None:
 def test_a_manual_key_never_collides() -> None:
     """A person asking twice means twice; the dedup key must not swallow that."""
     assert manual_dedup_key(NOW) != manual_dedup_key(NOW)
+
+
+def test_a_ui_click_and_a_double_click_in_the_same_minute_share_a_key() -> None:
+    """A double-click, a second tab or a re-run callback is not a person asking
+    twice. Unlike the manual key, the UI key absorbs them: one run a minute."""
+    assert ui_dedup_key(NOW) == ui_dedup_key(NOW + timedelta(seconds=59 - NOW.second))
+
+
+def test_a_ui_click_a_minute_later_is_a_new_request() -> None:
+    assert ui_dedup_key(NOW) != ui_dedup_key(NOW + timedelta(minutes=1))
+
+
+def test_a_ui_key_is_utc_whatever_zone_the_clock_was_read_in() -> None:
+    from datetime import timezone
+
+    eastern = NOW.astimezone(timezone(timedelta(hours=-5)))
+
+    assert ui_dedup_key(eastern) == ui_dedup_key(NOW) == f"ui:{NOW:%Y-%m-%dT%H:%M}"
 
 
 # --- the safety net -------------------------------------------------------------

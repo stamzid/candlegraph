@@ -430,9 +430,10 @@ unfalsifiable.
 ### In progress
 
 **The harness, visible** — planned 2026-11-19, a follow-on to stage 2
-rather than a new stage; **steps 1 and 2 done 2026-11-19** (ports bind to
-loopback via `BIND_HOST`, the Docker-less skip, and the read-only
-Pipelines page). The plan is `docs/rollout/ROLLOUT.md`:
+rather than a new stage; **steps 1–3 done 2026-11-19** (ports bind to
+loopback via `BIND_HOST`, the Docker-less skip, the Pipelines page, and
+its *Run now*, which queues a `trigger=ui` row and never runs anything
+itself). The plan is `docs/rollout/ROLLOUT.md`:
 ports on loopback and a test that skips without Docker; a read-only
 Pipelines dashboard page; a **Run now** button that *enqueues* (invariant
 28 — the UI asks for a run, it never performs one); the `run` prune job

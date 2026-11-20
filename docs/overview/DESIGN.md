@@ -158,9 +158,9 @@ test reads each declaration.
   before anyone does.
 - **Operated from a terminal.** The UI shows runs, and since 2026-11-19
   the Pipelines page shows every pipeline run, its steps, the queue and
-  the specs — read-only. It can start an observer run, a backfill or a
-  news fetch, but not yet a pipeline (rollout step 3), and it cannot
-  change a schedule, a budget or a model.
+  the specs, and its **Run now** asks for a pipeline run by queueing one
+  (`trigger=ui`) for the dispatcher to perform. It cannot yet change a
+  schedule, a budget or a model.
 - **`daily.yaml` has no trigger**, so new news is embedded only when
   someone runs it; and nothing prunes old `run` rows yet.
 - **Traces, not metrics.** Every run is a span; there is no metrics

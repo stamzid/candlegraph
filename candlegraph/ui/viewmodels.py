@@ -83,9 +83,11 @@ from candlegraph.harness.pipelines import (
     Trigger,
     check_cycles,
     load_pipeline,
+    ui_dedup_key,
 )
-from candlegraph.harness.queue import CLAIMED, DEAD, QUEUED
+from candlegraph.harness.queue import CLAIMED, DEAD, DONE, QUEUED, QueuedRun, enqueue
 from candlegraph.harness.queue import recent as queue_recent
+from candlegraph.harness.runs import UI
 from candlegraph.harness.stages import StageHook, StageRecord, describe
 from candlegraph.ingestion.fills import (
     LINEAR,
@@ -118,7 +120,14 @@ from candlegraph.knowledge.explain import (
     request_for,
     services,
 )
-from candlegraph.knowledge.news import NewsError, NewsFetchSummary, budget_from, run_news_fetch, source_spend
+from candlegraph.knowledge.news import (
+    NewsError,
+    NewsFetchSummary,
+    budget_from,
+    cache_key,
+    run_news_fetch,
+    source_spend,
+)
 from candlegraph.knowledge.retrieve import RetrievalError
 from candlegraph.knowledge.sources.tavily import SOURCE_ID as TAVILY
 from candlegraph.knowledge.statements import knowledge_statements_for
@@ -1892,6 +1901,14 @@ PIPELINE_RUNS_PER_PIPELINE = 10
 """Newest runs kept per pipeline. Per pipeline, not overall — see `get_pipeline_runs`."""
 QUEUE_ROWS = 50
 """The newest queue rows. Dead rows are fetched separately so an old one stays visible."""
+PIPELINES_REFRESH_SECONDS = 5
+"""How often the page re-reads while a run it asked for is still waiting, and only then."""
+STALE_QUEUE_FACTOR = 3
+"""A queued row unclaimed for this many dispatcher intervals is worth a warning."""
+SPENDING_JOBS = frozenset({"fetch_news"})
+"""Jobs that spend metered credits. A spec with one of these as a step needs a
+confirmation that states the cost before it is queued. Kept here by name because
+``Job`` has no ``spends`` declaration yet; a new metered job must be added."""
 
 _STEP_COLUMNS = ["step", "job", "status", "attempts", "seconds", "error_class", "error"]
 _QUEUE_COLUMNS = [
@@ -1928,6 +1945,8 @@ class SpecCard:
     steps: pd.DataFrame = field(default_factory=pd.DataFrame)
     problems: tuple[str, ...] = ()
     """The loader's refusals, each with its file and line. Empty when it loaded."""
+    spends: bool = False
+    """A step is a metered job (`SPENDING_JOBS`), so *Run now* asks for confirmation first."""
 
     @property
     def starts_itself(self) -> bool:
@@ -1959,7 +1978,7 @@ class PipelineFamily:
 
 @dataclass
 class PipelinesView:
-    """Everything the Pipelines dashboard shows. Read-only."""
+    """Everything the Pipelines dashboard shows. Building it reads and never writes."""
 
     specs: tuple[SpecCard, ...]
     families: tuple[PipelineFamily, ...]
@@ -2003,6 +2022,52 @@ class PipelinesView:
 
     def runs_of(self, pipeline: str) -> tuple[PipelineFamily, ...]:
         return tuple(family for family in self.families if family.pipeline == pipeline)
+
+    @property
+    def request_refusal(self) -> str | None:
+        """Why *Run now* must not queue anything, or ``None`` when it may.
+
+        The same two conditions under which the dispatcher would never run the
+        row: nothing claims the queue, or the specs disagree with each other
+        (a loop or a shared name, and then the dispatcher runs none of them).
+        Queueing a row in either case would look like a button that worked.
+        """
+        if not self.dispatcher_enabled:
+            return (
+                "The dispatcher is off (EVENT_POLL_INTERVAL=0), so nothing would ever claim a queued "
+                "run. Start one in a terminal with `make run ARGS='<name>'` instead."
+            )
+        if self.cross_spec_problems:
+            return (
+                "The specs disagree with each other, and until that is fixed the dispatcher runs "
+                f"none of them: {self.cross_spec_problems[0]}"
+            )
+        return None
+
+    def state_of(self, pipeline: str, dedup_key: str) -> str | None:
+        """The queue state of one requested run, or ``None`` if it is not on the page."""
+        if self.queue.empty:
+            return None
+        match = self.queue[(self.queue["pipeline"] == pipeline) & (self.queue["dedup_key"] == dedup_key)]
+        return None if match.empty else str(match.iloc[0]["state"])
+
+    @property
+    def unclaimed(self) -> tuple[tuple[str, str, float], ...]:
+        """Queued rows nothing has claimed for several dispatcher intervals.
+
+        The UI cannot see whether the agents process is alive — only what it
+        has done — so a row claimable for this long is the visible symptom of
+        a dispatcher that is not running. ``(pipeline, dedup_key, seconds)``.
+        """
+        if self.queue.empty or not self.dispatcher_enabled:
+            return ()
+        limit = STALE_QUEUE_FACTOR * self.dispatcher_interval
+        out = []
+        for _, row in self.queue[self.queue["state"] == QUEUED].iterrows():
+            waited = (self.now - row["available_at"]).total_seconds()
+            if waited > limit:
+                out.append((str(row["pipeline"]), str(row["dedup_key"]), waited))
+        return tuple(out)
 
 
 def duration_text(seconds: float | None) -> str:
@@ -2100,6 +2165,7 @@ def load_spec_cards(
                 triggers=tuple(describe_trigger(t) for t in spec.triggers),
                 deadline=duration_text(spec.deadline),
                 steps=_spec_steps(spec),
+                spends=any(step.job in SPENDING_JOBS for step in spec.steps),
             )
         )
 
@@ -2250,6 +2316,125 @@ def build_pipelines_view(
         cross_spec_problems=cross,
         now=now or datetime.now(tz=UTC),
     )
+
+
+# --- asking for a pipeline run (rollout "the harness, visible", step 3) --------
+#
+# The only write on the Pipelines page, and it is one INSERT into `run_queue`.
+# The UI never calls the executor and never takes the pipeline's advisory lock:
+# invariant 28 says a person, like an event or a schedule, *asks* for a run,
+# and the dispatcher in the agents process is what performs it. That keeps one
+# executor, one lock and one ledger, and puts a click in the queue beside
+# every other trigger.
+
+
+@dataclass(frozen=True)
+class SpendEstimate:
+    """What queueing a credit-spending pipeline could cost, stated before the click."""
+
+    tokens: tuple[str, ...]
+    """The active tokens the news step searches."""
+    uncached: tuple[str, ...]
+    """Those not yet searched today. Only these can cost a credit; the rest hit the cache."""
+    spent_month: int
+    monthly_cap: int
+    spent_today: int
+    daily_cap: int
+
+    @property
+    def credits_at_most(self) -> int:
+        """An upper bound: the budget guard may still refuse some of these."""
+        return len(self.uncached)
+
+
+def estimate_pipeline_spend(
+    db: DatabaseManager,
+    settings: Settings,
+    now: datetime | None = None,
+    registry: TokenRegistry | None = None,
+) -> SpendEstimate:
+    """The credits a news fetch queued now could spend, from the same cache the fetch reads.
+
+    Computed only when the confirmation is on screen, not on every rerun.
+    """
+    moment = now or datetime.now(tz=UTC)
+    tokens = tuple((registry or get_token_registry()).active_symbols)
+    statements = knowledge_statements_for(db.schema)
+    uncached = []
+    for symbol in tokens:
+        rows = db.fetch_all(
+            statements.cached_search_exists,
+            {"source_id": TAVILY, "cache_key": cache_key(symbol, moment)},
+        )
+        if not rows or int(rows[0]["hits"]) == 0:
+            uncached.append(symbol)
+    month, today = source_spend(db, TAVILY, moment)
+    budget = budget_from(settings)
+    return SpendEstimate(
+        tokens=tokens,
+        uncached=tuple(uncached),
+        spent_month=month,
+        monthly_cap=budget.monthly_credits,
+        spent_today=today,
+        daily_cap=budget.daily_credits,
+    )
+
+
+@dataclass(frozen=True)
+class RunRequest:
+    """What a *Run now* click did: queued a row, or found this minute's already there."""
+
+    pipeline: str
+    dedup_key: str
+    entry: QueuedRun | None
+    """The new queue row, or ``None`` when the same request was already queued."""
+
+    @property
+    def queued(self) -> bool:
+        return self.entry is not None
+
+
+def request_pipeline_run(
+    db: DatabaseManager, settings: Settings, pipeline: str, now: datetime | None = None
+) -> RunRequest:
+    """Ask the dispatcher for one run of ``pipeline``, with ``trigger = ui``.
+
+    Re-reads the specs rather than trusting what the page drew, because a
+    spec can change between the page drawing and the click, and the
+    dispatcher will load it fresh too. Refuses — rather than queueing a row
+    nothing will run — when the dispatcher is off, when the specs disagree
+    with each other, or when this pipeline does not load.
+
+    Raises:
+        ViewError: The run cannot be asked for; the message says why.
+    """
+    moment = now or datetime.now(tz=UTC)
+    cards, specs, cross = load_spec_cards(settings.pipelines_path)
+    probe = PipelinesView(
+        specs=cards,
+        families=(),
+        queue=pd.DataFrame(),
+        last_dispatch=None,
+        dispatcher_interval=settings.event_poll_interval,
+        cross_spec_problems=cross,
+        now=moment,
+    )
+    if refusal := probe.request_refusal:
+        raise ViewError(refusal)
+    spec = next((s for s in specs if s.name == pipeline), None)
+    if spec is None:
+        card = next((c for c in cards if c.name == pipeline), None)
+        reason = "; ".join(card.problems) if card and card.problems else "no spec by that name is loaded"
+        raise ViewError(f"Cannot queue {pipeline}: {reason}")
+
+    key = ui_dedup_key(moment)
+    entry = enqueue(db, pipeline=spec.name, version=spec.version, dedup_key=key, trigger=UI, now=moment)
+    return RunRequest(pipeline=spec.name, dedup_key=key, entry=entry)
+
+
+def request_finished(state: str | None) -> bool:
+    """Whether a requested run needs no more watching: done, dead, or gone from the page."""
+    return state is None or state in (DONE, DEAD)
 
 
 # --- news (Tavily) dashboard ---------------------------------------------------

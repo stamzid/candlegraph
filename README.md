@@ -618,13 +618,19 @@ dashboard opens with a metric strip, and every chart carries a title that says w
   agent ledger), the latest findings coloured by severity, ingest cadence, per-token coverage,
   the full run history, and a news-health strip (did the recent Tavily runs succeed, fail, or get
   refused by the budget).
-- **Pipelines** — the harness, on screen, **read-only**: the newest run of each pipeline with a
+- **Pipelines** — the harness, on screen: the newest run of each pipeline with a
   strip of its steps (a skipped step is shown, not hidden), where each run came from (`event`
   runs name the ingest that caused them), the work queue with every row's dedup key — and every
   `dead` row however old, since each needs a person — whether the dispatcher is running, and each
   committed spec as the loader read it. A spec the loader refuses is drawn as a card with its
-  file and line, and the rest of the page still renders. Nothing on the page starts, queues or
-  refreshes anything; there is deliberately no button yet.
+  file and line, and the rest of the page still renders. Each spec has a **Run now** button that
+  *asks* for a run rather than performing one: it adds a queue row with trigger `ui`, the
+  dispatcher in the `agents` service claims it at its next tick, and the page re-reads itself
+  every few seconds until that run has finished, then says how it ended. A double-click within a
+  minute is one run. `daily` spends search credits, so its button first states the cost — how
+  many active tokens have not been searched today, and the month's spend against the cap — and
+  queues nothing until you confirm. With the dispatcher off (`EVENT_POLL_INTERVAL=0`) the buttons
+  are disabled and say why, rather than queueing a row nothing would ever claim.
 - **News** — the metered Tavily pipeline in detail: credit runway for the month and the day,
   credit burn against the daily cap, call outcomes per day (ok / refused / rate-limited / error),
   the full `source_call` ledger, the freshest stored articles, and a **Fetch news** button behind

@@ -49,9 +49,10 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   finished ones are archived under `docs/rollout/archive/`. Five are
   archived (stages 1, 0, 6 and 2, and the harness pre-work). **The
   current rollout is "the harness, visible"** (planned 2026-11-19; steps
-  1–2 done, step 3 next): eight steps putting stage 2's harness on
-  screen. Step 3 must be a session of its own — it is the first button
-  in this repository that can start work. Stage 2's
+  1–3 done, step 4 next): eight steps putting stage 2's harness on
+  screen. *Run now* on the Pipelines page enqueues and never executes:
+  keep it that way — the UI process must not call `run_pipeline` or take
+  the pipeline advisory lock. Stage 2's
   closeout gate is discharged — its output is recorded at the top of the
   plan. `docs/rollout/overview/DESIGN.md` draws how the stages fit
   together and is the fastest way to see what a new stage attaches to.

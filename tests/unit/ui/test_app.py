@@ -941,16 +941,16 @@ def test_the_pipelines_page_shows_the_queue_with_its_dedup_key_and_a_dead_row() 
     assert dead.value == "1"
 
 
-def test_the_pipelines_page_has_no_buttons_because_it_is_read_only() -> None:
-    """Step 3 adds the first button that can start work, on its own, behind
-    the queue. Until then nothing on this page may act."""
+def test_drawing_the_pipelines_page_writes_nothing() -> None:
+    """Step 2 pinned "no buttons" until step 3 added them. What still holds is
+    that *drawing* the page writes nothing: only a click asks for a run."""
     db = seeded_db()
     db.reads["get_pipeline_runs"] = [pipeline_row()]
 
     app = run_pipelines_page(db)
 
     assert not app.exception
-    assert list(app.main.button) == []
+    assert {b.label for b in app.main.button} == {"Run now", "Run now…"}
     assert db.executed == [] and db.upserts == []
 
 
@@ -981,3 +981,134 @@ def test_the_pipelines_page_says_when_the_dispatcher_is_off(monkeypatch: pytest.
 
     assert not app.exception
     assert any("dispatcher is off" in str(w.value) for w in app.main.warning)
+
+
+# --- Run now (rollout "the harness, visible", step 3) -------------------------
+
+
+def ui_queue_row(pipeline: str = "hourly", key: str = "ui:2026-11-19T09:20") -> dict[str, Any]:
+    at = datetime(2026, 11, 19, 9, 20, tzinfo=UTC)
+    return {
+        "id": 41,
+        "pipeline": pipeline,
+        "version": 1,
+        "dedup_key": key,
+        "trigger": "ui",
+        "cause_run_id": None,
+        "state": "queued",
+        "attempts": 0,
+        "available_at": at,
+        "created_at": at,
+        "finished_at": None,
+        "run_id": None,
+        "last_error": None,
+    }
+
+
+def run_now_button(app: AppTest, pipeline: str) -> Any:
+    return next(b for b in app.main.button if b.key == f"pipeline_run_{pipeline}")
+
+
+def test_run_now_queues_a_run_and_says_what_it_did() -> None:
+    db = seeded_db()
+    db.reads["enqueue_run"] = [ui_queue_row()]
+    app = run_pipelines_page(db)
+
+    run_now_button(app, "hourly").click().run()
+
+    assert not app.exception, [str(e) for e in app.exception]
+    writes = [(label, params) for label, params in db.executed]
+    assert [label for label, _ in writes] == ["enqueue_run"], "one INSERT, and nothing that runs it"
+    assert writes[0][1] is not None and writes[0][1]["trigger"] == "ui"
+    notice = " ".join(str(s.value) for s in app.main.success)
+    assert "queue row #41" in notice and "dispatcher" in notice
+
+
+def test_a_click_already_made_this_minute_says_it_changed_nothing() -> None:
+    db = seeded_db()
+    db.reads["enqueue_run"] = []  # the unique index found this minute's row
+    app = run_pipelines_page(db)
+
+    run_now_button(app, "hourly").click().run()
+
+    assert not app.exception
+    assert any("double-click is one run" in str(i.value) for i in app.main.info)
+
+
+def test_a_pipeline_that_spends_credits_states_the_cost_before_queueing() -> None:
+    db = seeded_db()
+    db.reads["cached_search_exists"] = [{"hits": 0}]
+    db.reads["enqueue_run"] = [ui_queue_row("daily")]
+    app = run_pipelines_page(db)
+
+    run_now_button(app, "daily").click().run()
+
+    assert not app.exception
+    assert "enqueue_run" not in [label for label, _ in db.executed], "the first click only asks"
+    warning = " ".join(str(w.value) for w in app.main.warning)
+    assert "up to" in warning and "credit" in warning
+
+    next(b for b in app.main.button if b.key == "pipeline_confirm_daily").click().run()
+
+    assert not app.exception
+    [params] = [p for lbl, p in db.executed if lbl == "enqueue_run"]
+    assert params is not None and params["pipeline"] == "daily" and params["trigger"] == "ui"
+
+
+def test_cancelling_the_confirmation_queues_nothing() -> None:
+    db = seeded_db()
+    db.reads["cached_search_exists"] = [{"hits": 0}]
+    app = run_pipelines_page(db)
+
+    run_now_button(app, "daily").click().run()
+    next(b for b in app.main.button if b.key == "pipeline_cancel_daily").click().run()
+
+    assert not app.exception
+    assert db.executed == []
+    assert not any(b.key == "pipeline_confirm_daily" for b in app.main.button)
+
+
+def test_with_the_dispatcher_off_run_now_is_disabled_and_says_why(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EVENT_POLL_INTERVAL", "0")
+    db = seeded_db()
+
+    app = run_pipelines_page(db)
+
+    assert not app.exception
+    buttons = [b for b in app.main.button if str(b.key).startswith("pipeline_run_")]
+    assert buttons and all(b.disabled for b in buttons)
+    captions = " ".join(str(c.value) for c in app.main.caption)
+    assert "nothing would ever claim a queued run" in captions
+
+
+def test_the_page_watches_a_requested_run_until_it_has_finished() -> None:
+    db = seeded_db()
+    db.reads["get_queue"] = [ui_queue_row()]
+    app = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    app.session_state["pipelines_awaiting"] = ("hourly", "ui:2026-11-19T09:20")
+    app.run()
+    app.sidebar.radio[0].set_value("Pipelines").run()
+
+    assert not app.exception, [str(e) for e in app.exception]
+    assert any("Watching `ui:2026-11-19T09:20` (queued)" in str(c.value) for c in app.main.caption)
+
+    finished = {**ui_queue_row(), "state": "done"}
+    db.reads["get_queue"] = [finished]
+    app.run()
+
+    assert not app.exception
+    assert "pipelines_awaiting" not in app.session_state
+    assert not any("Watching" in str(c.value) for c in app.main.caption)
+    assert any("has finished" in str(i.value) for i in app.main.info), "say how the request ended"
+
+
+def test_a_dead_requested_run_is_reported_as_needing_a_person() -> None:
+    db = seeded_db()
+    db.reads["get_queue"] = [{**ui_queue_row(), "state": "dead", "last_error": "lease expired"}]
+    app = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    app.session_state["pipelines_awaiting"] = ("hourly", "ui:2026-11-19T09:20")
+    app.run()
+    app.sidebar.radio[0].set_value("Pipelines").run()
+
+    assert not app.exception
+    assert any("needs a person" in str(e.value) for e in app.main.error)

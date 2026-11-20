@@ -45,6 +45,7 @@ from candlegraph.ui.viewmodels import (
     DEFAULT_PAIR,
     MAX_SHADED_GAPS,
     MAX_WEIGHT_STEP,
+    PIPELINES_REFRESH_SECONDS,
     Preferences,
     ViewError,
     age_text,
@@ -70,6 +71,7 @@ from candlegraph.ui.viewmodels import (
     default_index,
     default_max_weight,
     default_portfolio_symbols,
+    estimate_pipeline_spend,
     execution_walkthrough,
     forecast_frame,
     gap_lane_segments,
@@ -80,6 +82,8 @@ from candlegraph.ui.viewmodels import (
     posterior_diagnostics_frame,
     posterior_interval_frame,
     range_lane_segments,
+    request_finished,
+    request_pipeline_run,
     run_backfill,
     run_explain_now,
     run_fill_refresh_now,
@@ -2212,6 +2216,13 @@ def _pipelines_warnings(view: Any) -> None:
         )
     for problem in view.cross_spec_problems:
         st.error(f"Across the specs: {problem}")
+    for pipeline, key, waited in view.unclaimed:
+        st.warning(
+            f"`{pipeline}` ({key}) has been ready to run for {age_text(waited).removesuffix(' ago')} "
+            "and nothing has claimed it. The dispatcher runs in the `agents` service — check it is "
+            "up (`make ps`, `make logs-agents`). This page can see what the dispatcher did, not "
+            "whether it is alive."
+        )
     broken = [card for card in view.specs if not card.loaded]
     if broken:
         st.error(
@@ -2285,9 +2296,100 @@ def _pipelines_queue(view: Any) -> None:
         st.dataframe(_coloured(view.queue, "state"), width="stretch", hide_index=True)
 
 
-def _pipelines_specs(view: Any) -> None:
-    """Each committed spec as the loader read it, or the loader's refusal."""
-    _title("Specs — the committed pipelines, as the loader read them")
+def _ask_for_run(db: DatabaseManager, settings: Settings, pipeline: str) -> None:
+    """The *Run now* callback: one queue row, never a run.
+
+    A callback, not ``if st.button(...)``: Streamlit runs it *before* the
+    rerun the click causes, so the queue table further up the page already
+    shows the new row. Done inline, the table would be drawn first and the
+    click would look as if it had done nothing until the next rerun.
+    """
+    st.session_state.pop("pipelines_pending", None)
+    try:
+        request = request_pipeline_run(db, settings, pipeline)
+    except ViewError as exc:
+        st.session_state["pipelines_notice"] = ("error", str(exc))
+        return
+    st.session_state["pipelines_awaiting"] = (request.pipeline, request.dedup_key)
+    if request.entry is not None:
+        st.session_state["pipelines_notice"] = (
+            "success",
+            f"Asked for one {pipeline} run: queue row #{request.entry.id}, dedup key "
+            f"`{request.dedup_key}`. The dispatcher claims it within about "
+            f"{settings.event_poll_interval}s; the run then appears under Runs. This page "
+            "re-reads itself until that run has finished.",
+        )
+    else:
+        st.session_state["pipelines_notice"] = (
+            "info",
+            f"{pipeline} was already asked for this minute (`{request.dedup_key}`), so this click "
+            "changed nothing — a double-click is one run, not two.",
+        )
+
+
+def _forget_pending() -> None:
+    st.session_state.pop("pipelines_pending", None)
+
+
+def _ask_to_confirm(pipeline: str) -> None:
+    st.session_state["pipelines_pending"] = pipeline
+
+
+def _spend_confirmation(db: DatabaseManager, settings: Settings, card: Any) -> None:
+    """The cost of a credit-spending pipeline, in numbers, before anything is queued."""
+    estimate = estimate_pipeline_spend(db, settings)
+    st.warning(
+        f"**Queue a {card.name} run?** Its news step searches {len(estimate.tokens)} active token(s); "
+        f"**up to {estimate.credits_at_most} credit(s)** — the ones not yet searched today "
+        f"({', '.join(estimate.uncached) or 'none'}). Tokens already searched today are served "
+        f"from the cache and cost nothing, and the budget guard may still refuse. Spent so far: "
+        f"{estimate.spent_today}/{estimate.daily_cap} today, "
+        f"{estimate.spent_month}/{estimate.monthly_cap} this month."
+    )
+    confirm, cancel = st.columns(2)
+    confirm.button(
+        "Confirm and queue",
+        type="primary",
+        key=f"pipeline_confirm_{card.name}",
+        on_click=_ask_for_run,
+        args=(db, settings, card.name),
+    )
+    cancel.button("Cancel", key=f"pipeline_cancel_{card.name}", on_click=_forget_pending)
+
+
+def _run_now_control(db: DatabaseManager, settings: Settings, view: Any, card: Any) -> None:
+    """*Run now* for one spec: disabled with the reason, confirmed if it spends, else immediate."""
+    refusal = view.request_refusal
+    if refusal:
+        st.button("Run now", key=f"pipeline_run_{card.name}", disabled=True)
+        st.caption(refusal)
+        return
+    if card.spends:
+        st.button(
+            "Run now…",
+            key=f"pipeline_run_{card.name}",
+            help="This pipeline spends search credits; the next step states the cost.",
+            on_click=_ask_to_confirm,
+            args=(card.name,),
+        )
+        if st.session_state.get("pipelines_pending") == card.name:
+            _spend_confirmation(db, settings, card)
+        return
+    st.button(
+        "Run now",
+        key=f"pipeline_run_{card.name}",
+        help="Queues one run with trigger `ui`; the dispatcher performs it. Nothing runs in this page.",
+        on_click=_ask_for_run,
+        args=(db, settings, card.name),
+    )
+
+
+def _pipelines_specs(db: DatabaseManager, settings: Settings, view: Any) -> None:
+    """Each committed spec as the loader read it, with *Run now*; or the loader's refusal."""
+    _title(
+        "Specs — the committed pipelines, as the loader read them",
+        "Run now asks the queue for a run, the same way an ingest or a schedule does.",
+    )
     for card in view.specs:
         if not card.loaded:
             reasons = "\n".join(f"- {problem}" for problem in card.problems)
@@ -2302,17 +2404,81 @@ def _pipelines_specs(view: Any) -> None:
             else:
                 st.markdown("No trigger: it runs only when a person asks.")
             st.dataframe(card.steps, width="stretch", hide_index=True)
+            _run_now_control(db, settings, view, card)
 
 
-def _pipelines_page(db: DatabaseManager, settings: Settings) -> None:
-    st.subheader("Pipelines — what ran, what is queued, and what each step did")
-    st.caption("Read-only. Nothing on this page starts, queues or refreshes anything.")
-    view = build_pipelines_view(db, settings)
+def _pipelines_live(view: Any) -> None:
+    """The parts that change as the dispatcher works: metrics, warnings, runs, queue."""
     _pipelines_metrics(view)
     _pipelines_warnings(view)
     _pipelines_runs(view)
     _pipelines_queue(view)
-    _pipelines_specs(view)
+
+
+def _pipelines_watch(db: DatabaseManager, settings: Settings) -> None:
+    """The live parts, re-read every few seconds while a requested run is unfinished.
+
+    Runs as a fragment only while ``pipelines_awaiting`` is set, so an idle
+    page costs nothing. When the run it is watching has finished (or left the
+    page), it forgets it and reruns the whole app once — which redraws the
+    page without the timer, so the polling stops by itself.
+    """
+    view = build_pipelines_view(db, settings)
+    _pipelines_live(view)
+    awaiting = st.session_state.get("pipelines_awaiting")
+    if awaiting is None:
+        return
+    state = view.state_of(*awaiting)
+    if request_finished(state):
+        st.session_state.pop("pipelines_awaiting", None)
+        # The rerun below discards everything this run drew, including the
+        # notice the click left. So the notice is replaced with how the request
+        # ended — or carried over when its row has left the page — and the
+        # rerun shows something true instead of nothing.
+        st.session_state["pipelines_notice"] = _finished_notice(awaiting, state) or st.session_state.get(
+            "pipelines_last_notice"
+        )
+        st.rerun()
+    st.caption(f"Watching `{awaiting[1]}` ({state}) — re-reading every {PIPELINES_REFRESH_SECONDS}s.")
+
+
+def _finished_notice(awaiting: tuple[str, str], state: str | None) -> tuple[str, str] | None:
+    """How a requested run ended, in the queue's words. ``None`` if its row is not on the page."""
+    pipeline, key = awaiting
+    if state == "done":
+        return (
+            "info",
+            f"The {pipeline} run you asked for (`{key}`) has finished. Its outcome and each step are "
+            "under Runs — `done` means the dispatcher ran it, not that every step succeeded.",
+        )
+    if state == "dead":
+        return (
+            "error",
+            f"The {pipeline} run you asked for (`{key}`) ran out of attempts and is dead. Its "
+            "`last_error` is in the queue table; it needs a person.",
+        )
+    return None
+
+
+def _pipelines_notice() -> None:
+    """What the last click did, shown once."""
+    notice = st.session_state.pop("pipelines_notice", None)
+    if notice is not None:
+        st.session_state["pipelines_last_notice"] = notice
+        kind, text = notice
+        {"success": st.success, "info": st.info, "error": st.error}[kind](text)
+
+
+def _pipelines_page(db: DatabaseManager, settings: Settings) -> None:
+    st.subheader("Pipelines — what ran, what is queued, and what each step did")
+    st.caption("The one thing this page can do is ask: Run now queues a run, and the dispatcher performs it.")
+    _pipelines_notice()
+    view = build_pipelines_view(db, settings)
+    if st.session_state.get("pipelines_awaiting"):
+        st.fragment(_pipelines_watch, run_every=PIPELINES_REFRESH_SECONDS)(db, settings)
+    else:
+        _pipelines_live(view)
+    _pipelines_specs(db, settings, view)
 
 
 def _news_metrics(view: Any) -> None:

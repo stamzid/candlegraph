@@ -1,6 +1,6 @@
 # Rollout: the harness, visible — operating candlegraph from the UI
 
-**Status:** current — planned 2026-11-19; steps 1 and 2 done, step 3 next. Eight steps.
+**Status:** current — planned 2026-11-19; steps 1–3 done, step 4 next. Eight steps.
 **Where it sits:** a follow-on to stage 2, not a new roadmap stage. It
 numbers nothing: the roadmap's next *stage* is still 3 (traditional
 markets), and this plan is what makes stage 2 usable by a person before
@@ -71,7 +71,7 @@ fixed.
 |---|---|---|---|---|
 | 1 | Two corrections first: the Docker-less skip, and ports on loopback | S | — | done 2026-11-19 |
 | 2 | The Pipelines page, read-only | M | 1 | done 2026-11-19 |
-| 3 | Start a pipeline from the page (enqueue, never execute) | M | 2 | todo |
+| 3 | Start a pipeline from the page (enqueue, never execute) | M | 2 | done 2026-11-19 |
 | 4 | The `run` prune job | S | — | todo |
 | 5 | The budget manager | M | — | todo |
 | 6 | Give `daily.yaml` a schedule | S | 5 | todo |
@@ -244,7 +244,8 @@ was green.
   `candlegraph runs` has the same latent mis-display — it would indent a
   caused pipeline as a step. No committed spec triggers on another
   pipeline, so it is invisible today; it is a CLI change and belongs
-  with step 3, which touches the same vocabulary.
+  with step 3, which touches the same vocabulary. *(Step 3 did not take
+  it — see its Outcome. Still open.)*
 - **Dead rows cannot scroll away.** The queue is the newest 50 rows plus
   every `dead` row, fetched separately and merged by id, because a dead
   row is the one thing on the page that needs a person.
@@ -307,6 +308,76 @@ visible rather than looking like a dead button.
 trigger `ui` and one run within a dispatcher tick; a double-click still
 produces one; with the dispatcher off the button explains itself;
 `make check` green and the behaviour confirmed on a real stack.
+
+**Outcome.** Done 2026-11-19, in its own session.
+
+- **The write is one INSERT.** `request_pipeline_run` re-reads the specs,
+  refuses or calls `queue.enqueue(trigger="ui")`, and returns. No
+  executor, no claim, no advisory lock — a unit test proves it: against a
+  fake with no `connection()` (so a lock would raise), the only statement
+  handed over is `enqueue_run`. **The dispatcher needed no change**: it
+  already claims rows of any trigger and runs them with that trigger.
+- **A new `ui_dedup_key`, not `manual_dedup_key`.** The latter existed
+  but was dead code (one test, no caller), and its rule — "a person
+  asking twice means twice", a key that never collides — would have made
+  a double-click two pipeline runs. `ui:<minute>` absorbs double-clicks,
+  second tabs and re-run callbacks; `manual_dedup_key` is left for a
+  future CLI enqueue.
+- **Refused in one more case than the plan named.** Besides the
+  dispatcher being off, *Run now* refuses while the specs disagree (a
+  loop or a shared name): the dispatcher then dispatches **none** of them,
+  so a queued row would only fail later with "no spec named …".
+- **"Show the queued row immediately."** The buttons are below the queue
+  table, so a plain `if st.button()` would enqueue *after* the table was
+  drawn and the click would look dead. They use `on_click` callbacks,
+  which run before the rerun.
+- **"And the run when it appears."** While a run this page asked for is
+  unfinished, the live panels are a `st.fragment` re-read every 5 s; when
+  the row is `done` or `dead` it says how the request ended and stops
+  itself. An idle page polls nothing.
+- **A bug found and fixed while testing:** the click's notice was drawn,
+  then thrown away by the watcher's own `st.rerun()` — a double-click on
+  an already-finished run showed nothing. The watcher now replaces the
+  notice with how the request ended, or carries it over.
+- **`daily`'s cost is stated exactly, not as a worst case.** Each active
+  token's `(symbol, UTC day)` cache entry is checked: only tokens not
+  searched today can cost a credit. Spend today and this month against
+  the caps is beside it. Which specs need the confirmation is decided by
+  their **jobs** (`SPENDING_JOBS = {"fetch_news"}`), not by the name
+  `daily`.
+- **A dispatcher that is not running is made visible.** The UI cannot see
+  the agents process, only what it did, so a row claimable for more than
+  three dispatcher intervals gets a warning naming `make ps` and
+  `make logs-agents`.
+- Tests: 32 new — the dedup key, every refusal, the insert-only proof,
+  the cost estimate, the watcher; `AppTest` for a click, a double-click,
+  the confirmation and its cancel, the disabled state, and watching to
+  `done` and `dead`; and two integration tests against real SQL: the
+  unique index collapses a double-click, and `dispatch_once` runs a UI
+  row with `trigger=ui`. `make check` **2029 passed**, 11 skipped (e2e);
+  without Docker the integration tier is 235 skipped, 0 failed.
+- **On a real stack** (`cg-elm-1795122208`), through the page code against
+  its database: two clicks a second apart produced **one** row
+  (`ui:2026-11-19T21:07`) and the explanation for the second; the live
+  dispatcher claimed it **7 s later** and `run_log` shows one `hourly` run
+  with `trigger=ui` and five `ui` steps; with `EVENT_POLL_INTERVAL=0` all
+  three buttons were disabled with the sentence on screen; `daily`'s
+  confirmation read "up to 5 credit(s) … 0/40 today, 0/1000 this month",
+  and **Cancel** queued nothing. Confirm was deliberately not pressed: it
+  would spend real credits.
+
+**Found, not fixed** (in scope for later steps or their own work):
+
+| | |
+|---|---|
+| `SPENDING_JOBS` is a hand-kept list | `Job` has no `spends` declaration; a new metered job not added here would get a *Run now* with no confirmation. A `spends` field checked by a registry test is the real fix |
+| The UI judges "dispatcher on" by its **own** `EVENT_POLL_INTERVAL` | The agents container reads its own; compose gives both the same `.env`, but nothing enforces it. The staleness warning is the backstop, after three intervals |
+| `candlegraph run` still executes in the foreground | Invariant 28 says a person never starts a pipeline directly; the CLI does, safely (it takes the lock), but inconsistently. `manual_dedup_key` was written for the CLI enqueue that would fix it |
+| No MCP `run_pipeline` tool | The UI can now ask for a run and an assistant cannot; the enqueue path it would wrap exists |
+| No way to withdraw a queued request | A mistaken click runs. Harmless for idempotent pipelines; worth having before step 6 schedules a spending one |
+| A page left open on a stuck row polls every 5 s | Bounded to "while a row you asked for is unfinished", but unbounded in time if the dispatcher is down |
+| `candlegraph runs` mis-indents a caused pipeline as a step | Deferred from step 2; still latent (no spec triggers on another pipeline) |
+| The 5 s refresh was not watched in a real browser | `AppTest` does not fire `run_every` timers; the watcher's states were verified by re-running it, and the live stack showed the row and run arriving |
 
 ---
 

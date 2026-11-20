@@ -12,8 +12,10 @@ picker (§9), and the `run` retention job (§16, answer 5). Nothing in
 §8.2 is deployed. `pipelines/daily.yaml` ships without a trigger: it
 spends credits, and the budget manager should come first. **Since
 2026-11-19** the Pipelines dashboard page draws runs, steps, the queue
-and the specs, read-only ("the harness, visible", step 2); §9.3's Models
-panel on it is step 7. The plan is
+and the specs ("the harness, visible", step 2), and its *Run now*
+queues a run with `trigger=ui` for the dispatcher to perform (step 3 —
+a person asks through `run_queue` like every other trigger, §7.2,
+invariant 28); §9.3's Models panel on it is step 7. The plan is
 archived at [`../../rollout/archive/2026-11-15-stage-2-harness.md`](../../rollout/archive/2026-11-15-stage-2-harness.md).
 **Code:** `candlegraph/harness/pipelines.py`,
 `events.py`, `queue.py`, `steps.py`, `params.py`, `errors.py`,

@@ -555,6 +555,19 @@ def manual_dedup_key(now: datetime) -> str:
     return f"manual:{now.astimezone(UTC).isoformat()}:{uuid.uuid4().hex[:8]}"
 
 
+def ui_dedup_key(now: datetime) -> str:
+    """The key for a *Run now* click: one run per pipeline per minute.
+
+    Deliberately not :func:`manual_dedup_key`. A browser double-click, a
+    second tab, or Streamlit re-running a callback is not a person asking
+    twice, and each would otherwise start another full pipeline. A minute is
+    long enough to absorb those and short enough that a deliberate second run
+    is only a minute away. The pipeline name is part of the queue's unique
+    key already, so clicking two different pipelines in one minute runs both.
+    """
+    return f"ui:{now.astimezone(UTC):%Y-%m-%dT%H:%M}"
+
+
 class PipelineCycleError(ValueError):
     """Two or more specs would trigger each other for ever.
 

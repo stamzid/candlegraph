@@ -27,6 +27,7 @@ from candlegraph.strategies.backtest import BacktestConfig
 from candlegraph.strategies.bollinger import BollingerConfig
 from candlegraph.ui.viewmodels import (
     PIPELINE_RUNS_PER_PIPELINE,
+    STALE_QUEUE_FACTOR,
     Preferences,
     ViewError,
     age_text,
@@ -51,6 +52,7 @@ from candlegraph.ui.viewmodels import (
     default_portfolio_symbols,
     describe_trigger,
     duration_text,
+    estimate_pipeline_spend,
     fill_overlay,
     forecast_frame,
     format_metric,
@@ -61,6 +63,8 @@ from candlegraph.ui.viewmodels import (
     method_catalogue,
     observed_gaps,
     range_lane_segments,
+    request_finished,
+    request_pipeline_run,
     run_backfill,
     run_fill_refresh_now,
     run_news_fetch_now,
@@ -1939,3 +1943,180 @@ def test_a_schedule_trigger_says_it_stands_down_when_something_else_asked() -> N
     trigger = Trigger(schedule=ScheduleTrigger(every=7200))
 
     assert describe_trigger(trigger).startswith("every 2h")
+
+
+# --- asking for a run (rollout "the harness, visible", step 3) ------------------
+
+
+def enqueued_row(pipeline: str = "hourly", key: str = "ui:2026-11-19T12:00") -> dict[str, Any]:
+    """What `enqueue_run ... RETURNING *` gives back for a new row."""
+    return {
+        "id": 41,
+        "pipeline": pipeline,
+        "version": 1,
+        "dedup_key": key,
+        "trigger": "ui",
+        "cause_run_id": None,
+        "state": "queued",
+        "attempts": 0,
+        "available_at": NOW,
+        "created_at": NOW,
+    }
+
+
+def test_run_now_queues_one_row_with_trigger_ui_and_the_specs_version() -> None:
+    db = FakeDatabase(enqueue_run=[enqueued_row()])
+
+    request = request_pipeline_run(db, committed_specs_settings(), "hourly", now=NOW)
+
+    assert request.queued and request.entry is not None and request.entry.id == 41
+    assert request.dedup_key == "ui:2026-11-19T12:00"
+    [(label, params)] = db.executed
+    assert label == "enqueue_run"
+    assert params is not None
+    assert params["trigger"] == "ui" and params["pipeline"] == "hourly" and params["version"] == 1
+    assert params["dedup_key"] == "ui:2026-11-19T12:00" and params["cause_run_id"] is None
+
+
+def test_run_now_only_inserts_and_never_runs_claims_or_locks_anything() -> None:
+    """Invariant 28: the UI asks, the dispatcher performs. The fake has no
+    `connection()`, so taking the pipeline's advisory lock would raise here;
+    and no run or claim statement may appear among what it was handed."""
+    db = FakeDatabase(enqueue_run=[enqueued_row()])
+
+    request_pipeline_run(db, committed_specs_settings(), "hourly", now=NOW)
+
+    touched = {label for label, _ in db.executed} | {label for label, _ in db.fetches}
+    assert touched == {"enqueue_run"}
+
+
+def test_a_second_click_in_the_same_minute_queues_nothing_new() -> None:
+    """The real unique index answers with no row; that is a duplicate, not an error."""
+    db = FakeDatabase(enqueue_run=[])
+
+    request = request_pipeline_run(db, committed_specs_settings(), "hourly", now=NOW)
+
+    assert not request.queued
+    assert request.dedup_key == "ui:2026-11-19T12:00"
+
+
+def test_run_now_is_refused_when_nothing_would_claim_the_row() -> None:
+    db = FakeDatabase(enqueue_run=[enqueued_row()])
+
+    with pytest.raises(ViewError, match="EVENT_POLL_INTERVAL=0"):
+        request_pipeline_run(db, committed_specs_settings(event_poll_interval=0), "hourly", now=NOW)
+    assert db.executed == []
+
+
+def test_run_now_is_refused_while_the_specs_disagree(tmp_path: Any) -> None:
+    """With a loop in the set the dispatcher runs none of them, so a queued
+    row would only fail later with "no spec named ..."."""
+    for name, other in (("ping", "pong"), ("pong", "ping")):
+        (tmp_path / f"{name}.yaml").write_text(
+            f"name: {name}\ntriggers:\n  - event: {{ job: {other} }}\nsteps:\n  - id: o\n    job: observer\n",
+            encoding="utf-8",
+        )
+    db = FakeDatabase(enqueue_run=[enqueued_row("ping")])
+
+    with pytest.raises(ViewError, match="disagree"):
+        request_pipeline_run(db, make_settings(pipelines_dir=str(tmp_path)), "ping", now=NOW)
+    assert db.executed == []
+
+
+def test_run_now_is_refused_for_a_spec_the_loader_refuses(tmp_path: Any) -> None:
+    (tmp_path / "broken.yaml").write_text("name: broken\nsteps:\n  - id: x\n    job: no_such_job\n")
+    db = FakeDatabase()
+
+    with pytest.raises(ViewError, match="no_such_job"):
+        request_pipeline_run(db, make_settings(pipelines_dir=str(tmp_path)), "broken", now=NOW)
+    assert db.executed == []
+
+
+def test_run_now_is_refused_for_a_pipeline_that_does_not_exist() -> None:
+    db = FakeDatabase()
+
+    with pytest.raises(ViewError, match="no spec by that name"):
+        request_pipeline_run(db, committed_specs_settings(), "nope", now=NOW)
+    assert db.executed == []
+
+
+def test_only_the_pipeline_with_a_metered_step_asks_for_confirmation() -> None:
+    view = build_pipelines_view(FakeDatabase(), committed_specs_settings(), now=NOW)
+
+    spends = {card.name: card.spends for card in view.specs}
+    assert spends == {"daily": True, "example": False, "hourly": False}
+
+
+def test_the_spend_estimate_counts_only_tokens_not_searched_today() -> None:
+    db = FakeDatabase(cached_search_exists=[{"hits": 0}], source_spend=[{"month": 12, "today": 2}])
+
+    estimate = estimate_pipeline_spend(db, committed_specs_settings(), now=NOW)
+
+    assert estimate.tokens and estimate.uncached == estimate.tokens
+    assert estimate.credits_at_most == len(estimate.tokens)
+    assert (estimate.spent_month, estimate.spent_today) == (12, 2)
+
+
+def test_a_day_already_searched_costs_nothing_to_queue_again() -> None:
+    db = FakeDatabase(cached_search_exists=[{"hits": 1}])
+
+    estimate = estimate_pipeline_spend(db, committed_specs_settings(), now=NOW)
+
+    assert estimate.uncached == () and estimate.credits_at_most == 0
+
+
+def test_the_spend_estimate_writes_nothing() -> None:
+    db = FakeDatabase(cached_search_exists=[{"hits": 0}])
+
+    estimate_pipeline_spend(db, committed_specs_settings(), now=NOW)
+
+    assert db.executed == [] and db.upserts == []
+
+
+def test_a_requested_runs_state_is_found_by_pipeline_and_key() -> None:
+    db = FakeDatabase(get_queue=[queue_row(1, "claimed", dedup_key="ui:2026-11-19T11:59")])
+
+    view = build_pipelines_view(db, committed_specs_settings(), now=NOW)
+
+    assert view.state_of("hourly", "ui:2026-11-19T11:59") == "claimed"
+    assert view.state_of("daily", "ui:2026-11-19T11:59") is None
+
+
+@pytest.mark.parametrize(
+    ("state", "finished"),
+    [("queued", False), ("claimed", False), ("done", True), ("dead", True), (None, True)],
+)
+def test_watching_stops_once_the_run_is_done_dead_or_gone(state: str | None, finished: bool) -> None:
+    assert request_finished(state) is finished
+
+
+def test_a_row_nothing_has_claimed_for_several_ticks_is_flagged() -> None:
+    """The page cannot see the agents process; a long-claimable row is the symptom."""
+    old = queue_row(1, "queued")
+    old["available_at"] = NOW - timedelta(seconds=60 * (STALE_QUEUE_FACTOR + 1))
+    fresh = queue_row(2, "queued")
+    fresh["available_at"] = NOW - timedelta(seconds=30)
+    claimed = queue_row(3, "claimed")
+    claimed["available_at"] = NOW - timedelta(hours=1)
+    db = FakeDatabase(get_queue=[old, fresh, claimed])
+
+    view = build_pipelines_view(db, committed_specs_settings(event_poll_interval=60), now=NOW)
+
+    assert [(pipeline, key) for pipeline, key, _ in view.unclaimed] == [("hourly", old["dedup_key"])]
+
+
+def test_nothing_is_flagged_as_unclaimed_when_the_dispatcher_is_off() -> None:
+    """Then the warning that it is off is the right message, not this one."""
+    old = queue_row(1, "queued")
+    old["available_at"] = NOW - timedelta(days=1)
+    db = FakeDatabase(get_queue=[old])
+
+    view = build_pipelines_view(db, committed_specs_settings(event_poll_interval=0), now=NOW)
+
+    assert view.unclaimed == ()
+
+
+def test_run_now_may_be_used_when_the_dispatcher_is_on_and_the_specs_agree() -> None:
+    view = build_pipelines_view(FakeDatabase(), committed_specs_settings(), now=NOW)
+
+    assert view.request_refusal is None
