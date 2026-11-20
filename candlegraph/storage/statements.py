@@ -1033,6 +1033,13 @@ def statements_for(schema: str) -> Statements:
 
     # The queue holds work, not history: a finished row is a completed
     # instruction and the record of what happened is in `run`.
+    #
+    # Note what this does *not* reach, found at the step 4.1 closeout and
+    # left as it is until someone decides: the `'dead'` half can never
+    # match. The only path to `dead` is the lease reaper, which does not
+    # set `finished_at`, and `NULL < timestamp` is never true — so dead
+    # rows are kept for ever. That suits "a dead row needs a person", but
+    # the clause and the behaviour disagree. See docs/backlog/ `A7`.
     prune_done_queue_rows = sql.SQL(
         """
         DELETE FROM {ns}.run_queue

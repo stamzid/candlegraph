@@ -621,8 +621,8 @@ dashboard opens with a metric strip, and every chart carries a title that says w
 - **Pipelines** — the harness, on screen: the newest run of each pipeline with a
   strip of its steps (a skipped step is shown, not hidden), where each run came from (`event`
   runs name the ingest that caused them), the work queue with every row's dedup key — and every
-  `dead` row still held (each needs a person; the dispatcher deletes them with the done rows after
-  `QUEUE_RETENTION_DAYS`) — whether the dispatcher is running, and each
+  `dead` row (each needs a person, and dead rows are never pruned, so they stay until someone
+  acts) — whether the dispatcher is running, and each
   committed spec as the loader read it. A spec the loader refuses is drawn as a card with its
   file and line, and the rest of the page still renders. Each spec has a **Run now** button that
   *asks* for a run rather than performing one: it adds a queue row with trigger `ui`, the
@@ -807,6 +807,11 @@ schedules a person can change, and a model picker — proposed in
 
 [`docs/roadmap/DESIGN.md`](docs/roadmap/DESIGN.md) has the reasoning, the
 diagram, and each stage's exit criterion.
+
+What is knowingly missing is written down too:
+[`docs/backlog/DESIGN.md`](docs/backlog/DESIGN.md) lists every deferred decision and known
+gap with the trigger that should pull it in — and the behaviours that look like bugs and are
+not, such as a thin token sitting below the coverage threshold on purpose.
 
 ## Contributing
 

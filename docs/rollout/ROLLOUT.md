@@ -1,6 +1,6 @@
 # Rollout: the harness, visible — operating candlegraph from the UI
 
-**Status:** current — planned 2026-11-19; steps 1–4 done, step 5 next. Eight steps.
+**Status:** current — planned 2026-11-19; steps 1–4 and the 4.1 closeout done, step 5 next. Eight steps plus one interim closeout.
 **Where it sits:** a follow-on to stage 2, not a new roadmap stage. It
 numbers nothing: the roadmap's next *stage* is still 3 (traditional
 markets), and this plan is what makes stage 2 usable by a person before
@@ -73,6 +73,7 @@ fixed.
 | 2 | The Pipelines page, read-only | M | 1 | done 2026-11-19 |
 | 3 | Start a pipeline from the page (enqueue, never execute) | M | 2 | done 2026-11-19 |
 | 4 | The `run` prune job | S | — | done 2026-11-20 (with an unplanned start-up guard first) |
+| 4.1 | Interim closeout: the pipeline work concluded, gaps consolidated, orientation written | S | 1–4 | done 2026-11-20 |
 | 5 | The budget manager | M | — | todo |
 | 6 | Give `daily.yaml` a schedule | S | 5 | todo |
 | 7 | The chat-model seam and the per-step model picker | L | 2 | todo |
@@ -457,20 +458,66 @@ waiting to be told whether to recreate it.
   "retention_days": 30}` — a lone old run and a pipeline with its two
   steps — and kept the family with a `running` step and the recent run.
 - **Corrected while here:** step 2's README line said dead queue rows
-  stay visible "however old"; the dispatcher deletes dead rows with done
-  ones after `QUEUE_RETENTION_DAYS`. The docs now say so.
+  stay visible "however old", which I corrected to say they are pruned
+  after `QUEUE_RETENTION_DAYS`. **That correction was itself wrong**, and
+  step 4.1 found it: the only path to `dead` is the lease reaper, which
+  never sets `finished_at`, and the prune matches on `finished_at`. Dead
+  rows are never deleted. The original "however old" was right; the docs
+  now say *why*, and the statement's unreachable `'dead'` clause is
+  backlog `A7`.
 
 **Found, not fixed:**
 
 | | |
 |---|---|
-| Dead queue rows are deleted after `QUEUE_RETENTION_DAYS` (7) | A row that "needs a person" disappears in a week whether or not anyone looked. Pre-existing (stage 2); worth keeping dead rows until acknowledged |
+| ~~Dead queue rows are deleted after `QUEUE_RETENTION_DAYS` (7)~~ — **wrong, see above**: they are never deleted | The real finding is that `prune_done_queue_rows` names `'dead'` in a clause that cannot match it. Backlog `A7` |
 | A family stuck `running` is never pruned | Correct to keep, but nothing ever closes it: the queue has a reaper for leases, the ledgers have none for a process that died mid-run |
 | No `candlegraph prune [--dry-run]` | The only way to prune on demand is restarting the agents container. And `RUN_RETENTION_DAYS=1` is accepted and would delete almost everything at the next run |
 | A pipeline started by another pipeline is pruned with its cause, as if it were a step; its own steps wait for the next day | The same owned-versus-caused ambiguity as step 2's display bug; latent, no spec triggers on another pipeline |
 | The guard runs only through `make` | A raw `docker compose up` from the wrong checkout is not checked |
 | The draft check sees uncommitted files only | A draft committed and then amended or rebased under a new id is not caught |
 | A volume whose containers are gone has no recorded owner | Declined in the post-mortem, with the reason; `make stacks` lists such volumes as unattributable |
+
+---
+
+## Step 4.1 — Interim closeout of the pipeline work
+
+Not in the original eight. Steps 1–4 finished everything this plan had to
+say about **pipelines**; steps 5–7 are credits, a schedule and models. So
+the pipeline work is concluded here rather than carried half-remembered
+into the budget manager, and the loose ends from four steps are put in one
+place.
+
+**Goal.** Someone picking this up cold can find what pipelines do, how to
+operate them, and what is knowingly missing, without reading four step
+outcomes and three designs.
+
+**Outcome.** Done 2026-11-20.
+
+- **One register for everything flagged:** [`../backlog/DESIGN.md`](../backlog/DESIGN.md).
+  Twenty-seven entries with stable ids (`A1`…`D2`), each with the trigger
+  that should pull it in and where it was found, gathered from steps 2, 3
+  and 4's *Found, not fixed* tables, the pipelines design §15, the
+  2026-11-16 audit's nine open findings, the stage 2 archive and the
+  2026-11-20 post-mortem. It also records **accepted behaviours** — the
+  cold-start CRITICAL, GNO's coverage, a losing backtest — so they stop
+  being rediscovered as bugs, and what has closed since.
+- **A skill for operating pipelines**, `run-pipelines`: run one, watch the
+  queue, read a family, find out why one did not run, and the half-dozen
+  things that look broken and are not. `add-pipeline` stays the authoring
+  procedure and now points at it.
+- **A skill for arriving cold**, `orient`: the system in one page, the
+  five commands that answer most questions, where to look for what, and
+  the traps that cost a session. Written for a new session, which is how
+  this repository is usually picked up.
+- `AGENTS.md`, `CLAUDE.md` and `docs/README.md` updated: the backlog and
+  the two skills are listed where someone would look for them.
+- No code changed: `make check` **2081 passed**, 11 skipped (e2e).
+
+**What is deliberately still open.** Everything in the backlog. The
+nearest ones to this plan: `A3` (a queued run cannot be withdrawn) and
+`B1` (`SPENDING_JOBS` is hand-kept) both want attention **before step 6**
+schedules a pipeline that spends money.
 
 ---
 

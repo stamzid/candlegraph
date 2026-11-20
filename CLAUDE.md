@@ -10,6 +10,8 @@ definition of done. This file adds only what is specific to Claude Code.
 `.claude/skills/` has the repeatable procedures. Prefer invoking one over
 reconstructing the steps:
 
+- `orient` — **start here in a new session.** The system, the state of the
+  work, the five commands that answer most questions, and the traps.
 - `run-stack` — bring the stack up, check health, read logs, tear down.
 - `add-token` — add a token to `config/tokens.yaml` and verify it ingests.
 - `add-migration` — create, apply, and verify an Alembic revision.
@@ -21,6 +23,8 @@ reconstructing the steps:
 - `add-agent` — add a new LangGraph graph that follows the framework.
 - `add-pipeline` — add a pipeline spec, or a job that can be a step in
   one, without breaking the loader's rules.
+- `run-pipelines` — run one, watch the queue and the dispatcher, read a
+  run and its steps, and work out why a pipeline did not run.
 - `release-check` — the full pre-merge gate.
 - `extend-knowledge-graph` — stage 1, built: how to add a source, an
   entity, a retriever, or an MCP tool without reversing a decision.
@@ -31,6 +35,9 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
 - `docs/overview/` — the whole stack on one page: what it is for, the
   processes, an hour from ingest to a cited signal, who writes what. Read
   this first if you are new to the repository.
+- `docs/backlog/` — every known gap, deferred decision and accepted
+  oddity, with stable ids (`A1`…`D2`). Check it before calling something
+  a bug, and strike an id in the same change that closes it.
 - `docs/roadmap/` — delivered stages, next stages, exit criteria. Read this
   before proposing new work; the order is reasoned, not arbitrary.
 - `docs/storage/timescaledb/`, `docs/storage/table-placement/` — read before
@@ -49,7 +56,8 @@ topic, with a `DESIGN.md` inside and a flowchart in most of them:
   finished ones are archived under `docs/rollout/archive/`. Five are
   archived (stages 1, 0, 6 and 2, and the harness pre-work). **The
   current rollout is "the harness, visible"** (planned 2026-11-19; steps
-  1–4 done, step 5 — the budget manager — next): eight steps putting stage 2's harness on
+  1–4 and the 4.1 pipeline closeout done, step 5 — the budget manager —
+  next): eight steps putting stage 2's harness on
   screen. *Run now* on the Pipelines page enqueues and never executes:
   keep it that way — the UI process must not call `run_pipeline` or take
   the pipeline advisory lock. Stage 2's

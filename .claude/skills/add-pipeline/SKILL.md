@@ -6,7 +6,8 @@ description: Add a candlegraph pipeline spec (pipelines/*.yaml), or make a job u
 # Add a pipeline, or a step
 
 Read `docs/harness/pipelines/DESIGN.md` §5 (the spec and its rules) and
-§6.2 (the contract every step meets) first. `pipelines/hourly.yaml` is the
+§6.2 (the contract every step meets) first. To *run* and diagnose
+pipelines rather than write one, use the `run-pipelines` skill. `pipelines/hourly.yaml` is the
 reference spec; its comments explain each choice. Invariants 21, 27, 28 and
 29 are the ones a pipeline can break.
 

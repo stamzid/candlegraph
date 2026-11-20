@@ -181,6 +181,7 @@ config/tokens.yaml   The tokens this deployment tracks, with their knowledge-lay
 pipelines/*.yaml     Pipeline specs: reviewed definitions that ship in the image. `make check-pipelines` validates them.
 docs/<area>/<topic>/DESIGN.md   Design documents. Why, not how; `docs/README.md` indexes them.
   overview/          The whole stack on one page: purpose, processes, an hour end to end, who writes what. Start here.
+  backlog/           Known gaps, deferred work and accepted behaviours, with stable ids. Where a flagged limitation goes.
   roadmap/           Delivered stages, next stages, and each exit criterion.
   storage/           TimescaleDB adoption, which tables are hypertables, and how pgvector coexists.
   analytics/         The statistics and models with their equations; risk management and the rate seam.
@@ -439,7 +440,10 @@ unfalsifiable.
 rather than a new stage; **steps 1–4 done** (2026-11-19/20: ports bind to
 loopback via `BIND_HOST`, the Docker-less skip, the Pipelines page, its
 *Run now*, which queues a `trigger=ui` row and never runs anything itself,
-and the `prune` job). The plan is `docs/rollout/ROLLOUT.md`:
+and the `prune` job), and **step 4.1 concluded the pipeline work**:
+the gaps flagged along the way are consolidated in `docs/backlog/`, and
+two skills were added — `run-pipelines` (operate them) and `orient` (get
+up to speed in a new session). The plan is `docs/rollout/ROLLOUT.md`:
 ports on loopback and a test that skips without Docker; a read-only
 Pipelines dashboard page; a **Run now** button that *enqueues* (invariant
 28 — the UI asks for a run, it never performs one); the `run` prune job

@@ -26,6 +26,7 @@ it. Between stages there is no current rollout, and `ROLLOUT.md` says so.
 | Document | Status | Covers |
 |---|---|---|
 | [`overview/`](overview/DESIGN.md) | living | **Start here.** The whole stack on one page: what it is for, the six containers and who may write what, an hour from ingest to a cited signal, where to look when something is wrong, the honest limits, and where it is going. |
+| [`backlog/`](backlog/DESIGN.md) | living | Every known gap, deferred decision and accepted oddity, with stable ids and the trigger that should pull each one in — gathered from the rollout steps' *Found, not fixed* tables, the audit, the designs' deferrals and the post-mortems. Not the plan; an entry moves into the rollout when it is scheduled. |
 | [`roadmap/`](roadmap/DESIGN.md) | living | What has been delivered, what comes next, and the exit criterion for each stage. |
 | [`storage/timescaledb/`](storage/timescaledb/DESIGN.md) | implemented | Adopting the TimescaleDB extension: the image, the migration, the policies deliberately left off, and the `token_daily` continuous aggregate with the measurements that decided its scope. |
 | [`storage/table-placement/`](storage/table-placement/DESIGN.md) | implemented | Which tables are hypertables and which stay plain, with the rule for deciding the next one. |
